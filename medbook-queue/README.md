@@ -357,4 +357,8 @@ Then open:
 
 ```text
 http://localhost:4200
+
+
 ```
+
+ALSO NOTE THAT DO NOT FORGET T0O MAKE A .env FROM THE .env.example,, ALL YOU NEED IS TO JUST CREATE A NEW FILE NAMED .env AND COPY THE CONTENTS OF THE .env.example AS IT IS
