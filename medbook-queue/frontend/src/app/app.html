@@ -1,0 +1,85 @@
+<div class="container">
+  <h1>Medbook Service Centre</h1>
+
+  <!-- Error Notification -->
+  <div class="alert alert-error" *ngIf="errorMessage">
+    {{ errorMessage }}
+  </div>
+
+  <!-- Active Session Control -->
+  <div class="card currently-serving" *ngIf="currentlyServing">
+    <h2>Currently Serving</h2>
+    <p><strong>{{ currentlyServing.name }}</strong> ({{ currentlyServing.service_required }})</p>
+    <p>Priority: <strong>{{ currentlyServing.effective_priority }}</strong></p>
+    <button (click)="completeService(currentlyServing.id)">Complete Service</button>
+  </div>
+
+  <!-- Next Customer Control -->
+  <div class="card next-customer" *ngIf="nextCustomer && !currentlyServing">
+    <h2>Next to Serve</h2>
+    <p><strong>{{ nextCustomer.name }}</strong> ({{ nextCustomer.service_required }})</p>
+    <p>Priority: <strong>{{ nextCustomer.effective_priority }}</strong></p>
+    <button (click)="serveNextCustomer()">Call Next Customer</button>
+  </div>
+
+  <!-- Empty Queue Placeholder -->
+  <div class="card" *ngIf="!nextCustomer && !currentlyServing">
+    <h2>Next to Serve</h2>
+    <p>The queue is currently empty.</p>
+  </div>
+
+  <!-- Customer Entry Form -->
+  <div class="card">
+    <h2>Add Customer</h2>
+    <form [formGroup]="customerForm" (ngSubmit)="onSubmit()">
+      <div class="form-group">
+        <label>Name</label>
+        <input type="text" formControlName="name" required placeholder="Customer Name">
+      </div>
+      <div class="form-group">
+        <label>Service Required</label>
+        <input type="text" formControlName="service_required" required placeholder="Service Required">
+      </div>
+      <div class="form-group">
+        <label>Arrival Time</label>
+        <input type="datetime-local" formControlName="original_arrival_time" required>
+      </div>
+      <div class="form-group">
+        <label>Priority</label>
+        <select formControlName="original_priority">
+          <option *ngFor="let p of priorities" [value]="p">{{ p }}</option>
+        </select>
+      </div>
+      <button type="submit" [disabled]="customerForm.invalid">Add to Queue</button>
+    </form>
+  </div>
+
+  <!-- Waiting Table -->
+  <div class="card">
+    <h2>Waiting Queue</h2>
+    <table *ngIf="queue && queue.length > 0">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Original Priority</th>
+          <th>Effective Priority</th>
+          <th>Waiting Time (mins)</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr *ngFor="let customer of queue">
+          <td>{{ customer.name }}</td>
+          <td>{{ customer.original_priority }}</td>
+          <td><strong>{{ customer.effective_priority }}</strong></td>
+          <td>{{ customer.waiting_minutes ? (customer.waiting_minutes | number:'1.0-0') : 0 }}</td>
+          <td>
+            <button (click)="updateStatus(customer.id, 'Being Served')" [disabled]="!!currentlyServing">Serve</button>
+            <button class="btn-danger" (click)="updateStatus(customer.id, 'Cancelled')">Cancel</button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <p *ngIf="!queue || queue.length === 0">No customers waiting.</p>
+  </div>
+</div>
