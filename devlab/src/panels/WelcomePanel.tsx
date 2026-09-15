@@ -7,8 +7,8 @@ import {
 } from "lucide-react";
 
 const stats = [
-  { label: "Migration phase", value: "1 / 7" },
-  { label: "Native capabilities", value: "1" },
+  { label: "Migration phase", value: "2 / 7" },
+  { label: "Native capabilities", value: "2" },
   { label: "Simulations enabled", value: "0" },
   { label: "License", value: "MIT" },
 ];
@@ -16,14 +16,14 @@ const stats = [
 const quickCards: { view: ViewId; Icon: typeof Bot; title: string; desc: string; hot?: boolean }[] = [
   { view: "canvas",   Icon: PenTool,      title: "Sketch → Source",      desc: "Draw an architecture and generate a reviewable code preview", hot: true },
   { view: "healer",   Icon: Stethoscope,  title: "Self-Healing Tests",   desc: "Native test runner milestone — simulated results are disabled" },
-  { view: "builder",  Icon: Wand2,        title: "Project Builder",      desc: "Phase 2 will write generated projects to a scoped workspace" },
+  { view: "builder",  Icon: Wand2,        title: "Project Builder",      desc: "Reviewed multi-file workspace generation is a later milestone" },
   { view: "vision",   Icon: ScanLine,     title: "Screenshot → Source",  desc: "Use Gemini vision to generate a reviewable React preview" },
-  { view: "editor",   Icon: Code2,        title: "Workspace Editor",     desc: "Phase 2 will connect Monaco to real files with explicit scope" },
+  { view: "editor",   Icon: Code2,        title: "Native Workspace",     desc: "Select a real folder and safely edit its files with Monaco" },
   { view: "live",     Icon: Radio,        title: "Live Share",           desc: "Zero-server P2P collaboration with a short invite" },
 ];
 
 const features = [
-  { Icon: PenTool,    title: "Sketch-to-code architecture", desc: "Draw a system on an infinite canvas and ask Gemini to produce reviewable source. Writing to disk remains disabled until workspace access lands." },
+  { Icon: PenTool,    title: "Sketch-to-code architecture", desc: "Draw a system on an infinite canvas and ask Gemini to produce reviewable source. AI output is never written to your workspace without a separate reviewed action." },
   { Icon: Stethoscope,title: "Native self-healing roadmap", desc: "The old simulated re-run is disabled. A native test runner will execute the real command, apply reviewed patches and verify the actual result." },
   { Icon: ScanLine,   title: "Reverse-engineer interfaces", desc: "Paste a screenshot or URL. Gemini vision extracts visual details and generates source for you to review without pretending it has been built or run." },
   { Icon: Radio,      title: "Zero-server live sharing",    desc: "BroadcastChannel and WebRTC provide real peer-to-peer sharing for the current in-app scratch data without a collaboration server." },
@@ -48,7 +48,7 @@ export function WelcomePanel({
         <div className="relative mx-auto max-w-5xl px-8 py-16">
           <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-300">
             <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-pulse" />
-            Phase 1 · Tauri native foundation
+            Phase 2 · real scoped workspaces
           </div>
           <h1 className="mt-5 max-w-3xl text-5xl font-bold tracking-tight text-white sm:text-6xl text-balance">
             Native shell.{" "}
@@ -56,17 +56,17 @@ export function WelcomePanel({
             <br />No simulated success.
           </h1>
           <p className="mt-5 max-w-2xl text-lg text-zinc-400 text-pretty">
-            DevLab is moving every system-level feature behind a trusted Tauri and Rust core.
-            Phase 1 provides the native shell and typed runtime handshake; unavailable tools stay
-            visibly disabled until their real backends are ready.
+            DevLab now connects Monaco to real files through a canonical, memory-scoped Rust
+            workspace service. Unavailable system tools stay visibly disabled until their own
+            native backends are implemented and verified.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <button
-              onClick={() => onNavigate("builder")}
+              onClick={() => onNavigate("editor")}
               className="group inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-cyan-900/30 transition hover:from-cyan-400 hover:to-blue-500"
             >
               <Wand2 className="h-4 w-4" />
-              View the workspace milestone
+              Open a native workspace
               <ArrowRight className="h-4 w-4 transition group-hover:translate-x-0.5" />
             </button>
             {!hasKey && (

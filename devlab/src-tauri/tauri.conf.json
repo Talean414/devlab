@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "DevLab",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "identifier": "io.github.talean414.devlab",
   "build": {
     "frontendDist": "../dist",
@@ -24,6 +24,7 @@
       }
     ],
     "security": {
+      "capabilities": ["main-window"],
       "csp": "default-src 'self' customprotocol: asset:; connect-src 'self' ipc: http://ipc.localhost https: http: ws: wss:; img-src 'self' asset: http://asset.localhost blob: data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; worker-src 'self' blob:"
     }
   },

@@ -1,7 +1,7 @@
 {
   "name": "devlab",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "A native, AI-assisted developer control plane built with Tauri and React.",
   "type": "module",
   "engines": {
@@ -12,6 +12,7 @@
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
     "native:check": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "native:test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "typecheck": "tsc --noEmit",
     "build": "vite build",
     "check": "npm run typecheck && npm run build",

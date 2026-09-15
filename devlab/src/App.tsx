@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { ViewId } from "./types";
+import type { VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import { loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
 import {
@@ -17,6 +17,7 @@ import { KeyModal } from "./components/KeyModal";
 import { WelcomePanel } from "./panels/WelcomePanel";
 import { AgentPanel } from "./panels/AgentPanel";
 import { CanvasPanel } from "./panels/CanvasPanel";
+import { EditorPanel } from "./panels/EditorPanel";
 import { MigratePanel } from "./panels/MigratePanel";
 import { VisionPanel } from "./panels/VisionPanel";
 import { LiveSharePanel } from "./panels/LiveSharePanel";
@@ -60,10 +61,22 @@ export default function App() {
   const [firstRun, setFirstRun] = useState(false);
   const [time, setTime] = useState("");
   const [runtime, setRuntime] = useState(WEB_RUNTIME);
+  const [editorDirty, setEditorDirty] = useState(false);
+  const [generatedDrafts, setGeneratedDrafts] = useState<VFile[]>([]);
 
   const hasKey = !!getApiKey();
   const model = getPicked() || getModel();
   const theme = getTheme(settings.theme);
+
+  function navigate(next: ViewId) {
+    if (
+      view === "editor"
+      && next !== "editor"
+      && editorDirty
+      && !confirm("Leave the workspace editor and discard unsaved changes?")
+    ) return;
+    setView(next);
+  }
 
   useEffect(() => { applyTheme(settings); }, [settings]);
 
@@ -96,11 +109,11 @@ export default function App() {
         "5": "git", "6": "deploy", ",": "settings",
       };
       const t = map[e.key];
-      if (t) { e.preventDefault(); setView(t); }
+      if (t) { e.preventDefault(); navigate(t); }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [view, editorDirty]);
 
   const refreshKey = () => setKeyVersion((v) => v + 1);
   const refreshSettings = () => setSettings(loadSettings());
@@ -123,25 +136,39 @@ export default function App() {
   }
 
   function render() {
-    const openGeneratedSource = () => setView("editor");
+    const openGeneratedSource = (files: VFile[]) => {
+      if (files.length > 0) setGeneratedDrafts(files);
+      navigate("editor");
+    };
 
     switch (view) {
-      case "welcome":  return <WelcomePanel key={keyVersion} onNavigate={setView} hasKey={hasKey} />;
+      case "welcome":  return <WelcomePanel key={keyVersion} onNavigate={navigate} hasKey={hasKey} />;
       case "agent":    return <AgentPanel key={keyVersion} onNeedKey={() => setShowModal(true)} />;
       case "builder":  return nativeFeature(
-        "Project Builder", "filesystem", "Phase 2 · write generated projects to a scoped workspace",
+        "Project Builder", "agent-tools", "Phase 6 · reviewed multi-file writes through typed agent tools",
       );
       case "canvas":   return <CanvasPanel key={keyVersion} onOpenFiles={openGeneratedSource} />;
-      case "editor":   return nativeFeature(
-        "Workspace Editor", "filesystem", "Phase 2 · real scoped workspace and filesystem access",
-      );
+      case "editor": {
+        if (hasNativeCapability(runtime, "filesystem")) {
+          return <EditorPanel
+            incomingDrafts={generatedDrafts}
+            onDismissDrafts={() => setGeneratedDrafts([])}
+            onDirtyChange={setEditorDirty}
+          />;
+        }
+        return generatedDrafts.length > 0
+          ? <GeneratedDraftReview drafts={generatedDrafts} onDismiss={() => setGeneratedDrafts([])} />
+          : nativeFeature(
+            "Workspace Editor", "filesystem", "Phase 2 · real scoped workspace and filesystem access",
+          );
+      }
       case "healer":   return nativeFeature(
         "Self-Healing Tests", "test-runner", "Phase 6 · real test runner and patch loop",
       );
       case "migrate":  return <MigratePanel key={keyVersion} onOpenFiles={openGeneratedSource} />;
       case "vision":   return <VisionPanel key={keyVersion} onOpenFiles={openGeneratedSource} />;
       case "live":     return <LiveSharePanel />;
-      case "explorer": return <ExplorerPanel onAgentMode={() => setView("builder")} />;
+      case "explorer": return <ExplorerPanel onAgentMode={() => navigate("builder")} />;
       case "terminal": return nativeFeature(
         "Integrated Terminal", "pty", "Phase 3 · native PTY sessions",
       );
@@ -244,13 +271,13 @@ export default function App() {
             {nav.map((n) => (
               <NavButton key={n.id} item={n} active={view === n.id}
                 accent={theme.accent} tooltips={settings.showTooltips}
-                onClick={() => setView(n.id)} />
+                onClick={() => navigate(n.id)} />
             ))}
           </div>
           <NavButton
             item={{ id: "settings", icon: SettingsIcon, label: "Settings", shortcut: "⌘," }}
             active={view === "settings"} accent={theme.accent} tooltips={settings.showTooltips}
-            onClick={() => setView("settings")}
+            onClick={() => navigate("settings")}
           />
         </nav>
 
@@ -266,7 +293,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 1 foundation</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 2 workspaces</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}
@@ -274,7 +301,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-4">
             <span className="hidden font-mono md:inline">{model}</span>
-            <span className="font-mono">DevLab v1.1</span>
+            <span className="font-mono">DevLab v1.2</span>
           </div>
         </footer>
       )}
@@ -282,9 +309,61 @@ export default function App() {
       {showModal && (
         <KeyModal
           onClose={() => setShowModal(false)}
-          onSaved={() => { refreshKey(); setShowModal(false); setView("agent"); }}
+          onSaved={() => { refreshKey(); setShowModal(false); navigate("agent"); }}
         />
       )}
+    </div>
+  );
+}
+
+function GeneratedDraftReview({ drafts, onDismiss }: { drafts: VFile[]; onDismiss: () => void }) {
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const selected = drafts[selectedIndex] ?? drafts[0];
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="border-b border-white/5 bg-[#0e1117]/60 px-6 py-3.5">
+        <h2 className="text-sm font-semibold text-white">Generated Draft Review</h2>
+        <p className="mt-0.5 text-[12px] text-zinc-500">
+          In-memory source preview · native filesystem access is unavailable in this browser
+        </p>
+      </div>
+      <div className="flex min-h-0 flex-1">
+        <aside className="flex w-72 shrink-0 flex-col border-r border-white/5 bg-[#0d1017]/50">
+          <div className="border-b border-violet-500/20 bg-violet-500/[0.07] p-4 text-[11.5px] leading-relaxed text-violet-100/80">
+            Nothing was written to disk. Open DevLab with <span className="font-mono text-violet-200">npm run desktop:dev</span> to use a real scoped workspace.
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto p-2">
+            {drafts.map((draft, index) => (
+              <button
+                key={`${draft.path}-${index}`}
+                onClick={() => setSelectedIndex(index)}
+                className={`mb-1 w-full rounded-lg px-3 py-2 text-left font-mono text-[11px] transition ${
+                  selected === draft
+                    ? "bg-violet-500/15 text-violet-100"
+                    : "text-zinc-500 hover:bg-white/5 hover:text-zinc-300"
+                }`}
+              >
+                {draft.path}
+              </button>
+            ))}
+          </div>
+          <div className="border-t border-white/5 p-3">
+            <button onClick={onDismiss} className="w-full rounded-lg border border-rose-500/20 px-3 py-2 text-[11.5px] text-rose-300 hover:bg-rose-500/10">
+              Dismiss all drafts
+            </button>
+          </div>
+        </aside>
+        <section className="flex min-w-0 flex-1 flex-col">
+          <div className="border-b border-white/5 px-4 py-3">
+            <div className="truncate font-mono text-[12px] text-zinc-200">{selected?.path}</div>
+            <div className="mt-0.5 text-[10.5px] text-zinc-600">{selected?.language} · generated preview</div>
+          </div>
+          <pre className="min-h-0 flex-1 overflow-auto whitespace-pre p-5 font-mono text-[11.5px] leading-relaxed text-zinc-300">
+            {selected?.content}
+          </pre>
+        </section>
+      </div>
     </div>
   );
 }

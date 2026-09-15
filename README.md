@@ -6,9 +6,11 @@ DevLab is a native developer control plane built with **Tauri 2, Rust, React, Ty
 
 ## Native migration status
 
-Phase 1 is implemented: DevLab has a Tauri desktop shell, a typed Rust-to-React runtime handshake, a restricted capability manifest, native/web runtime detection, desktop build scripts and branded application icons.
+Phases 1 and 2 are implemented: DevLab has a Tauri desktop shell, typed Rust-to-React IPC, restricted capabilities, and a real scoped workspace service connected to Monaco.
 
-Simulated terminal, Git, Docker, database and test-runner results are now disabled. Those panels are re-enabled only after their real native backend is completed. The normal Vite server remains available strictly as a UI preview.
+A workspace can be granted only through the native folder picker. The Rust backend holds its canonical root in memory, rejects absolute paths and parent traversal, blocks symlink access, limits text I/O, watches native filesystem changes, and uses content revisions to prevent silent overwrites.
+
+Simulated terminal, Git, Docker, database, deployment, CI, toolchain, API-client and test-runner results remain disabled. Those panels are re-enabled only after their real native backend is completed. The normal Vite server remains available strictly as a UI preview.
 
 ## Current working features
 
@@ -16,12 +18,17 @@ Simulated terminal, Git, Docker, database and test-runner results are now disabl
 - Architecture-canvas-to-source generation
 - Screenshot and URL analysis
 - Natural-language migration generation
+- Native folder selection and memory-scoped workspace access
+- Real directory browsing and UTF-8 file editing with Monaco
+- Explicit file and empty-directory create, rename and delete operations
+- Review-only in-memory AI drafts that are never written automatically
+- Native filesystem change notifications and save-conflict detection
 - Project template and command references
 - BroadcastChannel/WebRTC collaboration primitives
 - Embedded web preview
 - WebView-local settings and credentials until secure native storage lands
 
-The native backends are being delivered in explicit phases: real workspaces, PTY terminal, Git and secure secrets, Docker/databases/native HTTP, agent tool execution, then signed distribution. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
+The remaining native backends are being delivered in explicit phases: PTY terminal next, then Git and secure secrets, Docker/databases/native HTTP, agent tool execution, and signed distribution. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
 
 ## Requirements
 
@@ -132,9 +139,10 @@ Run both frontend and native checks before packaging:
 ```bash
 npm run check
 npm run native:check
+npm run native:test
 ```
 
-The first command type-checks React and creates `devlab/dist/`; the second compiles and validates the Rust backend.
+The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary and revision tests.
 
 Build the native application and this operating system's installer formats:
 
@@ -209,11 +217,16 @@ Use this list before calling an installation complete:
 - [ ] `rustc --version` and `cargo --version` work
 - [ ] `npm run check` passes
 - [ ] `npm run native:check` passes
+- [ ] `npm run native:test` passes
 - [ ] `npm run desktop:dev` opens a desktop window
 - [ ] The header reports **Native**, not **Web preview**
+- [ ] Code Editor opens a folder only after the native picker is confirmed
+- [ ] A real UTF-8 file can be opened, changed and saved with `Ctrl/Cmd+S`
+- [ ] An external file change produces a **Changed on disk** warning
+- [ ] Parent traversal, symlinks, binary files and files over 2 MiB are rejected
 - [ ] Gemini key test says **Key valid**
 - [ ] AI Agent streams a response
-- [ ] Disabled native panels explicitly say **Simulation removed**
+- [ ] Unimplemented native panels explicitly say **Simulation removed**
 - [ ] `npm run desktop:build` creates the platform bundle
 
 ## Common problems
@@ -253,9 +266,9 @@ Check the host's build log and verify that the root/base directory is `devlab`, 
 
 Use the same browser profile and origin where the key was saved. Browser `localStorage` is separate between `localhost`, preview domains, production domains, normal windows, and private/incognito windows.
 
-### Generated source does not open in the editor
+### Generated source is not written to the workspace
 
-The real workspace editor is intentionally disabled until Phase 2. Canvas, migration and vision tools can produce source previews, but DevLab does not claim those previews were written to disk. Copy important output manually until scoped native filesystem access is implemented.
+Canvas, migration and vision tools produce source previews but do not automatically write AI output into the selected workspace. Open the native editor and explicitly create or update files after reviewing the generated source. A reviewed multi-file import flow will be added separately.
 
 ### Terminal, Git, Docker, database or test runner says “Simulation removed”
 
@@ -268,6 +281,7 @@ This is intentional—not an installation failure. The previous fabricated resul
 | `npm run desktop:dev` | Start Vite and open the native Tauri development app |
 | `npm run desktop:build` | Build the native app and platform bundles |
 | `npm run native:check` | Compile-check the Rust backend |
+| `npm run native:test` | Run native workspace boundary tests |
 | `npm run dev` | Start the interface-only browser preview |
 | `npm run typecheck` | Run TypeScript validation without emitting files |
 | `npm run build` | Create the optimized frontend assets |
@@ -285,7 +299,7 @@ devlab/
 │   ├── Cargo.toml
 │   ├── capabilities/       # default-deny native permission manifests
 │   ├── icons/              # generated desktop application icons
-│   ├── src/                # trusted Rust core
+│   ├── src/                # trusted Rust core and scoped workspace service
 │   └── tauri.conf.json
 └── src/
     ├── App.tsx
@@ -294,6 +308,7 @@ devlab/
     ├── lib/
     │   ├── gemini.ts       # BYOK Gemini client, retry, quota, fallback
     │   ├── native.ts       # typed native runtime bridge
+    │   ├── workspace.ts    # typed scoped-filesystem IPC client
     │   ├── settings.ts     # application settings
     │   └── sync.ts         # collaboration helpers
     └── panels/             # DevLab feature panels
@@ -303,9 +318,11 @@ devlab/
 
 - Never commit API keys or tokens.
 - Never use one shared Gemini key in a public frontend.
-- Keep the Tauri capability manifest default-deny.
+- Keep the Tauri capability manifest default-deny and allow each custom command explicitly.
 - Do not expose shell or filesystem primitives directly to the renderer.
-- Validate every path against the user-selected workspace.
+- Validate and canonicalize every path against the user-selected workspace.
+- Reject traversal and symbolic links at the native boundary; never rely on renderer validation.
+- Require revision matches before overwriting an existing file.
 - Rotate a key immediately if it is pasted into source code, an issue, a commit, or a public chat.
 - Treat WebView-local credentials as temporary until encrypted native storage is implemented.
 - Review generated commands and code before executing or deploying them.

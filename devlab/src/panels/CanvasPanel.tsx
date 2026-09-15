@@ -58,7 +58,7 @@ export function CanvasPanel({ onOpenFiles }: { onOpenFiles: (f: VFile[]) => void
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
-  const [, setBuilt] = useState<VFile[]>([]);
+  const [built, setBuilt] = useState<VFile[]>([]);
   const [genLog, setGenLog] = useState<string[]>([]);
   const svgRef = useRef<SVGSVGElement>(null);
   const nextId = useRef(1);
@@ -158,11 +158,11 @@ Rules: 6 to 12 files that form a coherent monorepo matching EVERY node in the di
         files: { path: string; description: string; language: string }[];
       };
       log(`Plan: ${plan.summary}`);
-      log(`Generating ${plan.files.length} files for "${plan.projectName}"…`);
+      log(`Generating ${plan.files.length} reviewable drafts for "${plan.projectName}"…`);
 
       const out: VFile[] = [];
       for (const f of plan.files) {
-        log(`  writing ${f.path}…`);
+        log(`  drafting ${f.path}…`);
         let content = "";
         const p = `Write the complete file \`${f.path}\` for the project "${plan.projectName}".\n\nSystem: ${plan.summary}\nArchitecture:\n${describe()}\n\nThis file's role: ${f.description}\n\nOutput ONLY raw file contents — no markdown fences or commentary. Keep it under 120 lines, production-quality, consistent with the other files in this monorepo.`;
         for await (const ch of streamChat([{ role: "user", text: p }])) content += ch;
@@ -173,7 +173,7 @@ Rules: 6 to 12 files that form a coherent monorepo matching EVERY node in the di
         });
         setBuilt([...out]);
       }
-      log(`✓ Done — ${out.length} files ready.`);
+      log(`✓ Done — ${out.length} in-memory drafts ready for review. Nothing was written to disk.`);
       setStatus("done");
       onOpenFiles(out);
     } catch (e) {
@@ -187,7 +187,7 @@ Rules: 6 to 12 files that form a coherent monorepo matching EVERY node in the di
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Architecture Canvas → Code"
-        subtitle="Draw your system and DevLab writes the monorepo — sketch-to-production nobody else ships"
+        subtitle="Draw your system and generate a reviewable monorepo draft without automatic filesystem writes"
         badge={nodes.length ? `${nodes.length} nodes · ${edges.length} links` : "Empty canvas"}
         badgeOk={nodes.length > 0}
       />
@@ -310,8 +310,8 @@ Rules: 6 to 12 files that form a coherent monorepo matching EVERY node in the di
             <div className="flex items-center gap-2 border-b border-white/5 px-4 py-3 text-[12px] font-semibold text-zinc-200">
               <Sparkles className="h-4 w-4 text-cyan-400" /> Build log
               {status === "done" && (
-                <button onClick={() => onOpenFiles([])} className="ml-auto inline-flex items-center gap-1 text-[11px] text-cyan-400 hover:underline">
-                  Open in editor <ArrowRight className="h-3 w-3" />
+                <button onClick={() => onOpenFiles(built)} className="ml-auto inline-flex items-center gap-1 text-[11px] text-cyan-400 hover:underline">
+                  Review drafts <ArrowRight className="h-3 w-3" />
                 </button>
               )}
             </div>

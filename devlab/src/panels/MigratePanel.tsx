@@ -107,7 +107,7 @@ Keep to the existing schema's conventions. Use snake_case columns in SQL. Escape
               {result && (
                 <button onClick={applyAll}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-[12.5px] font-semibold text-emerald-200 hover:bg-emerald-500/20">
-                  <ArrowRight className="h-3.5 w-3.5" /> Apply to editor
+                  <ArrowRight className="h-3.5 w-3.5" /> Review drafts
                 </button>
               )}
             </div>
@@ -127,8 +127,8 @@ Keep to the existing schema's conventions. Use snake_case columns in SQL. Escape
             <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-zinc-600">
               <FileDiff className="h-10 w-10" />
               <p className="max-w-xs text-[13px]">
-                Describe a schema change in plain English and DevLab writes the Prisma schema,
-                a production SQL migration and the API routes to go with it.
+                Describe a schema change in plain English and DevLab drafts a Prisma schema,
+                a production SQL migration and the API routes for you to review.
               </p>
             </div>
           )}

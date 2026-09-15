@@ -86,7 +86,7 @@ Rules: 3 to 6 files forming a working React + TypeScript + Tailwind clone. Repro
       ];
 
       for (const f of plan.files) {
-        pushLog(`  writing ${f.path}…`);
+        pushLog(`  drafting ${f.path}…`);
         const filePrompt = `${mode === "image" ? "Using the analyzed screenshot" : "Using the target page analysis"}, write the COMPLETE file \`${f.path}\`.\n\nDesign: ${plan.summary}\nPalette: ${plan.palette.join(", ")}\nTypography: ${plan.typography}\nComponents: ${plan.components.join(", ")}\nThis file's role: ${f.description}\n\nOutput ONLY raw file contents, no fences, no commentary. React + TypeScript + Tailwind, production-quality, under 150 lines.`;
         let content = "";
         for await (const ch of streamChat([{ role: "user", text: filePrompt }])) content += ch;
@@ -97,7 +97,7 @@ Rules: 3 to 6 files forming a working React + TypeScript + Tailwind clone. Repro
         });
       }
 
-      pushLog(`✓ Clone ready — ${out.length} files written.`);
+      pushLog(`✓ Clone ready — ${out.length} in-memory drafts. Nothing was written to disk.`);
       pushLog("OPENING_IN_EDITOR");
       onOpenFiles(out);
     } catch (e) {
@@ -187,7 +187,7 @@ Rules: 3 to 6 files forming a working React + TypeScript + Tailwind clone. Repro
                 <ScanLine className="h-10 w-10" />
                 <p className="max-w-xs text-[13px]">
                   Point DevLab at a screenshot or URL. It extracts the palette, typography and
-                  components, then scaffolds a working clone straight into the editor.
+                  components, then generates a reviewable in-memory clone without writing to disk.
                 </p>
               </div>
             ) : (
@@ -199,7 +199,7 @@ Rules: 3 to 6 files forming a working React + TypeScript + Tailwind clone. Repro
                     : l === "OPENING_IN_EDITOR" ? "text-cyan-300 underline"
                     : "text-zinc-400"
                   }>
-                  {l === "OPENING_IN_EDITOR" ? "→ Handing files to the Code Editor…" : l}
+                  {l === "OPENING_IN_EDITOR" ? "→ Opening generated-draft review…" : l}
                 </div>
               ))
             )}

@@ -52,29 +52,38 @@ source "$HOME/.cargo/env"`;
 const VERIFY_COMMANDS = `# Frontend type-check and production bundle
 npm run check
 
-# Native Rust backend
+# Native Rust backend and workspace-boundary tests
 npm run native:check
+npm run native:test
 
 # Produce this operating system's installer/bundle
 npm run desktop:build`;
 
-const PHASES = [
+type PhaseStatus = "complete" | "active" | "next" | "planned";
+interface MigrationPhase {
+  n: number;
+  title: string;
+  status: PhaseStatus;
+  detail: string;
+}
+
+const PHASES: readonly MigrationPhase[] = [
   {
     n: 1,
     title: "Native foundation",
-    status: "active",
+    status: "complete",
     detail: "Tauri shell, typed runtime handshake, restrictive capabilities, branded application bundle and native/web detection.",
   },
   {
     n: 2,
     title: "Real workspaces",
-    status: "next",
-    detail: "Native folder picker, scoped filesystem service, file watching and Monaco connected to actual files.",
+    status: "complete",
+    detail: "Native folder picker, canonical scope enforcement, guarded file CRUD, change watching and Monaco connected to actual files.",
   },
   {
     n: 3,
     title: "Real terminal",
-    status: "planned",
+    status: "next",
     detail: "PTY-backed shell sessions with streaming output, resize, cancellation and real exit codes.",
   },
   {
@@ -181,9 +190,9 @@ export function SetupPanel() {
 
               <Note>
                 <strong>No fake native results:</strong> opening the app with <code>npm run dev</code>
-                creates only a browser UI preview. Terminal, Git, Docker, database and real test
-                execution stay disabled until their native capability is implemented. Use
-                <code>npm run desktop:dev</code> for the trusted desktop runtime.
+                creates only a browser UI preview. The real Workspace Editor is available through
+                <code>npm run desktop:dev</code>; Terminal, Git, Docker, database and test execution
+                stay disabled until their own native capability is implemented.
               </Note>
             </>
           )}
@@ -201,7 +210,7 @@ export function SetupPanel() {
                 <ArchitectureCard
                   icon={Cpu}
                   title="Rust core · phased"
-                  items={["Runtime handshake now", "Workspace boundary next", "PTY, Git and Docker later", "Database and HTTP clients later", "Secrets and audit log later"]}
+                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "PTY, Git and Docker later", "Secrets and audit log later"]}
                 />
               </div>
 
@@ -218,6 +227,7 @@ export function SetupPanel() {
               <ul className="space-y-2 rounded-xl border border-white/10 bg-white/[0.02] p-5 text-[13px] text-zinc-300">
                 {[
                   "Only the main application window receives core Tauri permissions.",
+                  "Every custom command has an explicit generated allow permission for that window.",
                   "A capability is not advertised until its backend and tests exist.",
                   "Paths must resolve inside a user-selected workspace.",
                   "Destructive commands require explicit approval unless a narrow policy permits them.",
@@ -240,25 +250,29 @@ export function SetupPanel() {
               <div className="space-y-3">
                 {PHASES.map((phase) => (
                   <div key={phase.n} className={`rounded-xl border p-4 ${
-                    phase.status === "active"
-                      ? "border-cyan-500/30 bg-cyan-500/[0.06]"
-                      : phase.status === "next"
-                        ? "border-amber-500/20 bg-amber-500/[0.04]"
-                        : "border-white/10 bg-white/[0.02]"
+                    phase.status === "complete"
+                      ? "border-emerald-500/25 bg-emerald-500/[0.05]"
+                      : phase.status === "active"
+                        ? "border-cyan-500/30 bg-cyan-500/[0.06]"
+                        : phase.status === "next"
+                          ? "border-amber-500/20 bg-amber-500/[0.04]"
+                          : "border-white/10 bg-white/[0.02]"
                   }`}>
                     <div className="flex items-start gap-3">
                       <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg font-mono text-xs font-bold ${
-                        phase.status === "active" ? "bg-cyan-500/20 text-cyan-200"
-                          : phase.status === "next" ? "bg-amber-500/15 text-amber-200"
-                            : "bg-white/5 text-zinc-500"
+                        phase.status === "complete" ? "bg-emerald-500/15 text-emerald-200"
+                          : phase.status === "active" ? "bg-cyan-500/20 text-cyan-200"
+                            : phase.status === "next" ? "bg-amber-500/15 text-amber-200"
+                              : "bg-white/5 text-zinc-500"
                       }`}>{phase.n}</span>
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <h3 className="text-[13.5px] font-semibold text-white">{phase.title}</h3>
                           <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
-                            phase.status === "active" ? "bg-cyan-500/15 text-cyan-300"
-                              : phase.status === "next" ? "bg-amber-500/15 text-amber-300"
-                                : "bg-white/5 text-zinc-500"
+                            phase.status === "complete" ? "bg-emerald-500/15 text-emerald-300"
+                              : phase.status === "active" ? "bg-cyan-500/15 text-cyan-300"
+                                : phase.status === "next" ? "bg-amber-500/15 text-amber-300"
+                                  : "bg-white/5 text-zinc-500"
                           }`}>{phase.status}</span>
                         </div>
                         <p className="mt-1 text-[12.5px] leading-relaxed text-zinc-400">{phase.detail}</p>
@@ -289,7 +303,7 @@ export function SetupPanel() {
               </div>
               <Head icon={Terminal} title="Local package command" className="mt-8"
                 sub="Run this on each target operating system after all checks pass." />
-              <CodeBlock code={"npm ci\nnpm run check\nnpm run native:check\nnpm run desktop:build"} lang="bash" />
+              <CodeBlock code={"npm ci\nnpm run check\nnpm run native:check\nnpm run native:test\nnpm run desktop:build"} lang="bash" />
               <Note>
                 Signing and automatic updates arrive in Phase 7. Unsigned development builds are
                 suitable for local testing, but public Windows and macOS downloads will trigger

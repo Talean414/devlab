@@ -35,7 +35,7 @@ export function ExplorerPanel({ onAgentMode }: { onAgentMode?: () => void }) {
           <span className="flex-1">
             <span className="block text-sm font-semibold text-white">Build with the agent instead</span>
             <span className="block text-[12.5px] text-zinc-400">
-              Describe your idea in plain English — the agent picks the stack, plans the steps and writes the files.
+              Describe your idea in plain English — the agent picks the stack and prepares a plan for review. Native file generation remains disabled.
             </span>
           </span>
           <ArrowRight className="h-4 w-4 text-cyan-300 transition group-hover:translate-x-0.5" />
