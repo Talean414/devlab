@@ -2,13 +2,16 @@
   "name": "devlab",
   "private": true,
   "version": "1.1.0",
-  "description": "A free, browser-based developer control plane with BYOK Gemini agents.",
+  "description": "A native, AI-assisted developer control plane built with Tauri and React.",
   "type": "module",
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
     "dev": "vite",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build",
+    "native:check": "cargo check --manifest-path src-tauri/Cargo.toml",
     "typecheck": "tsc --noEmit",
     "build": "vite build",
     "check": "npm run typecheck && npm run build",
@@ -16,6 +19,7 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
+    "@tauri-apps/api": "^2.11.1",
     "clsx": "2.1.1",
     "lucide-react": "^1.46.0",
     "react": "19.2.6",
@@ -24,14 +28,14 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.1.17",
+    "@tauri-apps/cli": "^2.11.4",
     "@types/node": "22.19.17",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.1.1",
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
-    "vite": "^7.3.6",
-    "vite-plugin-singlefile": "2.3.0"
+    "vite": "^7.3.6"
   },
   "overrides": {
     "dompurify": "^3.4.15",

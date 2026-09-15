@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "Minimum permissions for the DevLab main window. Native features are added only when their real backend is implemented.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

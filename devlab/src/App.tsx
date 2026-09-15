@@ -1,33 +1,26 @@
 import { useEffect, useState } from "react";
-import type { ViewId, VFile } from "./types";
+import type { ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import { loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
+import {
+  detectRuntime, hasNativeCapability, WEB_RUNTIME,
+  type NativeCapability, type RuntimeInfo,
+} from "./lib/native";
 import { cn } from "./utils/cn";
 import {
   Sparkles, FolderTree, Bot, Terminal as TerminalIcon, GitBranch, Rocket,
   Database, Plug, Container, Globe, Wrench, Settings as SettingsIcon,
-  Circle, GitMerge, Zap, CheckCircle2, Wand2, Code2, UploadCloud, BookOpen,
+  Circle, Zap, CheckCircle2, Wand2, Code2, UploadCloud, BookOpen,
   PenTool, Stethoscope, FileDiff, ScanLine, Radio,
 } from "lucide-react";
 import { KeyModal } from "./components/KeyModal";
 import { WelcomePanel } from "./panels/WelcomePanel";
 import { AgentPanel } from "./panels/AgentPanel";
-import { BuilderPanel } from "./panels/BuilderPanel";
 import { CanvasPanel } from "./panels/CanvasPanel";
-import { EditorPanel } from "./panels/EditorPanel";
-import { HealerPanel } from "./panels/HealerPanel";
 import { MigratePanel } from "./panels/MigratePanel";
 import { VisionPanel } from "./panels/VisionPanel";
 import { LiveSharePanel } from "./panels/LiveSharePanel";
 import { ExplorerPanel } from "./panels/ExplorerPanel";
-import { TerminalPanel } from "./panels/TerminalPanel";
-import { DatabasePanel } from "./panels/DatabasePanel";
-import { ApiPanel } from "./panels/ApiPanel";
-import { DockerPanel } from "./panels/DockerPanel";
-import { GitPanel } from "./panels/GitPanel";
-import { CicdPanel } from "./panels/CicdPanel";
-import { DeployPanel } from "./panels/DeployPanel";
-import { ToolsPanel } from "./panels/ToolsPanel";
 import { PreviewPanel } from "./panels/PreviewPanel";
 import { SetupPanel } from "./panels/SetupPanel";
 import { SettingsPanel } from "./panels/SettingsPanel";
@@ -66,13 +59,19 @@ export default function App() {
   const [showModal, setShowModal] = useState(false);
   const [firstRun, setFirstRun] = useState(false);
   const [time, setTime] = useState("");
-  const [handoffFiles, setHandoffFiles] = useState<VFile[] | undefined>();
+  const [runtime, setRuntime] = useState(WEB_RUNTIME);
 
   const hasKey = !!getApiKey();
   const model = getPicked() || getModel();
   const theme = getTheme(settings.theme);
 
   useEffect(() => { applyTheme(settings); }, [settings]);
+
+  useEffect(() => {
+    let mounted = true;
+    detectRuntime().then((info) => { if (mounted) setRuntime(info); });
+    return () => { mounted = false; };
+  }, []);
 
   useEffect(() => {
     if (!firstRun) {
@@ -108,33 +107,66 @@ export default function App() {
 
   const nav = NAV.filter((n) => settings.visiblePanels.includes(n.id));
 
+  function nativeFeature(
+    title: string,
+    capability: NativeCapability,
+    milestone: string,
+  ) {
+    return (
+      <NativeFeaturePending
+        title={title}
+        milestone={milestone}
+        runtime={runtime}
+        backendEnabled={hasNativeCapability(runtime, capability)}
+      />
+    );
+  }
+
   function render() {
+    const openGeneratedSource = () => setView("editor");
+
     switch (view) {
       case "welcome":  return <WelcomePanel key={keyVersion} onNavigate={setView} hasKey={hasKey} />;
       case "agent":    return <AgentPanel key={keyVersion} onNeedKey={() => setShowModal(true)} />;
-      case "builder":  return (
-        <BuilderPanel
-          key={keyVersion}
-          onNeedKey={() => setShowModal(true)}
-          onOpenFiles={(f) => { setHandoffFiles(f); setView("editor"); }}
-        />
+      case "builder":  return nativeFeature(
+        "Project Builder", "filesystem", "Phase 2 · write generated projects to a scoped workspace",
       );
-      case "canvas":   return <CanvasPanel key={keyVersion} onOpenFiles={(f) => { setHandoffFiles(f); setView("editor"); }} />;
-      case "editor":   return <EditorPanel incoming={handoffFiles} />;
-      case "healer":   return <HealerPanel key={keyVersion} onOpenFiles={(f) => { setHandoffFiles(f); setView("editor"); }} />;
-      case "migrate":  return <MigratePanel key={keyVersion} onOpenFiles={(f) => { setHandoffFiles(f); setView("editor"); }} />;
-      case "vision":   return <VisionPanel key={keyVersion} onOpenFiles={(f) => { setHandoffFiles(f); setView("editor"); }} />;
+      case "canvas":   return <CanvasPanel key={keyVersion} onOpenFiles={openGeneratedSource} />;
+      case "editor":   return nativeFeature(
+        "Workspace Editor", "filesystem", "Phase 2 · real scoped workspace and filesystem access",
+      );
+      case "healer":   return nativeFeature(
+        "Self-Healing Tests", "test-runner", "Phase 6 · real test runner and patch loop",
+      );
+      case "migrate":  return <MigratePanel key={keyVersion} onOpenFiles={openGeneratedSource} />;
+      case "vision":   return <VisionPanel key={keyVersion} onOpenFiles={openGeneratedSource} />;
       case "live":     return <LiveSharePanel />;
       case "explorer": return <ExplorerPanel onAgentMode={() => setView("builder")} />;
-      case "terminal": return <TerminalPanel />;
-      case "git":      return <GitPanel />;
-      case "cicd":     return <CicdPanel />;
-      case "deploy":   return <DeployPanel />;
-      case "database": return <DatabasePanel />;
-      case "api":      return <ApiPanel />;
-      case "docker":   return <DockerPanel />;
+      case "terminal": return nativeFeature(
+        "Integrated Terminal", "pty", "Phase 3 · native PTY sessions",
+      );
+      case "git":      return nativeFeature(
+        "Source Control", "git", "Phase 4 · real repository operations",
+      );
+      case "cicd":     return nativeFeature(
+        "CI / CD Pipelines", "ci", "Phase 6 · real workflow provider and run status integration",
+      );
+      case "deploy":   return nativeFeature(
+        "Deployment", "deploy", "Phase 6 · approved native deployment commands",
+      );
+      case "database": return nativeFeature(
+        "Database Client", "database", "Phase 5 · native SQL connections",
+      );
+      case "api":      return nativeFeature(
+        "API Client", "native-http", "Phase 5 · native HTTP client without browser CORS limits",
+      );
+      case "docker":   return nativeFeature(
+        "Docker & Containers", "docker", "Phase 5 · Docker engine integration",
+      );
       case "preview":  return <PreviewPanel />;
-      case "tools":    return <ToolsPanel />;
+      case "tools":    return nativeFeature(
+        "Toolchain", "toolchain", "Phase 6 · detect and manage real local developer tools",
+      );
       case "setup":    return <SetupPanel />;
       case "settings": return (
         <SettingsPanel key={keyVersion} onKeyChange={refreshKey} onSettingsChange={refreshSettings} />
@@ -172,6 +204,17 @@ export default function App() {
           </div>
         </div>
         <div className="flex items-center gap-4 text-[12px] text-zinc-500">
+          <span
+            className="flex items-center gap-1.5"
+            title={runtime.runtime === "tauri"
+              ? `Trusted native runtime · ${runtime.os}/${runtime.arch} · v${runtime.appVersion}`
+              : "Browser UI preview · native tools are unavailable"}
+          >
+            <span className={`h-2 w-2 rounded-full ${runtime.runtime === "tauri" ? "bg-cyan-400" : "bg-amber-400"}`} />
+            <span className={runtime.runtime === "tauri" ? "text-cyan-300" : "text-amber-300"}>
+              {runtime.runtime === "tauri" ? `Native · ${runtime.os}` : "Web preview"}
+            </span>
+          </span>
           {hasKey ? (
             <span className="flex items-center gap-1.5">
               <span className="relative flex h-2 w-2">
@@ -223,9 +266,11 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><GitMerge className="h-3 w-3" /> main</span>
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Ready</span>
-            <span className="hidden items-center gap-1.5 md:flex"><Zap className="h-3 w-3" /> Monaco · {settings.autonomy}</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 1 foundation</span>
+            <span className="hidden items-center gap-1.5 md:flex">
+              <Zap className="h-3 w-3" />
+              {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}
+            </span>
           </div>
           <div className="flex items-center gap-4">
             <span className="hidden font-mono md:inline">{model}</span>
@@ -240,6 +285,47 @@ export default function App() {
           onSaved={() => { refreshKey(); setShowModal(false); setView("agent"); }}
         />
       )}
+    </div>
+  );
+}
+
+function NativeFeaturePending({
+  title, milestone, runtime, backendEnabled,
+}: {
+  title: string;
+  milestone: string;
+  runtime: RuntimeInfo;
+  backendEnabled: boolean;
+}) {
+  const native = runtime.runtime === "tauri";
+  return (
+    <div className="flex h-full flex-col">
+      <div className="border-b border-white/5 bg-[#0e1117]/60 px-6 py-3.5">
+        <h2 className="text-sm font-semibold text-white">{title}</h2>
+        <p className="mt-0.5 text-[12px] text-zinc-500">Native implementation required</p>
+      </div>
+      <div className="flex flex-1 items-center justify-center p-8">
+        <div className="max-w-lg rounded-2xl border border-amber-500/20 bg-amber-500/[0.05] p-7 text-center ring-soft">
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-amber-500/10 ring-1 ring-amber-500/20">
+            <Wrench className="h-6 w-6 text-amber-300" />
+          </div>
+          <h3 className="mt-4 text-lg font-semibold text-white">Simulation removed</h3>
+          <p className="mt-2 text-[13px] leading-relaxed text-zinc-400">
+            {backendEnabled
+              ? "The backend advertises this capability, but no verified renderer is connected yet. DevLab keeps the feature closed rather than loading its retired simulation."
+              : native
+                ? "The trusted Tauri runtime is connected, but this capability is disabled until its real native backend is complete. DevLab will not show fabricated data or pretend an operation succeeded."
+                : "This is the browser UI preview. Native operating-system capabilities are unavailable here, and DevLab will not replace them with simulated results."}
+          </p>
+          <div className="mt-5 rounded-lg border border-white/10 bg-black/20 px-4 py-3 text-left">
+            <div className="text-[10.5px] font-semibold uppercase tracking-wider text-zinc-500">Planned milestone</div>
+            <div className="mt-1 text-[13px] font-medium text-amber-200">{milestone}</div>
+          </div>
+          {!native && (
+            <p className="mt-4 font-mono text-[11.5px] text-cyan-300">npm run desktop:dev</p>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

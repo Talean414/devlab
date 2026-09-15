@@ -1,407 +1,299 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { PanelHeader } from "./AgentPanel";
 import { CodeBlock } from "../components/CodeBlock";
-import { runtimes } from "../data/runtimes";
-import { Terminal, Package, Cpu, Rocket, Shield, BookOpen } from "lucide-react";
+import { detectRuntime, WEB_RUNTIME, type RuntimeInfo } from "../lib/native";
+import {
+  CheckCircle2, CircleDot, Cpu, Download, KeyRound, Laptop,
+  Package, Rocket, Shield, Terminal, Wrench,
+} from "lucide-react";
 
 const TABS = [
-  { id: "quick",    label: "Start Here",       Icon: Rocket },
-  { id: "theia",    label: "Native Blueprint", Icon: Package },
-  { id: "runtimes", label: "Native Runtimes",     Icon: Cpu },
-  { id: "agents",   label: "External AI CLIs",    Icon: Terminal },
-  { id: "dist",     label: "Native Distribution", Icon: Shield },
+  { id: "start",        label: "Start Here",   Icon: Rocket },
+  { id: "architecture", label: "Architecture", Icon: Cpu },
+  { id: "roadmap",      label: "Roadmap",      Icon: Wrench },
+  { id: "distribute",   label: "Distribute",   Icon: Package },
 ] as const;
 
-const LOCAL_SETUP = `# 1. Clone the repository
+const LOCAL_SETUP = `# Clone and enter the actual application directory
 git clone https://github.com/Talean414/devlab.git
 cd devlab/devlab
 
-# 2. Use Node.js 22 (with nvm)
+# Node.js 22 is recommended; .nvmrc selects it
 nvm install
 nvm use
 
-# 3. Install exactly what is in package-lock.json
+# Install the locked JavaScript dependencies
 npm ci
 
-# 4. Start the development app
-npm run dev
-# Open http://localhost:5173`;
+# Launch the native Tauri application
+npm run desktop:dev`;
 
+const LINUX_PREREQS = `# Debian / Ubuntu
+sudo apt update
+sudo apt install -y \\
+  libwebkit2gtk-4.1-dev \\
+  build-essential \\
+  curl wget file \\
+  libxdo-dev libssl-dev \\
+  libayatana-appindicator3-dev \\
+  librsvg2-dev
 
-const THEIA_PKG = `{
-  "private": true,
-  "name": "devlab",
-  "version": "1.0.0",
-  "license": "MIT",
-  "theia": {
-    "frontend": {
-      "config": {
-        "applicationName": "DevLab",
-        "preferences": {
-          "files.enableTrash": false,
-          "workbench.colorTheme": "Dark+ (default dark)",
-          "editor.fontSize": 14,
-          "terminal.integrated.fontSize": 13
-        }
-      }
-    },
-    "backend": { "config": { "startupTimeout": -1 } }
+# Install the current Rust toolchain
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"`;
+
+const MAC_PREREQS = `# Apple command-line build tools
+xcode-select --install
+
+# Install the current Rust toolchain
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"`;
+
+const VERIFY_COMMANDS = `# Frontend type-check and production bundle
+npm run check
+
+# Native Rust backend
+npm run native:check
+
+# Produce this operating system's installer/bundle
+npm run desktop:build`;
+
+const PHASES = [
+  {
+    n: 1,
+    title: "Native foundation",
+    status: "active",
+    detail: "Tauri shell, typed runtime handshake, restrictive capabilities, branded application bundle and native/web detection.",
   },
-  "dependencies": {
-    "@theia/core":              "latest",
-    "@theia/editor":            "latest",
-    "@theia/filesystem":        "latest",
-    "@theia/workspace":         "latest",
-    "@theia/terminal":          "latest",
-    "@theia/preview":           "latest",
-    "@theia/markers":           "latest",
-    "@theia/messages":          "latest",
-    "@theia/navigator":         "latest",
-    "@theia/outline-view":      "latest",
-    "@theia/preferences":       "latest",
-    "@theia/process":           "latest",
-    "@theia/scm":               "latest",
-    "@theia/search-in-workspace":"latest",
-    "@theia/task":              "latest",
-    "@theia/debug":             "latest",
-    "@theia/git":               "latest",
-    "@theia/mini-browser":      "latest",
-    "@theia/plugin-ext":        "latest",
-    "@theia/plugin-ext-vscode": "latest",
-    "@theia/vsx-registry":      "latest",
-    "@theia/electron":          "latest"
+  {
+    n: 2,
+    title: "Real workspaces",
+    status: "next",
+    detail: "Native folder picker, scoped filesystem service, file watching and Monaco connected to actual files.",
   },
-  "devDependencies": {
-    "@theia/cli": "latest",
-    "electron": "^31.0.0",
-    "electron-builder": "^24.13.3"
+  {
+    n: 3,
+    title: "Real terminal",
+    status: "planned",
+    detail: "PTY-backed shell sessions with streaming output, resize, cancellation and real exit codes.",
   },
-  "scripts": {
-    "prepare":  "theia build --mode development && theia download:plugins",
-    "start":    "theia start --plugins=local-dir:plugins",
-    "build":    "theia build --mode production",
-    "package":  "electron-builder -c.mac.identity=null",
-    "package:all": "electron-builder -mwl"
+  {
+    n: 4,
+    title: "Git and secure secrets",
+    status: "planned",
+    detail: "Real repository status and operations plus encrypted credentials outside browser localStorage.",
   },
-  "theiaPluginsDir": "plugins",
-  "theiaPlugins": {
-    "roo-code":        "https://open-vsx.org/api/RooVeterinaryInc/roo-cline/latest/file/RooVeterinaryInc.roo-cline-latest.vsix",
-    "continue":        "https://open-vsx.org/api/Continue/continue/latest/file/Continue.continue-latest.vsix",
-    "docker":          "https://open-vsx.org/api/ms-azuretools/vscode-docker/latest/file/ms-azuretools.vscode-docker-latest.vsix",
-    "database-client": "https://open-vsx.org/api/cweijan/vscode-database-client2/latest/file/cweijan.vscode-database-client2-latest.vsix",
-    "rest-client":     "https://open-vsx.org/api/humao/rest-client/latest/file/humao.rest-client-latest.vsix",
-    "thunder-client":  "https://open-vsx.org/api/rangav/vscode-thunder-client/latest/file/rangav.vscode-thunder-client-latest.vsix",
-    "gitlens":         "https://open-vsx.org/api/eamodio/gitlens/latest/file/eamodio.gitlens-latest.vsix",
-    "github-actions":  "https://open-vsx.org/api/github/vscode-github-actions/latest/file/github.vscode-github-actions-latest.vsix",
-    "prettier":        "https://open-vsx.org/api/esbenp/prettier-vscode/latest/file/esbenp.prettier-vscode-latest.vsix",
-    "eslint":          "https://open-vsx.org/api/dbaeumer/vscode-eslint/latest/file/dbaeumer.vscode-eslint-latest.vsix",
-    "python":          "https://open-vsx.org/api/ms-python/python/latest/file/ms-python.python-latest.vsix",
-    "rust-analyzer":   "https://open-vsx.org/api/rust-lang/rust-analyzer/latest/file/rust-lang.rust-analyzer-latest.vsix",
-    "golang":          "https://open-vsx.org/api/golang/Go/latest/file/golang.Go-latest.vsix",
-    "java":            "https://open-vsx.org/api/redhat/java/latest/file/redhat.java-latest.vsix",
-    "kubernetes":      "https://open-vsx.org/api/ms-kubernetes-tools/vscode-kubernetes-tools/latest/file/ms-kubernetes-tools.vscode-kubernetes-tools-latest.vsix",
-    "yaml":            "https://open-vsx.org/api/redhat/vscode-yaml/latest/file/redhat.vscode-yaml-latest.vsix",
-    "tailwindcss":     "https://open-vsx.org/api/bradlc/vscode-tailwindcss/latest/file/bradlc.vscode-tailwindcss-latest.vsix"
-  }
-}`;
-
-const BUILDER_YML = `# electron-builder.yml
-appId: io.devlab.app
-productName: DevLab
-copyright: MIT
-directories:
-  buildResources: resources
-  output: dist
-files:
-  - "lib/**/*"
-  - "src-gen/**/*"
-  - "plugins/**/*"
-  - "package.json"
-mac:
-  target: [dmg, zip]
-  category: public.app-category.developer-tools
-  icon: resources/icon.icns
-win:
-  target: [nsis, portable]
-  icon: resources/icon.ico
-linux:
-  target: [AppImage, deb]
-  category: Development
-  icon: resources/icon.png
-nsis:
-  oneClick: false
-  allowToChangeInstallationDirectory: true
-  createDesktopShortcut: always`;
-
-const MAIN_PATCH = `// src-gen/backend/main.js  — inject DevLab env before Theia boots
-// Add this at the very top of the generated backend entry, or keep it in
-// a small wrapper module that you require first.
-
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-
-const CONFIG = path.join(os.homedir(), '.devlab', 'config.json');
-
-if (fs.existsSync(CONFIG)) {
-  const cfg = JSON.parse(fs.readFileSync(CONFIG, 'utf8'));
-  // Make the key available to every agent extension + terminal session
-  if (cfg.geminiApiKey) {
-    process.env.GEMINI_API_KEY  = cfg.geminiApiKey;
-    process.env.GOOGLE_API_KEY  = cfg.geminiApiKey;
-  }
-  if (cfg.githubToken)  process.env.GITHUB_TOKEN  = cfg.githubToken;
-  if (cfg.vercelToken)  process.env.VERCEL_TOKEN  = cfg.vercelToken;
-  if (cfg.railwayToken) process.env.RAILWAY_TOKEN = cfg.railwayToken;
-  if (cfg.flyToken)     process.env.FLY_API_TOKEN = cfg.flyToken;
-}`;
+  {
+    n: 5,
+    title: "Docker, databases and native HTTP",
+    status: "planned",
+    detail: "Detect real services and display only live data returned by their native integrations.",
+  },
+  {
+    n: 6,
+    title: "Agent tool execution",
+    status: "planned",
+    detail: "Permission-gated tools, actual test execution, reviewed patches, audit logs and Ollama support.",
+  },
+  {
+    n: 7,
+    title: "Signed distribution",
+    status: "planned",
+    detail: "Windows, Linux and macOS CI builds, signing, release artifacts and verified updates.",
+  },
+] as const;
 
 export function SetupPanel() {
-  const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("quick");
-  const byCat = runtimes.reduce<Record<string, typeof runtimes>>((acc, r) => {
-    (acc[r.category] ||= []).push(r);
-    return acc;
-  }, {});
+  const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("start");
+  const [runtime, setRuntime] = useState<RuntimeInfo>(WEB_RUNTIME);
+
+  useEffect(() => {
+    let mounted = true;
+    detectRuntime().then((info) => { if (mounted) setRuntime(info); });
+    return () => { mounted = false; };
+  }, []);
 
   return (
     <div className="flex h-full flex-col">
       <PanelHeader
-        title="Local Setup"
-        subtitle="Run the current web app locally, connect Gemini, and verify a production build"
+        title="Native DevLab Setup"
+        subtitle="Tauri 2 + React · real operating-system capabilities replace simulations phase by phase"
+        badge={runtime.runtime === "tauri" ? "Native connected" : "Web preview"}
+        badgeOk={runtime.runtime === "tauri"}
       />
-      <div className="flex gap-5 border-b border-white/5 bg-[#0d1017]/40 px-6 text-xs">
-        {TABS.map((t) => (
+
+      <div className="flex gap-5 overflow-x-auto border-b border-white/5 bg-[#0d1017]/40 px-6 text-xs">
+        {TABS.map((item) => (
           <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`-mb-px inline-flex items-center gap-1.5 border-b-2 px-1 py-3 font-medium ${
-              tab === t.id ? "border-cyan-400 text-white" : "border-transparent text-zinc-500 hover:text-zinc-300"
+            key={item.id}
+            onClick={() => setTab(item.id)}
+            className={`-mb-px inline-flex shrink-0 items-center gap-1.5 border-b-2 px-1 py-3 font-medium ${
+              tab === item.id
+                ? "border-cyan-400 text-white"
+                : "border-transparent text-zinc-500 hover:text-zinc-300"
             }`}
           >
-            <t.Icon className="h-3.5 w-3.5" /> {t.label}
+            <item.Icon className="h-3.5 w-3.5" /> {item.label}
           </button>
         ))}
       </div>
 
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-4xl px-7 py-8">
-          {tab === "quick" && (
+          {tab === "start" && (
             <>
-              <Head icon={Rocket} title="1 · Run the current DevLab web app"
-                sub="You need Git, Node.js 20.19+ or 22.12+, npm, and a modern browser." />
+              <RuntimeCard runtime={runtime} />
+
+              <Head icon={Rocket} title="1 · Launch the desktop application" className="mt-8"
+                sub="Install Git, Node.js 20.19+ or 22.12+, Rust and your operating system's Tauri prerequisites first." />
               <CodeBlock code={LOCAL_SETUP} lang="bash" />
 
-              <Head icon={Terminal} title="2 · Connect Gemini" className="mt-8"
-                sub="Each user supplies their own Google AI Studio key; no server environment variable is needed." />
+              <Head icon={Laptop} title="2 · Operating-system prerequisites" className="mt-8"
+                sub="Tauri uses the operating system's native WebView and build toolchain." />
+              <details className="rounded-xl border border-white/10 bg-white/[0.02] p-4" open>
+                <summary className="cursor-pointer text-[13px] font-semibold text-white">Linux · Debian / Ubuntu</summary>
+                <div className="mt-3"><CodeBlock code={LINUX_PREREQS} lang="bash" /></div>
+              </details>
+              <details className="mt-2 rounded-xl border border-white/10 bg-white/[0.02] p-4">
+                <summary className="cursor-pointer text-[13px] font-semibold text-white">Windows 10 / 11</summary>
+                <div className="mt-3 space-y-2 text-[12.5px] leading-relaxed text-zinc-400">
+                  <p>Install Microsoft C++ Build Tools with the “Desktop development with C++” workload, WebView2 and Rust using the MSVC toolchain.</p>
+                  <p>Then run <code className="rounded bg-black/30 px-1.5 py-0.5 font-mono text-cyan-300">npm ci</code> followed by <code className="rounded bg-black/30 px-1.5 py-0.5 font-mono text-cyan-300">npm run desktop:dev</code> in PowerShell.</p>
+                </div>
+              </details>
+              <details className="mt-2 rounded-xl border border-white/10 bg-white/[0.02] p-4">
+                <summary className="cursor-pointer text-[13px] font-semibold text-white">macOS</summary>
+                <div className="mt-3"><CodeBlock code={MAC_PREREQS} lang="bash" /></div>
+              </details>
+
+              <Head icon={KeyRound} title="3 · Connect AI" className="mt-8"
+                sub="During the native migration Gemini still uses the BYOK flow; secure native storage arrives in Phase 4." />
               <ol className="list-decimal space-y-2 rounded-xl border border-white/10 bg-white/[0.02] py-4 pl-10 pr-5 text-[13px] leading-relaxed text-zinc-300">
                 <li>Create a key at <a className="text-cyan-400 hover:underline" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">Google AI Studio</a>.</li>
-                <li>Paste it into the first-run <strong className="text-white">Bring Your Own Key</strong> window.</li>
-                <li>Open <strong className="text-white">Settings → Providers</strong>, click <strong className="text-white">Test</strong>, and choose a stable Flash-Lite model.</li>
-                <li>Open <strong className="text-white">AI Agent</strong> and send a small test prompt.</li>
+                <li>Paste it into the first-run key window.</li>
+                <li>Open <strong className="text-white">Settings → Providers</strong>, test it and select a stable Flash-Lite model.</li>
+                <li>Send a small prompt from <strong className="text-white">AI Agent</strong>.</li>
               </ol>
 
-              <Head icon={Shield} title="3 · Verify the production build" className="mt-8"
-                sub="Type-check, build the single-file app, then serve the result locally." />
-              <CodeBlock code={"npm run check\nnpm run preview -- --host 0.0.0.0\n# Open the URL printed by Vite"} lang="bash" />
+              <Head icon={CheckCircle2} title="4 · Verify both halves" className="mt-8"
+                sub="A release is not valid unless the React frontend and Rust backend both pass." />
+              <CodeBlock code={VERIFY_COMMANDS} lang="bash" />
 
               <Note>
-                The current repository is a browser app. Its integrated terminal simulates common
-                commands because a web page cannot execute arbitrary processes on your machine.
-                The <strong>Native Blueprint</strong> tab is optional architecture guidance; this
-                repository does not currently publish a ready-made <code>.exe</code>, <code>.dmg</code>,
-                or <code>.AppImage</code>.
+                <strong>No fake native results:</strong> opening the app with <code>npm run dev</code>
+                creates only a browser UI preview. Terminal, Git, Docker, database and real test
+                execution stay disabled until their native capability is implemented. Use
+                <code>npm run desktop:dev</code> for the trusted desktop runtime.
               </Note>
             </>
           )}
 
-          {tab === "theia" && (
+          {tab === "architecture" && (
             <>
-              <Note>
-                This is an advanced blueprint for a separate native implementation, not a build
-                target already wired into the current Vite application. Complete and test the
-                desktop integration before advertising downloadable binaries.
-              </Note>
-              <Head icon={Package} title="1 · Scaffold the Theia app" className="mt-8"
-                sub="Creates a separate shell that can become a native DevLab binary." />
-              <CodeBlock lang="bash" code={`npm i -g yo generator-theia-extension
-mkdir devlab && cd devlab
-yo theia-extension --standalone
-# choose: "Empty" template, name it "devlab"`} />
+              <Head icon={Cpu} title="Native boundary"
+                sub="The React renderer has no direct shell, filesystem or secret access." />
+              <div className="grid gap-3 md:grid-cols-2">
+                <ArchitectureCard
+                  icon={Laptop}
+                  title="React renderer"
+                  items={["DevLab interface", "Source previews", "User intent and approvals", "Typed IPC client", "No privileged APIs"]}
+                />
+                <ArchitectureCard
+                  icon={Cpu}
+                  title="Rust core · phased"
+                  items={["Runtime handshake now", "Workspace boundary next", "PTY, Git and Docker later", "Database and HTTP clients later", "Secrets and audit log later"]}
+                />
+              </div>
 
-              <Head icon={Package} title="2 · Replace package.json" className="mt-8"
-                sub="Every tool is pre-baked here, so users never visit a marketplace." />
-              <CodeBlock code={THEIA_PKG} lang="json" />
+              <div className="my-5 flex items-center gap-3 rounded-xl border border-cyan-500/20 bg-cyan-500/[0.05] p-4">
+                <Shield className="h-5 w-5 shrink-0 text-cyan-300" />
+                <p className="text-[13px] leading-relaxed text-zinc-300">
+                  Every privileged action will cross a narrowly typed Tauri command. Before a new
+                  action is enabled, its backend must validate the selected workspace, requested
+                  capability and autonomy policy.
+                </p>
+              </div>
 
-              <Head icon={Package} title="3 · electron-builder config" className="mt-8"
-                sub="Produces .exe, .dmg and .AppImage from one command." />
-              <CodeBlock code={BUILDER_YML} lang="yaml" />
-
-              <Head icon={Shield} title="4 · Inject BYOK env vars at boot" className="mt-8"
-                sub="So every agent extension and terminal picks up your key automatically." />
-              <CodeBlock code={MAIN_PATCH} lang="javascript" />
-
-              <Head icon={Rocket} title="5 · Build and package" className="mt-8" sub="" />
-              <CodeBlock lang="bash" code={`npm install
-npm run prepare        # compiles + downloads all pre-baked plugins
-npm run build          # production bundle
-npm run package        # binary for your current OS
-npm run package:all    # .exe + .dmg + .AppImage together
-
-# output lands in ./dist`} />
-              <Note>
-                First build takes 10–20 minutes because it downloads every VSIX. Subsequent
-                builds are cached and take about a minute.
-              </Note>
+              <Head icon={Shield} title="Default-deny rules" className="mt-8" sub="" />
+              <ul className="space-y-2 rounded-xl border border-white/10 bg-white/[0.02] p-5 text-[13px] text-zinc-300">
+                {[
+                  "Only the main application window receives core Tauri permissions.",
+                  "A capability is not advertised until its backend and tests exist.",
+                  "Paths must resolve inside a user-selected workspace.",
+                  "Destructive commands require explicit approval unless a narrow policy permits them.",
+                  "The renderer never receives raw long-lived secrets after secure storage is enabled.",
+                  "Remote pages are never loaded into a privileged application context.",
+                  "Every agent tool action will have timeout, cancellation and audit metadata.",
+                ].map((rule) => (
+                  <li key={rule} className="flex gap-2.5">
+                    <Shield className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" /> {rule}
+                  </li>
+                ))}
+              </ul>
             </>
           )}
 
-          {tab === "runtimes" && (
+          {tab === "roadmap" && (
             <>
-              <Head icon={Cpu} title="Native runtimes & toolchains"
-                sub="Reference list for a future native build; the current browser app cannot detect local runtimes." />
-              {Object.entries(byCat).map(([cat, list]) => (
-                <div key={cat} className="mt-7">
-                  <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-cyan-400">{cat}</h3>
-                  <div className="space-y-3">
-                    {list.map((r) => (
-                      <details key={r.id} className="group rounded-xl border border-white/10 bg-white/[0.02] ring-soft">
-                        <summary className="flex cursor-pointer list-none items-center gap-3 px-4 py-3">
-                          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-cyan-500/15 to-violet-600/15 ring-1 ring-white/10">
-                            <Cpu className="h-4 w-4 text-cyan-200" />
-                          </span>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2">
-                              <span className="text-[13.5px] font-medium text-zinc-100">{r.name}</span>
-                              <span className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400">{r.version}</span>
-                            </div>
-                            <div className="truncate text-[12px] text-zinc-500">{r.description}</div>
-                          </div>
-                          <span className="shrink-0 text-[11px] text-zinc-600 group-open:hidden">Show install</span>
-                        </summary>
-                        <div className="space-y-3 border-t border-white/5 p-4">
-                          <div>
-                            <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-zinc-500">Install</div>
-                            <CodeBlock code={r.install} lang="bash" />
-                          </div>
-                          <div>
-                            <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-zinc-500">Verify</div>
-                            <CodeBlock code={r.verify} lang="bash" />
-                          </div>
+              <Head icon={Wrench} title="Simulation-removal roadmap"
+                sub="A panel is re-enabled only when it is backed by live native data and verifiable operations." />
+              <div className="space-y-3">
+                {PHASES.map((phase) => (
+                  <div key={phase.n} className={`rounded-xl border p-4 ${
+                    phase.status === "active"
+                      ? "border-cyan-500/30 bg-cyan-500/[0.06]"
+                      : phase.status === "next"
+                        ? "border-amber-500/20 bg-amber-500/[0.04]"
+                        : "border-white/10 bg-white/[0.02]"
+                  }`}>
+                    <div className="flex items-start gap-3">
+                      <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg font-mono text-xs font-bold ${
+                        phase.status === "active" ? "bg-cyan-500/20 text-cyan-200"
+                          : phase.status === "next" ? "bg-amber-500/15 text-amber-200"
+                            : "bg-white/5 text-zinc-500"
+                      }`}>{phase.n}</span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h3 className="text-[13.5px] font-semibold text-white">{phase.title}</h3>
+                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+                            phase.status === "active" ? "bg-cyan-500/15 text-cyan-300"
+                              : phase.status === "next" ? "bg-amber-500/15 text-amber-300"
+                                : "bg-white/5 text-zinc-500"
+                          }`}>{phase.status}</span>
                         </div>
-                      </details>
-                    ))}
+                        <p className="mt-1 text-[12.5px] leading-relaxed text-zinc-400">{phase.detail}</p>
+                      </div>
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </>
           )}
 
-          {tab === "agents" && (
+          {tab === "distribute" && (
             <>
-              <Head icon={Terminal} title="External terminal AI agents"
-                sub="Run these in your operating-system terminal; DevLab's browser terminal is a simulation." />
-              <h3 className="mb-2 mt-6 text-sm font-semibold text-white">Aider — AI pair programmer</h3>
-              <CodeBlock lang="bash" code={`uv tool install aider-chat
-export GEMINI_API_KEY="your_key_here"
-
-# start it inside any git repo
-aider --model gemini/gemini-3.6-flash
-
-# common flows
-aider src/app.py --message "add retry logic with exponential backoff"
-aider --architect            # plan-then-edit mode
-aider --auto-commits         # let it commit each change`} />
-
-              <h3 className="mb-2 mt-7 text-sm font-semibold text-white">Gemini CLI</h3>
-              <CodeBlock lang="bash" code={`npm i -g @google/gemini-cli
-gemini auth login            # or: export GEMINI_API_KEY=...
-gemini "refactor this module for testability" --file src/service.ts`} />
-
-              <h3 className="mb-2 mt-7 text-sm font-semibold text-white">Offline models with Ollama</h3>
-              <CodeBlock lang="bash" code={`curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen2.5-coder:7b       # great free coding model
-ollama pull deepseek-r1:8b         # reasoning model
-ollama serve                       # http://localhost:11434
-
-# point Continue / Roo Code at it — zero API cost, fully private`} />
-
-              <h3 className="mb-2 mt-7 text-sm font-semibold text-white">Persist your keys</h3>
-              <CodeBlock lang="bash" code={`mkdir -p ~/.devlab
-cat > ~/.devlab/config.json <<'EOF'
-{
-  "geminiApiKey": "YOUR_KEY",
-  "githubToken":  "ghp_...",
-  "vercelToken":  "...",
-  "railwayToken": "..."
-}
-EOF
-chmod 600 ~/.devlab/config.json   # readable only by you`} />
+              <Head icon={Download} title="Desktop bundles"
+                sub="Tauri produces platform-native installers from the same application source." />
+              <div className="grid gap-3 sm:grid-cols-3">
+                {[
+                  { os: "Windows", formats: ".msi / setup .exe", note: "Build on Windows" },
+                  { os: "Linux", formats: ".deb / .AppImage", note: "Build on Linux" },
+                  { os: "macOS", formats: ".app / .dmg", note: "Build on macOS" },
+                ].map((target) => (
+                  <div key={target.os} className="rounded-xl border border-white/10 bg-white/[0.02] p-4">
+                    <div className="text-sm font-semibold text-white">{target.os}</div>
+                    <div className="mt-1 font-mono text-[11px] text-cyan-300">{target.formats}</div>
+                    <div className="mt-2 text-[11.5px] text-zinc-500">{target.note}</div>
+                  </div>
+                ))}
+              </div>
+              <Head icon={Terminal} title="Local package command" className="mt-8"
+                sub="Run this on each target operating system after all checks pass." />
+              <CodeBlock code={"npm ci\nnpm run check\nnpm run native:check\nnpm run desktop:build"} lang="bash" />
               <Note>
-                Never commit <code>~/.devlab/config.json</code>. Add it to your global gitignore:
-                <code> git config --global core.excludesfile ~/.gitignore_global</code>
-              </Note>
-            </>
-          )}
-
-          {tab === "dist" && (
-            <>
-              <Note>
-                These examples apply only after the separate native blueprint has been implemented.
-                There are no desktop binaries to publish from the current Vite project.
-              </Note>
-              <Head icon={Shield} title="Publish a completed native build" className="mt-8"
-                sub="Example GitHub Releases pipeline for the future desktop implementation." />
-              <CodeBlock lang="yaml" code={`# .github/workflows/release.yml
-name: Release DevLab
-on:
-  push: { tags: ['v*'] }
-jobs:
-  build:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: \${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: npm }
-      - run: npm ci
-      - run: npm run prepare && npm run build
-      - run: npx electron-builder --publish always
-        env:
-          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}`} />
-
-              <Head icon={BookOpen} title="Homebrew tap (macOS / Linux)" className="mt-8" sub="" />
-              <CodeBlock lang="ruby" code={`# Formula/devlab.rb in your homebrew-tap repo
-cask "devlab" do
-  version "1.0.0"
-  sha256 "REPLACE_WITH_SHA"
-  url "https://github.com/your-org/devlab/releases/download/v#{version}/DevLab-macos-arm64.dmg"
-  name "DevLab"
-  desc "Unified developer control plane"
-  homepage "https://github.com/your-org/devlab"
-  app "DevLab.app"
-end
-
-# users then run:
-#   brew tap your-org/tap && brew install --cask devlab`} />
-
-              <Head icon={BookOpen} title="Winget (Windows)" className="mt-8" sub="" />
-              <CodeBlock lang="yaml" code={`# manifests/y/your-org/DevLab/1.0.0/your-org.DevLab.installer.yaml
-PackageIdentifier: your-org.DevLab
-PackageVersion: 1.0.0
-Installers:
-  - Architecture: x64
-    InstallerType: nullsoft
-    InstallerUrl: https://github.com/your-org/devlab/releases/download/v1.0.0/DevLab-Setup.exe
-    InstallerSha256: REPLACE_WITH_SHA
-ManifestType: installer
-ManifestVersion: 1.6.0
-
-# users then run:  winget install your-org.DevLab`} />
-              <Note>
-                Add a <code>LICENSE</code> (MIT), a <code>SECURITY.md</code>, and enable
-                Dependabot so your pre-baked VSIX URLs stay current.
+                Signing and automatic updates arrive in Phase 7. Unsigned development builds are
+                suitable for local testing, but public Windows and macOS downloads will trigger
+                trust warnings until signing is configured.
               </Note>
             </>
           )}
@@ -411,9 +303,66 @@ ManifestVersion: 1.6.0
   );
 }
 
+function RuntimeCard({ runtime }: { runtime: RuntimeInfo }) {
+  const native = runtime.runtime === "tauri";
+  return (
+    <section className={`rounded-xl border p-5 ${
+      native ? "border-emerald-500/25 bg-emerald-500/[0.05]" : "border-amber-500/25 bg-amber-500/[0.05]"
+    }`}>
+      <div className="flex items-start gap-3">
+        {native
+          ? <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-400" />
+          : <CircleDot className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />}
+        <div className="min-w-0 flex-1">
+          <h3 className={`text-sm font-semibold ${native ? "text-emerald-200" : "text-amber-200"}`}>
+            {native ? "Trusted native runtime connected" : "Browser UI preview"}
+          </h3>
+          <p className="mt-1 text-[12.5px] leading-relaxed text-zinc-400">
+            {native
+              ? `Tauri ${runtime.appVersion} · ${runtime.os}/${runtime.arch}${runtime.debug ? " · debug build" : ""}`
+              : "Native commands are intentionally unavailable. Start DevLab with npm run desktop:dev."}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {(runtime.capabilities.length ? runtime.capabilities : ["no native capabilities"]).map((capability) => (
+              <span key={capability} className="rounded bg-black/20 px-2 py-0.5 font-mono text-[10.5px] text-zinc-400">
+                {capability}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ArchitectureCard({
+  icon: Icon, title, items,
+}: {
+  icon: typeof Laptop;
+  title: string;
+  items: string[];
+}) {
+  return (
+    <section className="rounded-xl border border-white/10 bg-white/[0.02] p-5">
+      <div className="flex items-center gap-2">
+        <Icon className="h-4 w-4 text-cyan-300" />
+        <h3 className="text-sm font-semibold text-white">{title}</h3>
+      </div>
+      <ul className="mt-3 space-y-1.5 text-[12.5px] text-zinc-400">
+        {items.map((item) => <li key={item}>• {item}</li>)}
+      </ul>
+    </section>
+  );
+}
+
 function Head({
   icon: Icon, title, sub, className = "",
-}: { icon: typeof Rocket; title: string; sub: string; className?: string }) {
+}: {
+  icon: typeof Rocket;
+  title: string;
+  sub: string;
+  className?: string;
+}) {
   return (
     <div className={`mb-3 flex items-start gap-3 ${className}`}>
       <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-cyan-500/20 to-violet-600/20 ring-1 ring-white/10">

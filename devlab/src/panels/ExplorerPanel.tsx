@@ -21,7 +21,7 @@ export function ExplorerPanel({ onAgentMode }: { onAgentMode?: () => void }) {
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Project Templates"
-        subtitle={`${projectTemplates.length} zero-config bootstraps — or let the agent design one for you`}
+        subtitle={`${projectTemplates.length} setup recipes to review and copy`}
       />
 
       {onAgentMode && (
@@ -126,11 +126,11 @@ export function ExplorerPanel({ onAgentMode }: { onAgentMode?: () => void }) {
           </div>
           <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">
             <Zap className="h-3 w-3" />
-            One-click setup commands
+            Setup command reference
           </div>
           <CodeBlock code={selected.commands.join("\n")} lang="bash" />
           <div className="mt-4 rounded-lg border border-cyan-500/20 bg-cyan-500/[0.04] p-3.5 text-[13px] text-cyan-200/90">
-            In the native DevLab build, these run automatically in the integrated terminal — no copy-paste needed.
+            Review commands before copying them. Automatic execution stays disabled until the scoped workspace and native process policy are implemented.
           </div>
         </div>
       </div>
