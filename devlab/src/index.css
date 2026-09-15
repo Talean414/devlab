@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@layer base {
+  html {
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+      "Inter", "Helvetica Neue", Arial, sans-serif;
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    color-scheme: dark;
+  }
+  /* Better default focus rings */
+  *:focus-visible {
+    outline: 2px solid rgb(34, 211, 238 / 0.55);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  /* Subtle scrollbars */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: rgb(255 255 255 / 0.08);
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: rgb(255 255 255 / 0.16); background-clip: padding-box; border: 2px solid transparent; }
+}
+
+@layer utilities {
+  .text-balance { text-wrap: balance; }
+  .text-pretty { text-wrap: pretty; }
+  .grid-bg {
+    background-image:
+      radial-gradient(rgba(255,255,255,0.04) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+  .glass {
+    background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.015));
+    backdrop-filter: blur(10px);
+  }
+  /* Subtle inner highlight on cards */
+  .ring-soft {
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.05),
+      0 1px 2px rgba(0,0,0,0.4);
+  }
+  /* Animated gradient text */
+  .grad-text {
+    background: linear-gradient(90deg, #67e8f9, #a78bfa, #67e8f9);
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: grad-flow 8s linear infinite;
+  }
+  @keyframes grad-flow {
+    0% { background-position: 0% 50%; }
+    100% { background-position: 200% 50%; }
+  }
+}
