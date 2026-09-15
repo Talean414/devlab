@@ -11,7 +11,7 @@ import {
 } from "../lib/settings";
 import {
   Eye, EyeOff, Save, RefreshCw, Trash2, Shield, KeyRound, CheckCircle2,
-  Sparkles, Palette, LayoutGrid, Bot, SlidersHorizontal, RotateCcw, Cpu,
+  Sparkles, Palette, LayoutGrid, Bot, SlidersHorizontal, RotateCcw, Cpu, ExternalLink,
 } from "lucide-react";
 
 const TABS = [
@@ -249,7 +249,7 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                 )}
               </Card>
 
-              <Card title="Google AI Studio API key" desc="Free tier is plenty for development.">
+              <Card title="Google AI Studio API key" desc="Bring your own key; Google's per-project free-tier limits still apply.">
                 <div className="flex gap-2">
                   <input type={show ? "text" : "password"} value={key} onChange={(e) => setKey(e.target.value)}
                     placeholder="AIza… (from aistudio.google.com/app/apikey)"
@@ -270,9 +270,30 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                 </div>
                 <select value={model} onChange={(e) => { setModelState(e.target.value); setModel(e.target.value); onKeyChange(); }}
                   className="w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50">
-                  {(availableModels.length > 0 ? availableModels.map((m) => m.name.replace("models/", "")) : [model])
+                  {(availableModels.length > 0
+                    ? availableModels.filter((m) => m.supported).map((m) => m.name.replace("models/", ""))
+                    : [model])
                     .map((m) => <option key={m} value={m} className="text-zinc-900">{m}</option>)}
                 </select>
+
+                <div className="mt-3 rounded-lg border border-cyan-500/20 bg-cyan-500/[0.05] p-3 text-[12px] leading-relaxed text-zinc-400">
+                  <p>
+                    DevLab automatically retries short throttles and falls back across up to three
+                    available models. For the highest free-tier throughput, choose a stable
+                    <strong className="text-cyan-200"> Flash-Lite</strong> model. Daily quota cannot
+                    be bypassed in code and resets at midnight Pacific time.
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-3">
+                    <a href="https://ai.dev/rate-limit" target="_blank" rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-cyan-400 hover:underline">
+                      View my usage <ExternalLink className="h-3 w-3" />
+                    </a>
+                    <a href="https://ai.google.dev/gemini-api/docs/rate-limits" target="_blank" rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-cyan-400 hover:underline">
+                      Rate-limit guide <ExternalLink className="h-3 w-3" />
+                    </a>
+                  </div>
+                </div>
 
                 <div className="mt-4 flex flex-wrap items-center gap-2">
                   <button onClick={() => { setApiKey(key); setModel(model); onKeyChange(); }}
@@ -287,8 +308,12 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                     <Trash2 className="h-3.5 w-3.5" /> Clear
                   </button>
                   {status === "checking" && <span className="text-sm text-zinc-400">Checking…</span>}
-                  {status === "ok" && <span className="inline-flex items-center gap-1 text-sm text-emerald-400"><CheckCircle2 className="h-3.5 w-3.5" /> Valid</span>}
-                  {status === "bad" && <span className="text-sm text-rose-400">Invalid key</span>}
+                  {status === "ok" && (
+                    <span className="inline-flex items-center gap-1 text-sm text-emerald-400" title="Generation quota is checked only when you send a prompt.">
+                      <CheckCircle2 className="h-3.5 w-3.5" /> Key valid
+                    </span>
+                  )}
+                  {status === "bad" && <span className="text-sm text-rose-400">Key rejected or network unavailable</span>}
                 </div>
               </Card>
 

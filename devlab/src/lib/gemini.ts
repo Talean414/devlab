@@ -1,48 +1,30 @@
 // BYOK Gemini client — the key lives only in the user's browser localStorage.
-// Nothing is ever hardcoded or sent anywhere except Google's official endpoint.
+// Nothing is hardcoded or sent anywhere except Google's official endpoint.
+
+import { loadSettings } from "./settings";
 
 const KEY_STORAGE = "devlab.gemini.key";
 const MODEL_STORAGE = "devlab.gemini.model";
 const PICKED_STORAGE = "devlab.gemini.picked";
+const COOLDOWN_STORAGE = "devlab.gemini.cooldowns";
 
-// Preferred default — we'll verify with the API at startup.
-export const DEFAULT_MODEL = "gemini-3.6-flash";
+// Flash-Lite gives free-tier users the best latency/quota balance. A user can
+// still select a higher-quality Flash model in Settings.
+export const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 
-// Ordered from "best & newest" to "oldest fallback". We always pick the first
-// one that the user's key actually has access to.
+// Stable, economical models come first so an exhausted premium Flash quota can
+// fail over to a model that commonly has a separate, higher-throughput quota.
 export const FALLBACK_CHAIN = [
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
   "gemini-3.8-flash",
   "gemini-3.7-flash",
   "gemini-3.6-flash",
   "gemini-3.5-flash",
-  "gemini-3.5-flash-lite",
-  "gemini-3.1-flash-lite",
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-flash",
   "gemini-3-flash-preview",
 ];
-
-export function getApiKey(): string {
-  return localStorage.getItem(KEY_STORAGE) || "";
-}
-export function setApiKey(key: string) {
-  localStorage.setItem(KEY_STORAGE, key.trim());
-}
-export function clearApiKey() {
-  localStorage.removeItem(KEY_STORAGE);
-  localStorage.removeItem(MODEL_STORAGE);
-  localStorage.removeItem(PICKED_STORAGE);
-}
-export function getModel(): string {
-  return localStorage.getItem(MODEL_STORAGE) || DEFAULT_MODEL;
-}
-export function setModel(m: string) {
-  localStorage.setItem(MODEL_STORAGE, m);
-}
-export function getPicked(): string | null {
-  return localStorage.getItem(PICKED_STORAGE);
-}
-export function setPicked(m: string) {
-  localStorage.setItem(PICKED_STORAGE, m);
-}
 
 export interface GenTurn {
   role: "user" | "model";
@@ -54,64 +36,181 @@ export interface ImagePart {
   mime: string; // e.g. image/png
 }
 
-export async function* streamVision(
-  prompt: string,
-  images: ImagePart[],
-): AsyncGenerator<string, void, unknown> {
-  const key = getApiKey();
-  if (!key) throw new Error("NO_KEY");
-  const model = getPicked() || getModel();
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(key)}`;
+export interface ModelInfo {
+  name: string;        // e.g. "models/gemini-3.5-flash-lite"
+  displayName: string;
+  supported: boolean;  // supports generateContent
+}
 
-  const parts: Record<string, unknown>[] = images.map((im) => ({
-    inline_data: { mime_type: im.mime, data: im.data },
-  }));
-  parts.push({ text: prompt });
+type ErrorKind =
+  | "rate_limit"
+  | "daily_quota"
+  | "quota_unavailable"
+  | "authentication"
+  | "permission"
+  | "not_found"
+  | "server"
+  | "request";
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts }],
-      generationConfig: { temperature: 0.4, maxOutputTokens: 4096 },
-    }),
-  });
-  if (!res.ok) throw new Error(`API ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  if (!res.body) throw new Error("No response stream");
+interface ApiErrorOptions {
+  status: number;
+  model: string;
+  kind: ErrorKind;
+  message: string;
+  retryAfterMs?: number;
+  rawMessage?: string;
+}
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      const t = line.trim();
-      if (!t.startsWith("data:")) continue;
-      const json = t.slice(5).trim();
-      if (!json || json === "[DONE]") continue;
-      try {
-        const parsed = JSON.parse(json);
-        const text =
-          parsed?.candidates?.[0]?.content?.parts
-            ?.map((p: { text?: string }) => p.text || "")
-            .join("") || "";
-        if (text) yield text;
-      } catch { /* partial */ }
-    }
+/** A sanitized Gemini error. rawMessage is retained for diagnostics, not shown in the UI. */
+export class GeminiApiError extends Error {
+  readonly status: number;
+  readonly model: string;
+  readonly kind: ErrorKind;
+  readonly retryAfterMs?: number;
+  readonly rawMessage?: string;
+
+  constructor(options: ApiErrorOptions) {
+    super(options.message);
+    this.name = "GeminiApiError";
+    this.status = options.status;
+    this.model = options.model;
+    this.kind = options.kind;
+    this.retryAfterMs = options.retryAfterMs;
+    this.rawMessage = options.rawMessage;
   }
 }
 
-export function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve((r.result as string).split(",")[1] || "");
-    r.onerror = reject;
-    r.readAsDataURL(file);
+interface Cooldown {
+  until: number;
+  kind: "temporary" | "daily" | "unavailable";
+}
+
+let cachedList: { key: string; ts: number; models: ModelInfo[] } | null = null;
+const CACHE_MS = 60_000;
+const MAX_AUTO_RETRY_WAIT_MS = 8_000;
+const MAX_QUOTA_FALLBACKS = 3;
+const MAX_CONTEXT_CHARS = 80_000;
+
+export function getApiKey(): string {
+  return localStorage.getItem(KEY_STORAGE) || "";
+}
+
+export function setApiKey(key: string) {
+  const next = key.trim();
+  const changed = next !== getApiKey();
+  localStorage.setItem(KEY_STORAGE, next);
+  if (changed) {
+    localStorage.removeItem(PICKED_STORAGE);
+    localStorage.removeItem(COOLDOWN_STORAGE);
+    cachedList = null;
+  }
+}
+
+export function clearApiKey() {
+  localStorage.removeItem(KEY_STORAGE);
+  localStorage.removeItem(MODEL_STORAGE);
+  localStorage.removeItem(PICKED_STORAGE);
+  localStorage.removeItem(COOLDOWN_STORAGE);
+  cachedList = null;
+}
+
+export function getModel(): string {
+  return localStorage.getItem(MODEL_STORAGE) || DEFAULT_MODEL;
+}
+
+export function setModel(model: string) {
+  localStorage.setItem(MODEL_STORAGE, model);
+  // The status bar should immediately reflect an explicit user selection.
+  localStorage.setItem(PICKED_STORAGE, model);
+}
+
+export function getPicked(): string | null {
+  return localStorage.getItem(PICKED_STORAGE);
+}
+
+export function setPicked(model: string) {
+  localStorage.setItem(PICKED_STORAGE, model);
+}
+
+function readCooldowns(): Record<string, Cooldown> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(COOLDOWN_STORAGE) || "{}") as Record<string, Cooldown>;
+    const now = Date.now();
+    let changed = false;
+    for (const [model, cooldown] of Object.entries(parsed)) {
+      if (!cooldown || cooldown.until <= now) {
+        delete parsed[model];
+        changed = true;
+      }
+    }
+    if (changed) localStorage.setItem(COOLDOWN_STORAGE, JSON.stringify(parsed));
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+function putOnCooldown(model: string, error: GeminiApiError) {
+  const cooldowns = readCooldowns();
+  const wait = error.kind === "daily_quota"
+    ? millisecondsUntilPacificMidnight()
+    : error.kind === "quota_unavailable"
+      ? 60 * 60_000
+      : Math.max(error.retryAfterMs || 30_000, 5_000);
+  cooldowns[model] = {
+    until: Date.now() + wait,
+    kind: error.kind === "daily_quota"
+      ? "daily"
+      : error.kind === "quota_unavailable"
+        ? "unavailable"
+        : "temporary",
+  };
+  localStorage.setItem(COOLDOWN_STORAGE, JSON.stringify(cooldowns));
+}
+
+// Google documents daily quota resets at midnight America/Los_Angeles. This
+// conversion handles PST, PDT, and transition days without a timezone library.
+function millisecondsUntilPacificMidnight(): number {
+  const now = new Date();
+  const dateFormatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
   });
+  const parts = Object.fromEntries(
+    dateFormatter.formatToParts(now)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, Number(part.value)]),
+  ) as Record<string, number>;
+  const localMidnightAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day + 1);
+
+  // Start with the current offset. The next midnight is at most 24 hours away;
+  // a second pass corrects the guess if daylight saving changes before then.
+  let nextMidnightUtc = localMidnightAsUtc - pacificOffsetAt(now);
+  for (let pass = 0; pass < 2; pass += 1) {
+    nextMidnightUtc = localMidnightAsUtc - pacificOffsetAt(new Date(nextMidnightUtc));
+  }
+  return Math.max(nextMidnightUtc - now.getTime(), 60_000);
+}
+
+function pacificOffsetAt(date: Date): number {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric", month: "numeric", day: "numeric",
+    hour: "numeric", minute: "numeric", second: "numeric",
+    hourCycle: "h23",
+  });
+  const zoned = Object.fromEntries(
+    formatter.formatToParts(date)
+      .filter((part) => part.type !== "literal" && part.type !== "dayPeriod")
+      .map((part) => [part.type, Number(part.value)]),
+  ) as Record<string, number>;
+  const representedAsUtc = Date.UTC(
+    zoned.year, zoned.month - 1, zoned.day,
+    zoned.hour, zoned.minute, zoned.second,
+  );
+  return representedAsUtc - date.getTime();
 }
 
 const SYSTEM_PROMPT = `You are DevLab Agent, an expert senior software engineer embedded in a developer's control-plane IDE.
@@ -120,69 +219,174 @@ Be concise, practical and code-first. When asked to scaffold or configure things
 export async function* streamChat(
   history: GenTurn[],
 ): AsyncGenerator<string, void, unknown> {
+  const settings = loadSettings();
+  const customPrompt = settings.systemPrompt.trim();
+  const body = {
+    systemInstruction: {
+      parts: [{ text: customPrompt ? `${SYSTEM_PROMPT}\n\nDeveloper preferences:\n${customPrompt}` : SYSTEM_PROMPT }],
+    },
+    contents: limitHistory(history).map((turn) => ({
+      role: turn.role,
+      parts: [{ text: turn.text }],
+    })),
+    generationConfig: {
+      temperature: clamp(settings.temperature, 0, 2),
+      maxOutputTokens: Math.round(clamp(settings.maxTokens, 256, 16_384)),
+    },
+  };
+
+  yield* streamAcrossModels(body);
+}
+
+export async function* streamVision(
+  prompt: string,
+  images: ImagePart[],
+): AsyncGenerator<string, void, unknown> {
+  const settings = loadSettings();
+  const parts: Record<string, unknown>[] = images.map((image) => ({
+    inline_data: { mime_type: image.mime, data: image.data },
+  }));
+  parts.push({ text: prompt });
+
+  const body = {
+    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents: [{ role: "user", parts }],
+    generationConfig: {
+      temperature: clamp(settings.temperature, 0, 2),
+      maxOutputTokens: Math.round(clamp(settings.maxTokens, 256, 16_384)),
+    },
+  };
+
+  yield* streamAcrossModels(body);
+}
+
+async function* streamAcrossModels(body: object): AsyncGenerator<string, void, unknown> {
   const key = getApiKey();
   if (!key) throw new Error("NO_KEY");
 
-  // Build the candidate list: user's selected model first, then the fallback chain.
-  const candidates: string[] = [];
-  const seen = new Set<string>();
-  const push = (m: string | null) => {
-    if (m && !seen.has(m)) {
-      seen.add(m);
-      candidates.push(m);
+  const { candidates, cooled } = await buildCandidateModels();
+  if (candidates.length === 0) {
+    const soonest = cooled.sort((a, b) => a.cooldown.until - b.cooldown.until)[0];
+    if (soonest) {
+      const wait = humanWait(soonest.cooldown.until - Date.now());
+      throw new Error(
+        soonest.cooldown.kind === "daily"
+          ? `Gemini's free daily quota is exhausted. It resets at midnight Pacific time. DevLab will try this model again after the reset.`
+          : soonest.cooldown.kind === "unavailable"
+            ? "Google reports no free quota for the available models on this project. Choose a Flash-Lite model and check the project's limits in Google AI Studio."
+            : `Gemini is temporarily rate-limiting requests. Try again in about ${wait}.`,
+      );
     }
-  };
-  push(getModel());
-  for (const m of FALLBACK_CHAIN) push(m);
-  // Also try whatever the live API told us is available, as a last resort.
-  const livePicked = await pickBestModel();
-  push(livePicked);
+    throw new Error("No Gemini text-generation model is available for this API key. Choose a supported model in Settings.");
+  }
 
-  let lastError = "";
+  const attempted: string[] = [];
+  const quotaErrors: GeminiApiError[] = [];
+  let lastError: unknown = null;
+  let unavailableCount = 0;
+
   for (const model of candidates) {
     try {
-      yield* streamWithModel(model, history, key);
-      return; // success
-    } catch (e) {
-      const msg = (e as Error).message;
-      lastError = msg;
-      // Only retry on 404 (model gone) or 403 (region-restricted). Bail otherwise.
-      if (!msg.includes("API 404") && !msg.includes("API 403")) throw e;
+      attempted.push(model);
+      yield* streamModelWithRetry(model, body, key);
+      setPicked(model);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!(error instanceof GeminiApiError)) throw error;
+
+      if (error.status === 429) {
+        quotaErrors.push(error);
+        putOnCooldown(model, error);
+        if (quotaErrors.length >= MAX_QUOTA_FALLBACKS) break;
+        continue;
+      }
+
+      // A listed model can still be disabled for a region/project. Try a small
+      // number of alternatives, but never hammer every model in the catalog.
+      if (error.status === 403 || error.status === 404) {
+        unavailableCount += 1;
+        if (unavailableCount < MAX_QUOTA_FALLBACKS) continue;
+      }
+      throw error;
     }
   }
-  throw new Error(`All models failed. Last error: ${lastError}`);
+
+  if (quotaErrors.length > 0) {
+    const unavailable = quotaErrors.some((error) => error.kind === "quota_unavailable");
+    const daily = quotaErrors.some((error) => error.kind === "daily_quota");
+    const retryValues = quotaErrors
+      .map((error) => error.retryAfterMs)
+      .filter((value): value is number => typeof value === "number" && value > 0);
+    const retryAfterMs = retryValues.length ? Math.min(...retryValues) : undefined;
+    const tried = attempted.join(", ");
+    const kind: ErrorKind = unavailable ? "quota_unavailable" : daily ? "daily_quota" : "rate_limit";
+    throw new GeminiApiError({
+      status: 429,
+      model: attempted[attempted.length - 1] || getModel(),
+      kind,
+      retryAfterMs,
+      message: unavailable
+        ? `Google reports no usable free quota for one or more models on this project. DevLab automatically tried ${tried}. Select an available Flash-Lite model and check this project's limits in Google AI Studio; a quota limit of 0 does not recover by retrying.`
+        : daily
+          ? `Gemini's free daily quota is exhausted. DevLab automatically tried ${tried}. Daily quotas reset at midnight Pacific time. You can wait for the reset or select another available Flash-Lite model in Settings. API keys from the same Google Cloud project share one quota.`
+          : `Gemini is temporarily rate-limiting this project after DevLab tried ${tried}. Try again${retryAfterMs ? ` in about ${humanWait(retryAfterMs)}` : " in a minute"}. If this keeps happening, select a Flash-Lite model in Settings.`,
+    });
+  }
+
+  if (lastError instanceof Error) throw lastError;
+  throw new Error("Gemini could not complete this request. Please try again.");
+}
+
+async function* streamModelWithRetry(
+  model: string,
+  body: object,
+  key: string,
+): AsyncGenerator<string, void, unknown> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let emitted = false;
+    try {
+      for await (const chunk of streamWithModel(model, body, key)) {
+        emitted = true;
+        yield chunk;
+      }
+      return;
+    } catch (error) {
+      // Never restart a response after showing part of it; doing so duplicates
+      // text and may charge quota for a second full generation.
+      if (emitted || !(error instanceof GeminiApiError)) throw error;
+
+      const retryableServerError = [500, 503, 504].includes(error.status);
+      const shortRateLimit = error.status === 429
+        && error.kind === "rate_limit"
+        && (error.retryAfterMs || 1_000) <= MAX_AUTO_RETRY_WAIT_MS;
+      if (attempt > 0 || (!retryableServerError && !shortRateLimit)) throw error;
+
+      const base = error.retryAfterMs || (retryableServerError ? 1_200 : 2_000);
+      await delay(Math.min(base + Math.round(Math.random() * 350), MAX_AUTO_RETRY_WAIT_MS));
+    }
+  }
 }
 
 async function* streamWithModel(
   model: string,
-  history: GenTurn[],
+  body: object,
   key: string,
 ): AsyncGenerator<string, void, unknown> {
-  const body = {
-    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-    contents: history.map((h) => ({
-      role: h.role,
-      parts: [{ text: h.text }],
-    })),
-    generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
-  };
-
-  // ── Path 1: SSE streaming (preferred, gives token-by-token output) ──
+  let emitted = false;
   try {
-    yield* streamSse(model, body, key);
-    return;
-  } catch (sseErr) {
-    const msg = (sseErr as Error).message;
-    // If it's a model-not-found / permission error, surface it so the outer
-    // loop can try the next model in the fallback chain.
-    if (msg.includes("API 404") || msg.includes("API 403") || msg.includes("API 400")) {
-      throw sseErr;
+    for await (const chunk of streamSse(model, body, key)) {
+      emitted = true;
+      yield chunk;
     }
-    // For NetworkError / CORS / aborts etc., fall through to non-streaming fallback.
-    console.warn("[DevLab] SSE failed, falling back to non-streaming:", msg);
+    return;
+  } catch (error) {
+    // HTTP failures need deliberate retry/failover handling. Falling straight
+    // through to generateContent used to duplicate every 429 request.
+    if (emitted || error instanceof GeminiApiError) throw error;
+    console.warn("[DevLab] Streaming transport failed; trying a non-streaming request.", error);
   }
 
-  // ── Path 2: Non-streaming generateContent (chunked yield for UX) ──
   yield* generateNonStreaming(model, body, key);
 }
 
@@ -191,19 +395,14 @@ async function* streamSse(
   body: object,
   key: string,
 ): AsyncGenerator<string, void, unknown> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(key)}`;
-
+  const url = endpoint(model, "streamGenerateContent", key, "&alt=sse");
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`API ${res.status}: ${errText.slice(0, 300)}`);
-  }
-  if (!res.body) throw new Error("No response stream");
+  if (!res.ok) throw await responseError(res, model);
+  if (!res.body) throw new Error("Gemini returned no response stream.");
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -216,76 +415,207 @@ async function* streamSse(
     const lines = buffer.split("\n");
     buffer = lines.pop() || "";
     for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
-      const json = trimmed.slice(5).trim();
-      if (!json || json === "[DONE]") continue;
-      try {
-        const parsed = JSON.parse(json);
-        const text =
-          parsed?.candidates?.[0]?.content?.parts
-            ?.map((p: { text?: string }) => p.text || "")
-            .join("") || "";
-        if (text) yield text;
-      } catch {
-        // partial JSON, ignore
-      }
+      const text = textFromSseLine(line);
+      if (text) yield text;
     }
+  }
+
+  buffer += decoder.decode();
+  if (buffer) {
+    const text = textFromSseLine(buffer);
+    if (text) yield text;
   }
 }
 
-// Fallback: plain JSON response, chunked into ~20-char "tokens" so the UI
-// still feels like streaming instead of dumping the whole answer at once.
+function textFromSseLine(line: string): string {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("data:")) return "";
+  const data = trimmed.slice(5).trim();
+  if (!data || data === "[DONE]") return "";
+  try {
+    const parsed = JSON.parse(data);
+    return parsed?.candidates?.[0]?.content?.parts
+      ?.map((part: { text?: string }) => part.text || "")
+      .join("") || "";
+  } catch {
+    return "";
+  }
+}
+
+// Fallback for browsers/proxies that cannot keep the SSE connection open.
 async function* generateNonStreaming(
   model: string,
   body: object,
   key: string,
 ): AsyncGenerator<string, void, unknown> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
-
-  const res = await fetch(url, {
+  const res = await fetch(endpoint(model, "generateContent", key), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`API ${res.status}: ${errText.slice(0, 300)}`);
-  }
+  if (!res.ok) throw await responseError(res, model);
 
   const json = await res.json();
-  const text =
-    json?.candidates?.[0]?.content?.parts
-      ?.map((p: { text?: string }) => p.text || "")
-      .join("") || "";
+  const text = json?.candidates?.[0]?.content?.parts
+    ?.map((part: { text?: string }) => part.text || "")
+    .join("") || "";
   if (!text) {
-    yield "*(empty response — try again)*";
+    yield "*(Gemini returned an empty response — try again.)*";
     return;
   }
 
-  // Chunk into ~18-char pieces with tiny delays for a "streaming" feel.
-  const CHUNK = 18;
-  for (let i = 0; i < text.length; i += CHUNK) {
-    yield text.slice(i, i + CHUNK);
-    await new Promise((r) => setTimeout(r, 12));
+  const chunkSize = 18;
+  for (let i = 0; i < text.length; i += chunkSize) {
+    yield text.slice(i, i + chunkSize);
+    await delay(12);
   }
 }
 
-export interface ModelInfo {
-  name: string;        // e.g. "models/gemini-3.6-flash"
-  displayName: string;
-  supported: boolean;  // supports generateContent
+function endpoint(model: string, method: string, key: string, suffix = ""): string {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:${method}?key=${encodeURIComponent(key)}${suffix}`;
 }
 
-// Fetches the full model list from Google's API and caches it briefly in memory.
-let cachedList: { ts: number; models: ModelInfo[] } | null = null;
-const CACHE_MS = 60_000;
+async function responseError(response: Response, model: string): Promise<GeminiApiError> {
+  const raw = await response.text();
+  let message = raw;
+  let details: unknown[] = [];
+  try {
+    const parsed = JSON.parse(raw);
+    message = parsed?.error?.message || raw;
+    details = Array.isArray(parsed?.error?.details) ? parsed.error.details : [];
+  } catch {
+    // Some proxies return plain text or HTML. It is kept out of the UI.
+  }
 
+  const detailText = JSON.stringify(details);
+  const combined = `${message} ${detailText}`.toLowerCase();
+  const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"))
+    ?? retryDelayFromDetails(details)
+    ?? retryDelayFromMessage(message);
+  const zeroQuota = response.status === 429 && (
+    /quota[^\n]*limit:\s*0\b/.test(combined)
+    || /"quotavalue"\s*:\s*"?0"?/.test(combined)
+  );
+  const daily = response.status === 429
+    && !zeroQuota
+    && /per.?day|daily|requestsperday|tokensperday/.test(combined);
+
+  const kind: ErrorKind = response.status === 429
+    ? (zeroQuota ? "quota_unavailable" : daily ? "daily_quota" : "rate_limit")
+    : response.status === 401
+      ? "authentication"
+      : response.status === 403
+        ? "permission"
+        : response.status === 404
+          ? "not_found"
+          : response.status >= 500
+            ? "server"
+            : "request";
+
+  return new GeminiApiError({
+    status: response.status,
+    model,
+    kind,
+    retryAfterMs,
+    rawMessage: message,
+    message: friendlyApiMessage(response.status, kind, model, retryAfterMs),
+  });
+}
+
+function friendlyApiMessage(status: number, kind: ErrorKind, model: string, retryAfterMs?: number): string {
+  if (kind === "daily_quota") {
+    return `The free daily quota for ${model} has been used. DevLab is trying another available model; this quota resets at midnight Pacific time.`;
+  }
+  if (kind === "quota_unavailable") {
+    return `Google reports a quota limit of 0 for ${model}. DevLab is trying another available Flash-Lite model.`;
+  }
+  if (kind === "rate_limit") {
+    return `Google is temporarily rate-limiting ${model}. DevLab is trying another model${retryAfterMs ? `; this one should recover in about ${humanWait(retryAfterMs)}` : ""}.`;
+  }
+  if (kind === "authentication") return "Google rejected this API key. Replace it in Settings → Providers.";
+  if (kind === "permission") return `${model} is not enabled for this Google project or region.`;
+  if (kind === "not_found") return `${model} is no longer available. DevLab is trying a supported model.`;
+  if (kind === "server") return `Gemini is temporarily unavailable (API ${status}). DevLab retried the request; please try again shortly.`;
+  return `Gemini rejected the request (API ${status}) for ${model}. Check the selected model and generation settings.`;
+}
+
+function parseRetryAfter(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1_000);
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
+}
+
+function retryDelayFromDetails(details: unknown[]): number | undefined {
+  for (const detail of details) {
+    if (!detail || typeof detail !== "object") continue;
+    const value = (detail as Record<string, unknown>).retryDelay;
+    if (typeof value === "string") {
+      const parsed = parseDuration(value);
+      if (parsed !== undefined) return parsed;
+    }
+  }
+  return undefined;
+}
+
+function retryDelayFromMessage(message: string): number | undefined {
+  const match = message.match(/retry\s+in\s+([\d.]+)\s*s/i);
+  return match ? Number(match[1]) * 1_000 : undefined;
+}
+
+function parseDuration(value: string): number | undefined {
+  const match = value.match(/^([\d.]+)s$/);
+  return match ? Number(match[1]) * 1_000 : undefined;
+}
+
+function humanWait(ms: number): string {
+  const seconds = Math.max(1, Math.ceil(ms / 1_000));
+  if (seconds < 60) return `${seconds} second${seconds === 1 ? "" : "s"}`;
+  const minutes = Math.ceil(seconds / 60);
+  return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+}
+
+function limitHistory(history: GenTurn[]): GenTurn[] {
+  const kept: GenTurn[] = [];
+  let remaining = MAX_CONTEXT_CHARS;
+  for (let index = history.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const turn = history[index];
+    const text = turn.text.length > remaining
+      ? turn.text.slice(turn.text.length - remaining)
+      : turn.text;
+    kept.unshift({ ...turn, text });
+    remaining -= text.length;
+  }
+  while (kept[0]?.role === "model") kept.shift();
+  return kept;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : min;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve((reader.result as string).split(",")[1] || "");
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// Fetches the model list and caches it briefly. Listing models does not consume
+// generateContent quota and lets us avoid requests to retired model IDs.
 export async function listAvailableModels(): Promise<ModelInfo[]> {
   const key = getApiKey();
   if (!key) return [];
-  if (cachedList && Date.now() - cachedList.ts < CACHE_MS) return cachedList.models;
+  if (cachedList && cachedList.key === key && Date.now() - cachedList.ts < CACHE_MS) {
+    return cachedList.models;
+  }
   try {
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`,
@@ -293,43 +623,76 @@ export async function listAvailableModels(): Promise<ModelInfo[]> {
     if (!res.ok) return [];
     const json = await res.json();
     const models: ModelInfo[] = (json.models || [])
-      .filter((m: { name?: string }) => m.name && m.name.startsWith("models/"))
-      .map((m: { name: string; displayName?: string; supportedGenerationMethods?: string[] }) => ({
-        name: m.name,
-        displayName: m.displayName || m.name.replace("models/", ""),
-        supported: (m.supportedGenerationMethods || []).includes("generateContent"),
+      .filter((model: { name?: string }) => model.name?.startsWith("models/"))
+      .map((model: { name: string; displayName?: string; supportedGenerationMethods?: string[] }) => ({
+        name: model.name,
+        displayName: model.displayName || model.name.replace("models/", ""),
+        supported: (model.supportedGenerationMethods || []).includes("generateContent"),
       }));
-    cachedList = { ts: Date.now(), models };
+    cachedList = { key, ts: Date.now(), models };
     return models;
   } catch {
     return [];
   }
 }
 
-// Pick the best model we actually have access to, from the FALLBACK_CHAIN.
+async function buildCandidateModels(): Promise<{
+  candidates: string[];
+  cooled: { model: string; cooldown: Cooldown }[];
+}> {
+  const models = await listAvailableModels();
+  const supportedIds = new Set(
+    models.filter((model) => model.supported).map((model) => model.name.replace("models/", "")),
+  );
+  const haveLiveList = supportedIds.size > 0;
+  const cooldowns = readCooldowns();
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const cooled: { model: string; cooldown: Cooldown }[] = [];
+
+  const push = (model: string | null) => {
+    if (!model || seen.has(model) || (haveLiveList && !supportedIds.has(model))) return;
+    seen.add(model);
+    const cooldown = cooldowns[model];
+    if (cooldown?.until > Date.now()) cooled.push({ model, cooldown });
+    else ordered.push(model);
+  };
+
+  push(getModel());
+  push(getPicked());
+  for (const model of FALLBACK_CHAIN) push(model);
+  for (const model of supportedIds) push(model);
+  return { candidates: ordered, cooled };
+}
+
+// Pick the configured model when it is available, otherwise the most economical
+// stable fallback exposed to this API key.
 export async function pickBestModel(): Promise<string | null> {
-  const cached = getPicked();
-  if (cached) return cached;
   const models = await listAvailableModels();
   if (models.length === 0) return null;
-  const ids = new Set(models.map((m) => m.name.replace("models/", "")));
+  const ids = new Set(
+    models.filter((model) => model.supported).map((model) => model.name.replace("models/", "")),
+  );
+  const configured = getModel();
+  if (ids.has(configured)) {
+    setPicked(configured);
+    return configured;
+  }
   for (const candidate of FALLBACK_CHAIN) {
     if (ids.has(candidate)) {
       setPicked(candidate);
       return candidate;
     }
   }
-  // Nothing in our preferred chain? Just take the first generateContent-supporting one.
-  const any = models.find((m) => m.supported);
-  if (any) {
-    const id = any.name.replace("models/", "");
-    setPicked(id);
-    return id;
-  }
-  return null;
+  const any = models.find((model) => model.supported);
+  if (!any) return null;
+  const id = any.name.replace("models/", "");
+  setPicked(id);
+  return id;
 }
 
-// Kept for backwards-compat with SettingsPanel "Test connection" button.
+// This validates authentication and model-list access. It deliberately does not
+// generate content, because a "Test" button should not consume user quota.
 export async function verifyKey(): Promise<boolean> {
   const key = getApiKey();
   if (!key) return false;

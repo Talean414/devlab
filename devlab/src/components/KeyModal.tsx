@@ -15,8 +15,8 @@ export function KeyModal({
         </div>
         <h2 className="text-lg font-semibold text-white">Bring Your Own Key</h2>
         <p className="mt-1.5 text-[13px] leading-relaxed text-zinc-400">
-          DevLab's AI agents run on your own free Google AI Studio key.
-          It's stored only in this browser — never uploaded anywhere.
+          DevLab has no subscription fee. Its AI agents use your Google AI Studio key,
+          subject to Google's free per-project quotas. The key stays in this browser.
         </p>
 
         <div className="mt-5 flex gap-2 rounded-lg border border-cyan-500/20 bg-cyan-500/[0.06] p-3 text-[12px] text-cyan-200/90">
@@ -53,15 +53,26 @@ export function KeyModal({
             Later
           </button>
         </div>
-        <a
-          href="https://aistudio.google.com/app/apikey"
-          target="_blank"
-          rel="noreferrer"
-          className="mt-3 inline-flex items-center gap-1 text-center text-[12px] text-cyan-400 hover:underline"
-        >
-          Get a free key at aistudio.google.com
-          <ExternalLink className="h-3 w-3" />
-        </a>
+        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1">
+          <a
+            href="https://aistudio.google.com/app/apikey"
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-[12px] text-cyan-400 hover:underline"
+          >
+            Get a free key
+            <ExternalLink className="h-3 w-3" />
+          </a>
+          <a
+            href="https://ai.dev/rate-limit"
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-[12px] text-zinc-500 hover:text-cyan-400 hover:underline"
+          >
+            Check quota
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        </div>
       </div>
     </div>
   );
