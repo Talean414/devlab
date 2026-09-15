@@ -5,69 +5,28 @@ import { runtimes } from "../data/runtimes";
 import { Terminal, Package, Cpu, Rocket, Shield, BookOpen } from "lucide-react";
 
 const TABS = [
-  { id: "quick",    label: "Quick Install", Icon: Rocket },
-  { id: "theia",    label: "Build DevLab",  Icon: Package },
-  { id: "runtimes", label: "Runtimes",      Icon: Cpu },
-  { id: "agents",   label: "AI Agents",     Icon: Terminal },
-  { id: "dist",     label: "Distribute",    Icon: Shield },
+  { id: "quick",    label: "Start Here",       Icon: Rocket },
+  { id: "theia",    label: "Native Blueprint", Icon: Package },
+  { id: "runtimes", label: "Native Runtimes",     Icon: Cpu },
+  { id: "agents",   label: "External AI CLIs",    Icon: Terminal },
+  { id: "dist",     label: "Native Distribution", Icon: Shield },
 ] as const;
 
-const INSTALL_SH = `#!/usr/bin/env bash
-# install.sh — one-line DevLab bootstrap
-set -euo pipefail
+const LOCAL_SETUP = `# 1. Clone the repository
+git clone https://github.com/Talean414/devlab.git
+cd devlab/devlab
 
-echo "▸ Installing DevLab developer lab…"
+# 2. Use Node.js 22 (with nvm)
+nvm install
+nvm use
 
-OS="$(uname -s)"; ARCH="$(uname -m)"
-DEVLAB_HOME="\${DEVLAB_HOME:-$HOME/.devlab}"
-mkdir -p "$DEVLAB_HOME/bin"
+# 3. Install exactly what is in package-lock.json
+npm ci
 
-# ── 1. Core package manager ──────────────────────────────
-if [ "$OS" = "Darwin" ]; then
-  command -v brew >/dev/null || \\
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  PKG="brew install"
-else
-  sudo apt-get update -y && PKG="sudo apt-get install -y"
-fi
+# 4. Start the development app
+npm run dev
+# Open http://localhost:5173`;
 
-# ── 2. Language runtimes ─────────────────────────────────
-curl -fsSL https://fnm.vercel.app/install | bash          # Node
-curl -LsSf https://astral.sh/uv/install.sh | sh           # Python
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y   # Rust
-curl -fsSL https://bun.sh/install | bash                  # Bun
-curl -fsSL https://get.docker.com | sh                    # Docker
-
-# ── 3. CLI toolchain ─────────────────────────────────────
-$PKG git jq fzf ripgrep unzip
-cargo install bat eza zoxide git-delta
-uv tool install aider-chat            # AI pair programmer
-npm i -g vercel netlify-cli @railway/cli wrangler supabase
-
-# ── 4. DevLab binary ─────────────────────────────────────
-case "$OS-$ARCH" in
-  Linux-x86_64)  ASSET="DevLab-linux-x64.AppImage" ;;
-  Darwin-arm64)  ASSET="DevLab-macos-arm64.dmg" ;;
-  Darwin-x86_64) ASSET="DevLab-macos-x64.dmg" ;;
-  *) echo "Unsupported: $OS-$ARCH"; exit 1 ;;
-esac
-
-curl -fsSL -o "$DEVLAB_HOME/bin/$ASSET" \\
-  "https://github.com/your-org/devlab/releases/latest/download/$ASSET"
-chmod +x "$DEVLAB_HOME/bin/$ASSET"
-
-# ── 5. 'devlab' shortcut ─────────────────────────────────
-cat > "$DEVLAB_HOME/bin/devlab" <<EOF
-#!/usr/bin/env bash
-exec "$DEVLAB_HOME/bin/$ASSET" "\\$@"
-EOF
-chmod +x "$DEVLAB_HOME/bin/devlab"
-
-SHELL_RC="$HOME/.bashrc"; [ -n "\${ZSH_VERSION:-}" ] && SHELL_RC="$HOME/.zshrc"
-grep -q 'DEVLAB_HOME' "$SHELL_RC" || \\
-  echo "export PATH=\\"$DEVLAB_HOME/bin:\\$PATH\\"" >> "$SHELL_RC"
-
-echo "✓ Done. Restart your shell, then run:  devlab"`;
 
 const THEIA_PKG = `{
   "private": true,
@@ -208,7 +167,7 @@ export function SetupPanel() {
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Local Setup"
-        subtitle="Everything you need to run the real, native DevLab on your machine"
+        subtitle="Run the current web app locally, connect Gemini, and verify a production build"
       />
       <div className="flex gap-5 border-b border-white/5 bg-[#0d1017]/40 px-6 text-xs">
         {TABS.map((t) => (
@@ -228,22 +187,42 @@ export function SetupPanel() {
         <div className="mx-auto max-w-4xl px-7 py-8">
           {tab === "quick" && (
             <>
-              <Head icon={Rocket} title="One-line install"
-                sub="Save this as install.sh in your repo. Developers run one command and get the whole lab." />
-              <CodeBlock code={INSTALL_SH} lang="bash" />
-              <Head icon={Terminal} title="Then just type devlab" sub="After restarting your shell." className="mt-8" />
-              <CodeBlock code={"devlab                  # launch the lab\ndevlab ~/code/my-app    # open a folder directly\ndevlab --new            # start the project builder"} lang="bash" />
+              <Head icon={Rocket} title="1 · Run the current DevLab web app"
+                sub="You need Git, Node.js 20.19+ or 22.12+, npm, and a modern browser." />
+              <CodeBlock code={LOCAL_SETUP} lang="bash" />
+
+              <Head icon={Terminal} title="2 · Connect Gemini" className="mt-8"
+                sub="Each user supplies their own Google AI Studio key; no server environment variable is needed." />
+              <ol className="list-decimal space-y-2 rounded-xl border border-white/10 bg-white/[0.02] py-4 pl-10 pr-5 text-[13px] leading-relaxed text-zinc-300">
+                <li>Create a key at <a className="text-cyan-400 hover:underline" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">Google AI Studio</a>.</li>
+                <li>Paste it into the first-run <strong className="text-white">Bring Your Own Key</strong> window.</li>
+                <li>Open <strong className="text-white">Settings → Providers</strong>, click <strong className="text-white">Test</strong>, and choose a stable Flash-Lite model.</li>
+                <li>Open <strong className="text-white">AI Agent</strong> and send a small test prompt.</li>
+              </ol>
+
+              <Head icon={Shield} title="3 · Verify the production build" className="mt-8"
+                sub="Type-check, build the single-file app, then serve the result locally." />
+              <CodeBlock code={"npm run check\nnpm run preview -- --host 0.0.0.0\n# Open the URL printed by Vite"} lang="bash" />
+
               <Note>
-                Windows users: run the installer inside WSL2 (<code>wsl --install</code>) for full
-                Linux tooling, or download <code>DevLab-Setup.exe</code> from Releases.
+                The current repository is a browser app. Its integrated terminal simulates common
+                commands because a web page cannot execute arbitrary processes on your machine.
+                The <strong>Native Blueprint</strong> tab is optional architecture guidance; this
+                repository does not currently publish a ready-made <code>.exe</code>, <code>.dmg</code>,
+                or <code>.AppImage</code>.
               </Note>
             </>
           )}
 
           {tab === "theia" && (
             <>
-              <Head icon={Package} title="1 · Scaffold the Theia app"
-                sub="Creates the shell that becomes your DevLab binary." />
+              <Note>
+                This is an advanced blueprint for a separate native implementation, not a build
+                target already wired into the current Vite application. Complete and test the
+                desktop integration before advertising downloadable binaries.
+              </Note>
+              <Head icon={Package} title="1 · Scaffold the Theia app" className="mt-8"
+                sub="Creates a separate shell that can become a native DevLab binary." />
               <CodeBlock lang="bash" code={`npm i -g yo generator-theia-extension
 mkdir devlab && cd devlab
 yo theia-extension --standalone
@@ -279,7 +258,7 @@ npm run package:all    # .exe + .dmg + .AppImage together
           {tab === "runtimes" && (
             <>
               <Head icon={Cpu} title="Native runtimes & toolchains"
-                sub="Install these once — DevLab detects them and lights up the matching language servers." />
+                sub="Reference list for a future native build; the current browser app cannot detect local runtimes." />
               {Object.entries(byCat).map(([cat, list]) => (
                 <div key={cat} className="mt-7">
                   <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-cyan-400">{cat}</h3>
@@ -319,8 +298,8 @@ npm run package:all    # .exe + .dmg + .AppImage together
 
           {tab === "agents" && (
             <>
-              <Head icon={Terminal} title="Terminal AI agents"
-                sub="These run in the DevLab terminal and can edit files, run tests and commit for you." />
+              <Head icon={Terminal} title="External terminal AI agents"
+                sub="Run these in your operating-system terminal; DevLab's browser terminal is a simulation." />
               <h3 className="mb-2 mt-6 text-sm font-semibold text-white">Aider — AI pair programmer</h3>
               <CodeBlock lang="bash" code={`uv tool install aider-chat
 export GEMINI_API_KEY="your_key_here"
@@ -366,8 +345,12 @@ chmod 600 ~/.devlab/config.json   # readable only by you`} />
 
           {tab === "dist" && (
             <>
-              <Head icon={Shield} title="Publish DevLab to your team"
-                sub="Free hosting via GitHub Releases + an auto-build pipeline." />
+              <Note>
+                These examples apply only after the separate native blueprint has been implemented.
+                There are no desktop binaries to publish from the current Vite project.
+              </Note>
+              <Head icon={Shield} title="Publish a completed native build" className="mt-8"
+                sub="Example GitHub Releases pipeline for the future desktop implementation." />
               <CodeBlock lang="yaml" code={`# .github/workflows/release.yml
 name: Release DevLab
 on:

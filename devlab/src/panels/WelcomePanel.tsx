@@ -99,7 +99,7 @@ export function WelcomePanel({
               className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-5 py-2.5 text-sm font-medium text-zinc-200 transition hover:bg-white/[0.06]"
             >
               <Download className="h-4 w-4" />
-              Install on my machine
+              Run DevLab locally
             </button>
           </div>
 
@@ -171,13 +171,16 @@ export function WelcomePanel({
               <Download className="h-5 w-5 text-cyan-200" />
             </div>
             <div>
-              <h2 className="text-2xl font-semibold text-white">Ship it as a real desktop app</h2>
+              <h2 className="text-2xl font-semibold text-white">Optional native desktop blueprint</h2>
               <p className="mt-2 max-w-2xl text-sm text-zinc-400">
-                This dashboard is your control plane. To turn DevLab into a standalone
+                The current repository is a working browser app. A trusted native runtime would be
+                needed to execute real terminal, Docker, database, and Git processes. The Eclipse
+                Theia material below is a starting blueprint for that separate implementation—not
+                a prebuilt
                 <span className="mx-1 rounded bg-white/5 px-1.5 py-0.5 font-mono text-[12px] text-zinc-200">
-                  DevLab.exe / .dmg / .AppImage
+                  .exe / .dmg / .AppImage
                 </span>
-                with the Monaco editor and real extensions, use the pre-baked Eclipse Theia config below.
+                release.
               </p>
             </div>
           </div>
@@ -205,14 +208,14 @@ export function WelcomePanel({
           <div className="mt-6 rounded-xl border border-white/10 bg-white/[0.02] p-5 ring-soft">
             <div className="flex items-center gap-3">
               <Package className="h-5 w-5 text-zinc-300" />
-              <h3 className="text-sm font-semibold text-white">Distribute for free · one-line install</h3>
+              <h3 className="text-sm font-semibold text-white">Run the current browser app locally</h3>
             </div>
             <p className="mt-2 text-sm text-zinc-400">
-              Upload binaries to GitHub Releases and ship this install script:
+              Clone the repository, install the locked dependencies, and start Vite:
             </p>
             <div className="mt-3">
               <CodeBlock
-                code="curl -fsSL https://raw.githubusercontent.com/your-org/devlab/main/install.sh | bash"
+                code={"git clone https://github.com/Talean414/devlab.git\ncd devlab/devlab\nnpm ci\nnpm run dev"}
                 lang="bash"
               />
             </div>
@@ -230,7 +233,7 @@ export function WelcomePanel({
                 Open the Local Setup guide
               </span>
               <span className="block text-[12.5px] text-zinc-400">
-                Every command to install 28 runtimes, build the native binary and publish it to your team.
+                Run the web app, connect Gemini, verify production, or explore the optional native blueprint.
               </span>
             </span>
             <ArrowRight className="h-4 w-4 text-cyan-300 transition group-hover:translate-x-0.5" />

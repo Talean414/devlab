@@ -1,11 +1,17 @@
 {
-  "name": "react-vite-tailwind",
+  "name": "devlab",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.1.0",
+  "description": "A free, browser-based developer control plane with BYOK Gemini agents.",
   "type": "module",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
   "scripts": {
     "dev": "vite",
+    "typecheck": "tsc --noEmit",
     "build": "vite build",
+    "check": "npm run typecheck && npm run build",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -24,7 +30,11 @@
     "@vitejs/plugin-react": "5.1.1",
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
-    "vite": "7.3.2",
+    "vite": "^7.3.6",
     "vite-plugin-singlefile": "2.3.0"
+  },
+  "overrides": {
+    "dompurify": "^3.4.15",
+    "esbuild": "^0.28.2"
   }
 }
