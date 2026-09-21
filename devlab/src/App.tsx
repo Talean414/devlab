@@ -195,10 +195,10 @@ export default function App() {
       }
       case "healer":   return hasNativeCapability(runtime, "test-runner")
         ? <Suspense fallback={<NativePanelLoading label="Loading native test runner…" />}>
-          <HealerPanel />
+          <HealerPanel onOpenFiles={openGeneratedSource} onNeedKey={() => setShowModal(true)} />
         </Suspense>
         : nativeFeature(
-          "Self-Healing Tests", "test-runner", "Phase 6A · bounded native test runner before the patch loop",
+          "Self-Healing Tests", "test-runner", "Phase 6B · reviewed repair drafts from real test evidence",
         );
       case "migrate":  return <MigratePanel key={keyVersion} onOpenFiles={openGeneratedSource} />;
       case "vision":   return <VisionPanel key={keyVersion} onOpenFiles={openGeneratedSource} />;
@@ -348,7 +348,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 6A native test runner</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 6B reviewed repair drafts</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}

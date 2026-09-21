@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { PanelHeader } from "./AgentPanel";
+import { getApiKey, streamChat } from "../lib/gemini";
+import { readWorkspaceFile } from "../lib/workspace";
+import type { VFile } from "../types";
 import {
   testRunnerRun,
   testRunnerSnapshot,
@@ -8,9 +11,19 @@ import {
   type TestRunnerSnapshot,
 } from "../lib/testRunner";
 import {
-  AlertTriangle, CheckCircle2, Clock3, FileTerminal, Loader2,
-  Play, RefreshCw, ShieldCheck, Stethoscope, XCircle,
+  AlertTriangle, ArrowRight, CheckCircle2, Clock3, FileTerminal, Loader2,
+  Play, RefreshCw, ShieldCheck, Sparkles, Stethoscope, Wand2, XCircle,
 } from "lucide-react";
+
+const MAX_REPAIR_SOURCE_CHARS = 64 * 1024;
+const MAX_REPAIR_OUTPUT_CHARS = 64 * 1024;
+const MAX_TEST_EVIDENCE_CHARS = 24 * 1024;
+
+interface RepairDraft {
+  path: string;
+  content: string;
+  rationale: string;
+}
 
 function formatError(error: unknown) {
   if (error && typeof error === "object") {
@@ -21,6 +34,46 @@ function formatError(error: unknown) {
     if (typeof maybe.message === "string") return maybe.message;
   }
   return String(error);
+}
+
+function excerpt(value: string, maxChars: number) {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n… truncated for prompt (${value.length.toLocaleString()} characters total).`;
+}
+
+function languageForPath(path: string): string {
+  const extension = path.toLowerCase().split(".").pop() ?? "";
+  const map: Record<string, string> = {
+    ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript",
+    py: "python", rs: "rust", go: "go", java: "java", cs: "csharp",
+    rb: "ruby", php: "php", json: "json", yml: "yaml", yaml: "yaml",
+    md: "markdown", html: "html", css: "css", sql: "sql", sh: "shell",
+    toml: "toml", xml: "xml", dockerfile: "dockerfile",
+  };
+  return map[extension] ?? "plaintext";
+}
+
+function stripJsonFence(value: string) {
+  return value.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+}
+
+function parseRepairDraft(raw: string, path: string): RepairDraft {
+  const cleaned = stripJsonFence(raw);
+  const first = cleaned.indexOf("{");
+  const last = cleaned.lastIndexOf("}");
+  if (first < 0 || last <= first) throw new Error("Model response did not contain a JSON object.");
+  const parsed = JSON.parse(cleaned.slice(first, last + 1)) as { patched?: unknown; rationale?: unknown };
+  if (typeof parsed.patched !== "string" || !parsed.patched.trim()) {
+    throw new Error("Model response did not include a non-empty patched file.");
+  }
+  if (parsed.patched.length > MAX_REPAIR_OUTPUT_CHARS) {
+    throw new Error(`Repair draft exceeded ${(MAX_REPAIR_OUTPUT_CHARS / 1024).toFixed(0)} KiB. Narrow the target file or failing test output.`);
+  }
+  return {
+    path,
+    content: parsed.patched,
+    rationale: typeof parsed.rationale === "string" ? parsed.rationale : "No rationale returned.",
+  };
 }
 
 function statusStyle(status?: TestRunResult["status"]) {
@@ -37,13 +90,23 @@ function ResultIcon({ status }: { status?: TestRunResult["status"] }) {
   return <Stethoscope className="h-4 w-4 text-zinc-500" />;
 }
 
-export function HealerPanel() {
+export function HealerPanel({
+  onOpenFiles,
+  onNeedKey,
+}: {
+  onOpenFiles: (files: VFile[]) => void;
+  onNeedKey: () => void;
+}) {
   const [snapshot, setSnapshot] = useState<TestRunnerSnapshot | null>(null);
   const [selectedId, setSelectedId] = useState("");
   const [result, setResult] = useState<TestRunResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [runningId, setRunningId] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [repairPath, setRepairPath] = useState("");
+  const [repairBusy, setRepairBusy] = useState(false);
+  const [repairDraft, setRepairDraft] = useState<RepairDraft | null>(null);
+  const [repairNotice, setRepairNotice] = useState("");
 
   const selected = useMemo(
     () => snapshot?.profiles.find((profile) => profile.id === selectedId) ?? snapshot?.profiles[0],
@@ -76,11 +139,99 @@ export function HealerPanel() {
     try {
       const next = await testRunnerRun(profile.id);
       setResult(next);
+      setRepairDraft(null);
+      setRepairNotice("");
+      const inferred = inferRepairPath(next.stdout + "\n" + next.stderr);
+      if (inferred) setRepairPath((current) => current || inferred);
     } catch (err) {
       setError(formatError(err));
     } finally {
       setRunningId(null);
     }
+  }
+
+  function inferRepairPath(output: string) {
+    const match = output.match(/(?:^|\s)((?:src|test|tests|app|lib|packages|crates)\/[\w./-]+\.(?:ts|tsx|js|jsx|py|rs|go|java|rb|php|json|yml|yaml|toml|md|css|html))/m);
+    return match?.[1] ?? "";
+  }
+
+  async function generateRepairDraft() {
+    if (!result || result.status === "passed") return;
+    if (!repairPath.trim()) {
+      setError("Enter the failing source-file path to draft a repair.");
+      return;
+    }
+    if (!getApiKey()) {
+      onNeedKey();
+      return;
+    }
+    setRepairBusy(true);
+    setError("");
+    setRepairNotice("");
+    setRepairDraft(null);
+    try {
+      const targetPath = repairPath.trim().replace(/^\/+/, "");
+      const document = await readWorkspaceFile(targetPath);
+      if (document.content.length > MAX_REPAIR_SOURCE_CHARS) {
+        throw new Error(`Repair drafts accept source files up to ${(MAX_REPAIR_SOURCE_CHARS / 1024).toFixed(0)} KiB for this checkpoint.`);
+      }
+      const prompt = `You are DevLab's reviewed repair assistant. A real native test run failed.
+
+Rules:
+- Produce ONLY valid JSON. No markdown fences, no prose outside JSON.
+- Patch exactly this one file: ${targetPath}
+- Return the ENTIRE patched file, not a diff.
+- Do not invent test results.
+- Preserve public APIs unless the test output requires a change.
+- If the evidence is insufficient, make the smallest defensive fix and explain uncertainty in rationale.
+
+JSON shape:
+{
+  "rationale": "short explanation of the root cause and fix",
+  "patched": "complete patched file contents"
+}
+
+TEST PROFILE: ${result.profile.label}
+COMMAND: ${result.profile.command}
+STATUS: ${result.status}
+EXIT CODE: ${result.exitCode ?? "none"}
+TIMED OUT: ${result.timedOut ? "yes" : "no"}
+OUTPUT TRUNCATED: ${result.outputTruncated ? "yes" : "no"}
+
+STDOUT:
+\`\`\`
+${excerpt(result.stdout, MAX_TEST_EVIDENCE_CHARS)}
+\`\`\`
+
+STDERR:
+\`\`\`
+${excerpt(result.stderr, MAX_TEST_EVIDENCE_CHARS)}
+\`\`\`
+
+CURRENT FILE ${targetPath}:
+\`\`\`
+${document.content}
+\`\`\``;
+
+      let raw = "";
+      for await (const chunk of streamChat([{ role: "user", text: prompt }])) raw += chunk;
+      const draft = parseRepairDraft(raw, targetPath);
+      setRepairDraft(draft);
+      setRepairNotice("Repair draft generated in memory. Review it before sending it to the editor draft flow.");
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setRepairBusy(false);
+    }
+  }
+
+  function openRepairDraft() {
+    if (!repairDraft) return;
+    onOpenFiles([{
+      path: repairDraft.path,
+      content: repairDraft.content,
+      language: languageForPath(repairDraft.path),
+    }]);
   }
 
   useEffect(() => {
@@ -103,7 +254,7 @@ export function HealerPanel() {
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Native Test Runner"
-        subtitle="Phase 6A · run backend-discovered test profiles with bounded native processes"
+        subtitle="Phase 6B · native tests plus reviewed in-memory repair drafts"
         badge={badge}
         badgeOk={result?.status === "passed" || (!result && !error && !loading)}
       />
@@ -210,6 +361,12 @@ export function HealerPanel() {
               </div>
             ))}
 
+            {repairNotice && (
+              <div className="mb-4 rounded-xl border border-violet-500/25 bg-violet-500/[0.06] p-3 text-[12px] leading-relaxed text-violet-100/80">
+                <Sparkles className="mr-2 inline h-4 w-4 text-violet-300" /> {repairNotice}
+              </div>
+            )}
+
             {!result && !runningId && !error && (
               <div className="flex min-h-[24rem] flex-col items-center justify-center gap-3 text-center text-zinc-600">
                 <FileTerminal className="h-12 w-12" />
@@ -244,6 +401,50 @@ export function HealerPanel() {
                     <div>Truncated: <span className="font-mono">{result.outputTruncated ? "yes" : "no"}</span></div>
                   </div>
                 </div>
+
+                {result.status !== "passed" && (
+                  <div className="rounded-xl border border-violet-500/20 bg-violet-500/[0.04] p-4 ring-soft">
+                    <div className="flex items-start gap-3">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-violet-500/10 ring-1 ring-violet-500/20">
+                        <Wand2 className="h-4.5 w-4.5 text-violet-300" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-semibold text-violet-100">Reviewed repair draft</div>
+                        <p className="mt-1 text-[12px] leading-relaxed text-zinc-500">
+                          Optional Phase 6B assistant: read one existing source file, use this real test output as evidence, and generate an in-memory draft. Nothing is written automatically.
+                        </p>
+                        <div className="mt-3 flex gap-2">
+                          <input
+                            value={repairPath}
+                            onChange={(event) => setRepairPath(event.target.value)}
+                            placeholder="src/path/to/failing-file.ts"
+                            className="min-w-0 flex-1 rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2 font-mono text-[12px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-violet-500/50"
+                          />
+                          <button
+                            onClick={generateRepairDraft}
+                            disabled={repairBusy || !repairPath.trim()}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-violet-500 px-3 py-2 text-[12px] font-semibold text-white hover:bg-violet-400 disabled:opacity-40"
+                          >
+                            {repairBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                            Draft fix
+                          </button>
+                        </div>
+                        {repairDraft && (
+                          <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3">
+                            <div className="text-[11px] font-semibold uppercase tracking-wider text-violet-300">Rationale</div>
+                            <p className="mt-1 text-[12.5px] leading-relaxed text-zinc-300">{repairDraft.rationale}</p>
+                            <button
+                              onClick={openRepairDraft}
+                              className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-violet-500/40 bg-violet-500/10 px-3 py-2 text-[12px] font-semibold text-violet-100 hover:bg-violet-500/20"
+                            >
+                              <ArrowRight className="h-3.5 w-3.5" /> Open draft in editor review
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 <OutputBlock title="stdout" value={result.stdout} tone="emerald" />
                 <OutputBlock title="stderr" value={result.stderr} tone="rose" />
