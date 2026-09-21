@@ -96,8 +96,8 @@ const PHASES: readonly MigrationPhase[] = [
   {
     n: 5,
     title: "Docker, databases and native HTTP",
-    status: "active",
-    detail: "Docker and SQLite are complete. PostgreSQL now has verified connectivity, protected passwords, bounded schema inspection, single-statement reads and separately confirmed bounded writes; native HTTP is next.",
+    status: "complete",
+    detail: "Docker, SQLite, PostgreSQL and native HTTP are complete. HTTP requests now run through a bounded Rust client instead of browser fetch; agent tools and test execution are next.",
   },
   {
     n: 6,
@@ -192,8 +192,8 @@ export function SetupPanel() {
               <Note>
                 <strong>No fake native results:</strong> opening the app with <code>npm run dev</code>
                 creates only a browser UI preview. Workspace Editor, PTY Terminal, Source Control
-                Docker, workspace-scoped SQLite and PostgreSQL connectivity, schema, bounded reads and separately confirmed writes are available through <code>npm run desktop:dev</code>;
-                native HTTP and test execution stay disabled until their own bounded native increment is implemented.
+                Docker, workspace-scoped SQLite, PostgreSQL connectivity/schema/bounded reads/separately confirmed writes, and native HTTP are available through <code>npm run desktop:dev</code>;
+                test execution stays disabled until its own bounded native increment is implemented.
               </Note>
             </>
           )}
@@ -211,7 +211,7 @@ export function SetupPanel() {
                 <ArchitectureCard
                   icon={Cpu}
                   title="Rust core · phased"
-                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Scoped Git, OS credentials, bounded Docker/SQLite and bounded PostgreSQL reads and confirmed writes"]}
+                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Scoped Git, OS credentials, bounded Docker/SQLite/PostgreSQL and native HTTP"]}
                 />
               </div>
 

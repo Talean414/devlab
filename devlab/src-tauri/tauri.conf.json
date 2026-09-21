@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "DevLab",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "identifier": "io.github.talean414.devlab",
   "build": {
     "frontendDist": "../dist",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "DevLab — Native Developer Control Plane",
+        "title": "DevLab \u2014 Native Developer Control Plane",
         "width": 1440,
         "height": 900,
         "minWidth": 1024,
@@ -24,7 +24,9 @@
       }
     ],
     "security": {
-      "capabilities": ["main-window"],
+      "capabilities": [
+        "main-window"
+      ],
       "csp": "default-src 'self' customprotocol: asset:; connect-src 'self' ipc: http://ipc.localhost https: http: ws: wss:; img-src 'self' asset: http://asset.localhost blob: data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; worker-src 'self' blob:"
     }
   },
@@ -32,7 +34,7 @@
     "active": true,
     "targets": "all",
     "publisher": "Talean414",
-    "copyright": "Copyright © 2026 Talean414",
+    "copyright": "Copyright \u00a9 2026 Talean414",
     "category": "DeveloperTool",
     "shortDescription": "Native, AI-assisted developer control plane",
     "longDescription": "DevLab is an AI-assisted native developer control plane that enables trusted local tools only after their scoped Rust backends are implemented and verified.",

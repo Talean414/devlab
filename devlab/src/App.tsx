@@ -42,6 +42,10 @@ const DatabasePanel = lazy(() => import("./panels/DatabasePanel").then((module) 
   default: module.DatabasePanel,
 })));
 
+const ApiPanel = lazy(() => import("./panels/ApiPanel").then((module) => ({
+  default: module.ApiPanel,
+})));
+
 interface NavItem { id: ViewId; icon: typeof Sparkles; label: string; shortcut?: string }
 
 const NAV: NavItem[] = [
@@ -219,9 +223,13 @@ export default function App() {
         : nativeFeature(
           "Database Client", "database", "Phase 5B.2d · bounded PostgreSQL reads and confirmed writes",
         );
-      case "api":      return nativeFeature(
-        "API Client", "native-http", "Phase 5 · native HTTP client without browser CORS limits",
-      );
+      case "api":      return hasNativeCapability(runtime, "native-http")
+        ? <Suspense fallback={<NativePanelLoading label="Loading native API client…" />}>
+          <ApiPanel />
+        </Suspense>
+        : nativeFeature(
+          "API Client", "native-http", "Phase 5C · native HTTP client without browser CORS limits",
+        );
       case "docker":   return hasNativeCapability(runtime, "docker")
         ? <Suspense fallback={<NativePanelLoading label="Loading native Docker integration…" />}>
           <DockerPanel />
@@ -332,7 +340,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 5B.2d bounded PostgreSQL writes</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 5C native HTTP client</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}

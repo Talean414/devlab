@@ -2,6 +2,7 @@ mod credentials;
 mod database;
 mod docker;
 mod git;
+mod http;
 mod postgres;
 mod terminal;
 mod workspace;
@@ -19,6 +20,7 @@ use git::{
     git_commit, git_diff, git_fetch, git_pull, git_push, git_repository_snapshot,
     git_stage_all, git_stage_paths, git_unstage_all, git_unstage_paths,
 };
+use http::http_request;
 use postgres::{
     database_postgres_connect, database_postgres_connections, database_postgres_disconnect,
     database_postgres_execute, database_postgres_forget_password, database_postgres_query,
@@ -63,6 +65,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
             "secure-storage",
             "docker",
             "database",
+            "native-http",
         ],
     }
 }
@@ -140,6 +143,7 @@ pub fn run() {
             database_postgres_set_write_access,
             database_postgres_disconnect,
             database_postgres_forget_password,
+            http_request,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevLab");
