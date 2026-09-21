@@ -614,7 +614,7 @@ pub async fn test_runner_run(
                 "error",
                 format!("Test profile failed before completion: {}", error.message),
             ),
-        }
+        };
         result
     })
     .await
