@@ -2,9 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { PanelHeader } from "./AgentPanel";
 import {
   DatabaseCommandError,
+  connectPostgres,
   disconnectDatabase,
+  disconnectPostgres,
+  forgetPostgresPassword,
   getDatabaseConnections,
   getDatabaseSchema,
+  getPostgresConnections,
   runDatabaseQuery,
   selectSqliteDatabase,
   setDatabaseWriteAccess,
@@ -13,6 +17,8 @@ import {
   type DatabaseObject,
   type DatabaseQueryResult,
   type DatabaseSchema,
+  type PostgresConnectionInfo,
+  type PostgresConnectRequest,
 } from "../lib/database";
 import {
   AlertCircle,
@@ -28,7 +34,9 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Server,
   ShieldAlert,
+  ShieldCheck,
   Table2,
   Trash2,
   UnlockKeyhole,
@@ -41,8 +49,20 @@ WHERE type IN ('table', 'view')
 ORDER BY type, name
 LIMIT 100;`;
 
+const DEFAULT_POSTGRES_REQUEST: PostgresConnectRequest = {
+  host: "localhost",
+  port: 5432,
+  database: "postgres",
+  username: "postgres",
+  password: "",
+  tlsMode: "verify-full",
+  allowWrites: false,
+  storePassword: false,
+};
+
 export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void }) {
   const [connections, setConnections] = useState<DatabaseConnectionInfo[]>([]);
+  const [postgresConnections, setPostgresConnections] = useState<PostgresConnectionInfo[]>([]);
   const [activeId, setActiveId] = useState("");
   const [schema, setSchema] = useState<DatabaseSchema | null>(null);
   const [sql, setSql] = useState(DEFAULT_SQL);
@@ -55,7 +75,9 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
   const [needsWorkspace, setNeedsWorkspace] = useState(false);
   const [filter, setFilter] = useState("");
   const [connectOpen, setConnectOpen] = useState(false);
+  const [postgresConnectOpen, setPostgresConnectOpen] = useState(false);
   const [newAllowWrites, setNewAllowWrites] = useState(false);
+  const [postgresRequest, setPostgresRequest] = useState<PostgresConnectRequest>(DEFAULT_POSTGRES_REQUEST);
 
   const active = connections.find((connection) => connection.id === activeId) ?? null;
 
@@ -63,8 +85,12 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
     setLoading(true);
     setError("");
     try {
-      const next = await getDatabaseConnections();
+      const [next, nextPostgres] = await Promise.all([
+        getDatabaseConnections(),
+        getPostgresConnections(),
+      ]);
       setConnections(next);
+      setPostgresConnections(nextPostgres);
       setNeedsWorkspace(false);
       setActiveId((current) => (
         next.some((connection) => connection.id === current)
@@ -74,6 +100,7 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
     } catch (caught) {
       if (caught instanceof DatabaseCommandError && caught.code === "workspace_not_selected") {
         setConnections([]);
+        setPostgresConnections([]);
         setActiveId("");
         setNeedsWorkspace(true);
       } else {
@@ -140,6 +167,65 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
         setConnectOpen(false);
         setNeedsWorkspace(true);
       }
+      setError(errorMessage(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function connectPostgresServer() {
+    if (busy) return;
+    setBusy("postgres-connect");
+    setError("");
+    setNotice("");
+    try {
+      const connection = await connectPostgres(postgresRequest);
+      setPostgresConnections((current) => [...current, connection]);
+      setPostgresRequest((current) => ({ ...current, password: "" }));
+      setPostgresConnectOpen(false);
+      setNeedsWorkspace(false);
+      setNotice(
+        `Connected to PostgreSQL ${connection.serverVersion} at ${connection.host}:${connection.port} using TLS policy ${connection.tlsMode}.`,
+      );
+    } catch (caught) {
+      if (caught instanceof DatabaseCommandError && caught.code === "workspace_not_selected") {
+        setPostgresConnectOpen(false);
+        setNeedsWorkspace(true);
+      }
+      setError(errorMessage(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function disconnectPostgresServer(connection: PostgresConnectionInfo) {
+    if (busy) return;
+    setBusy(`postgres-disconnect-${connection.id}`);
+    setError("");
+    try {
+      await disconnectPostgres(connection.id);
+      setPostgresConnections((current) => current.filter((item) => item.id !== connection.id));
+      setNotice(`${connection.name} disconnected. Any securely stored password was retained.`);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function forgetPostgresServerPassword(connection: PostgresConnectionInfo) {
+    if (busy || !connection.credentialStored || !confirm(
+      `Remove the stored PostgreSQL password for “${connection.name}” from the operating-system credential store?\n\nThe live connection will remain open until disconnected.`,
+    )) return;
+    setBusy(`postgres-forget-${connection.id}`);
+    setError("");
+    try {
+      const updated = await forgetPostgresPassword(connection.id);
+      setPostgresConnections((current) => current.map((item) => (
+        item.id === updated.id ? updated : item
+      )));
+      setNotice(`Removed the stored password for ${connection.name}.`);
+    } catch (caught) {
       setError(errorMessage(caught));
     } finally {
       setBusy("");
@@ -235,14 +321,14 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
 
   const subtitle = active
     ? `SQLite ${active.sqliteVersion} · ${active.path} · ${active.allowWrites ? "writes enabled" : "read-only"}`
-    : "Workspace-scoped SQLite · PostgreSQL is the next database checkpoint";
+    : "Workspace-scoped SQLite · native PostgreSQL connectivity";
 
   return (
     <div className="relative flex h-full flex-col">
       <PanelHeader
         title="Native Database Client"
         subtitle={subtitle}
-        badge={active ? (active.allowWrites ? "Writes enabled" : "Read only") : "SQLite"}
+        badge={active ? (active.allowWrites ? "Writes enabled" : "Read only") : "SQLite + PostgreSQL"}
         badgeOk={!!active && !active.allowWrites}
       />
 
@@ -251,13 +337,20 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
 
       <div className="flex min-h-0 flex-1">
         <aside className="flex w-80 shrink-0 flex-col border-r border-white/5 bg-[#0d1017]/40">
-          <div className="border-b border-white/5 p-3">
+          <div className="grid grid-cols-2 gap-2 border-b border-white/5 p-3">
             <button
               onClick={() => { setError(""); setConnectOpen(true); }}
               disabled={!!busy || schemaLoading}
-              className="flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-500/15 px-3 py-2 text-[12px] font-semibold text-cyan-200 hover:bg-cyan-500/25 disabled:opacity-40"
+              className="flex items-center justify-center gap-1.5 rounded-lg bg-cyan-500/15 px-2 py-2 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/25 disabled:opacity-40"
             >
-              <Plus className="h-3.5 w-3.5" /> Open SQLite database
+              <HardDrive className="h-3.5 w-3.5" /> SQLite
+            </button>
+            <button
+              onClick={() => { setError(""); setPostgresConnectOpen(true); }}
+              disabled={!!busy || schemaLoading}
+              className="flex items-center justify-center gap-1.5 rounded-lg bg-blue-500/15 px-2 py-2 text-[11px] font-semibold text-blue-200 hover:bg-blue-500/25 disabled:opacity-40"
+            >
+              <Server className="h-3.5 w-3.5" /> PostgreSQL
             </button>
           </div>
 
@@ -271,7 +364,7 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
             {loading && connections.length === 0 ? (
               <div className="flex items-center gap-2 px-2 py-4 text-[11px] text-zinc-600"><Loader2 className="h-3 w-3 animate-spin" /> Reading native connections…</div>
             ) : connections.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-white/10 p-4 text-center text-[11px] leading-relaxed text-zinc-600">No database is open. Connections live only for this DevLab process.</div>
+              <div className="rounded-lg border border-dashed border-white/10 p-4 text-center text-[11px] leading-relaxed text-zinc-600">No SQLite database is open. Live connections remain only in this DevLab process.</div>
             ) : connections.map((connection) => (
               <button
                 key={connection.id}
@@ -292,6 +385,44 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
                   : <LockKeyhole className="h-3.5 w-3.5 shrink-0 text-emerald-400" />}
               </button>
             ))}
+
+            {postgresConnections.length > 0 && (
+              <div className="mt-3 border-t border-white/5 pt-3">
+                <div className="mb-2 px-1 text-[9.5px] font-semibold uppercase tracking-wider text-blue-400/60">PostgreSQL connectivity</div>
+                {postgresConnections.map((connection) => (
+                  <div key={connection.id} className="mb-2 rounded-lg border border-blue-500/15 bg-blue-500/[0.04] p-2.5">
+                    <div className="flex items-start gap-2">
+                      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-blue-500/10 text-blue-300"><Server className="h-3.5 w-3.5" /></span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[11.5px] font-medium text-zinc-200">{connection.name}</span>
+                        <span className="block truncate font-mono text-[9.5px] text-zinc-600">{connection.username}@{connection.host}:{connection.port}</span>
+                        <span className="mt-1 block text-[9px] text-zinc-700">PostgreSQL {connection.serverVersion} · TLS {connection.tlsMode}</span>
+                      </span>
+                    </div>
+                    <div className="mt-2 flex items-center justify-end gap-1.5">
+                      {connection.credentialStored && (
+                        <button
+                          onClick={() => void forgetPostgresServerPassword(connection)}
+                          disabled={!!busy}
+                          title="Forget stored password"
+                          className="rounded border border-white/10 px-2 py-1 text-[9.5px] text-zinc-500 hover:border-amber-500/20 hover:text-amber-300 disabled:opacity-40"
+                        >
+                          {busy === `postgres-forget-${connection.id}` ? "Removing…" : "Forget password"}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => void disconnectPostgresServer(connection)}
+                        disabled={!!busy}
+                        className="rounded border border-white/10 px-2 py-1 text-[9.5px] text-zinc-500 hover:border-rose-500/20 hover:text-rose-300 disabled:opacity-40"
+                      >
+                        {busy === `postgres-disconnect-${connection.id}` ? "Disconnecting…" : "Disconnect"}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                <div className="px-1 text-[9px] leading-relaxed text-zinc-700">Schema and query execution remain disabled until the next bounded PostgreSQL increment.</div>
+              </div>
+            )}
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col">
@@ -414,6 +545,22 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
           onClose={() => { if (!busy) { setConnectOpen(false); setError(""); } }}
         />
       )}
+      {postgresConnectOpen && (
+        <ConnectPostgresDialog
+          request={postgresRequest}
+          busy={busy === "postgres-connect"}
+          error={error}
+          onChange={setPostgresRequest}
+          onConnect={() => void connectPostgresServer()}
+          onClose={() => {
+            if (!busy) {
+              setPostgresConnectOpen(false);
+              setPostgresRequest((current) => ({ ...current, password: "" }));
+              setError("");
+            }
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -511,6 +658,117 @@ function ResultCell({ cell }: { cell: DatabaseCell }) {
     <td className={`max-w-md whitespace-pre-wrap break-words border-b border-r border-white/5 px-3 py-2 font-mono text-[11px] last:border-r-0 ${colors}`} title={cell.truncated ? "Value was truncated or binary content was omitted" : undefined}>
       {cell.value}
     </td>
+  );
+}
+
+function ConnectPostgresDialog({
+  request,
+  busy,
+  error,
+  onChange,
+  onConnect,
+  onClose,
+}: {
+  request: PostgresConnectRequest;
+  busy: boolean;
+  error: string;
+  onChange: (request: PostgresConnectRequest) => void;
+  onConnect: () => void;
+  onClose: () => void;
+}) {
+  const update = <K extends keyof PostgresConnectRequest>(key: K, value: PostgresConnectRequest[K]) => {
+    onChange({ ...request, [key]: value });
+  };
+  const canConnect = request.host.trim()
+    && request.database.trim()
+    && request.username.trim()
+    && request.port >= 1
+    && request.port <= 65535;
+
+  return (
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/70 p-5 backdrop-blur-sm">
+      <div className="max-h-full w-full max-w-2xl overflow-y-auto rounded-2xl border border-white/10 bg-[#10141c] p-5 shadow-2xl ring-soft">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="flex items-center gap-2 text-base font-semibold text-white"><Server className="h-4 w-4 text-blue-300" /> Connect PostgreSQL</h3>
+            <p className="mt-1 text-[12px] leading-relaxed text-zinc-500">This connectivity checkpoint opens a real native session. Schema browsing and SQL execution remain disabled until the next bounded increment.</p>
+          </div>
+          <button type="button" onClick={onClose} disabled={busy} className="rounded p-1.5 text-zinc-500 hover:bg-white/5 hover:text-white disabled:opacity-40"><X className="h-4 w-4" /></button>
+        </div>
+
+        <div className="mt-5 grid gap-3 sm:grid-cols-2">
+          <PostgresField label="Host" value={request.host} onChange={(value) => update("host", value)} placeholder="db.example.com" disabled={busy} />
+          <label className="block">
+            <span className="mb-1.5 block text-[10.5px] font-medium text-zinc-500">Port</span>
+            <input type="number" min={1} max={65535} value={request.port} onChange={(event) => update("port", Number(event.target.value))} disabled={busy} className="w-full rounded-lg border border-white/10 bg-[#0b0e14] px-3 py-2 text-[12px] text-zinc-200 outline-none focus:border-blue-500/50 disabled:opacity-50" />
+          </label>
+          <PostgresField label="Database" value={request.database} onChange={(value) => update("database", value)} placeholder="postgres" disabled={busy} />
+          <PostgresField label="Username" value={request.username} onChange={(value) => update("username", value)} placeholder="postgres" disabled={busy} />
+          <label className="block sm:col-span-2">
+            <span className="mb-1.5 block text-[10.5px] font-medium text-zinc-500">Password</span>
+            <input type="password" value={request.password} onChange={(event) => update("password", event.target.value)} disabled={busy} autoComplete="new-password" placeholder={request.storePassword ? "Leave blank to reuse the stored password" : "Transient; never written to renderer storage"} maxLength={8 * 1024} className="w-full rounded-lg border border-white/10 bg-[#0b0e14] px-3 py-2 text-[12px] text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-blue-500/50 disabled:opacity-50" />
+          </label>
+        </div>
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <label className={`rounded-xl border p-3 ${request.tlsMode === "verify-full" ? "border-emerald-500/20 bg-emerald-500/[0.04]" : "border-amber-500/25 bg-amber-500/[0.05]"}`}>
+            <span className="mb-1.5 flex items-center gap-1.5 text-[10.5px] font-medium text-zinc-400"><ShieldCheck className="h-3.5 w-3.5" /> TLS policy</span>
+            <select value={request.tlsMode} onChange={(event) => update("tlsMode", event.target.value as PostgresConnectRequest["tlsMode"])} disabled={busy} className="w-full rounded-lg border border-white/10 bg-[#0b0e14] px-2.5 py-2 text-[11.5px] text-zinc-200 outline-none disabled:opacity-50">
+              <option value="verify-full">Verify certificate and hostname</option>
+              <option value="disable">Disable TLS (local/trusted network only)</option>
+            </select>
+          </label>
+          <div className="space-y-2">
+            <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-white/10 p-2.5">
+              <input type="checkbox" checked={request.storePassword} onChange={(event) => update("storePassword", event.target.checked)} disabled={busy} className="mt-0.5 h-3.5 w-3.5 accent-blue-500" />
+              <span className="text-[10.5px] leading-relaxed text-zinc-500">Store or reuse this password in the operating-system credential store.</span>
+            </label>
+            <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-white/10 p-2.5">
+              <input type="checkbox" checked={request.allowWrites} onChange={(event) => update("allowWrites", event.target.checked)} disabled={busy} className="mt-0.5 h-3.5 w-3.5 accent-amber-500" />
+              <span className="text-[10.5px] leading-relaxed text-zinc-500">Prepare this session for individually confirmed writes in the next query increment.</span>
+            </label>
+          </div>
+        </div>
+
+        <div className={`mt-4 flex gap-3 rounded-lg border p-3 text-[11px] leading-relaxed ${request.tlsMode === "disable" ? "border-amber-500/20 bg-amber-500/[0.05] text-amber-200/80" : "border-blue-500/15 bg-blue-500/[0.04] text-zinc-500"}`}>
+          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
+          {request.tlsMode === "disable"
+            ? "TLS is disabled. Passwords and database traffic may be visible to the network. Use this only for a local server or a separately protected trusted network."
+            : "The operating-system trust store must validate the server certificate and the certificate must match the host. DevLab does not silently downgrade to plaintext."}
+        </div>
+
+        {error && <div className="mt-3 rounded-lg border border-rose-500/20 bg-rose-500/[0.07] p-3 text-[11.5px] text-rose-200">{error}</div>}
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} disabled={busy} className="rounded-lg border border-white/10 px-3.5 py-2 text-xs text-zinc-400 hover:bg-white/5 hover:text-white disabled:opacity-40">Cancel</button>
+          <button type="button" onClick={onConnect} disabled={busy || !canConnect} className="inline-flex items-center gap-1.5 rounded-lg bg-blue-500 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-400 disabled:opacity-40">
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Server className="h-3.5 w-3.5" />}
+            {busy ? "Connecting…" : "Connect native session"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PostgresField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  disabled,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  disabled: boolean;
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1.5 block text-[10.5px] font-medium text-zinc-500">{label}</span>
+      <input value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled} placeholder={placeholder} maxLength={253} className="w-full rounded-lg border border-white/10 bg-[#0b0e14] px-3 py-2 text-[12px] text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-blue-500/50 disabled:opacity-50" />
+    </label>
   );
 }
 

@@ -97,7 +97,7 @@ const PHASES: readonly MigrationPhase[] = [
     n: 5,
     title: "Docker, databases and native HTTP",
     status: "active",
-    detail: "Docker is complete. Workspace-scoped SQLite now has real schema inspection, bounded queries, read-only mode and individually confirmed writes. PostgreSQL and native HTTP are next.",
+    detail: "Docker and SQLite are complete. PostgreSQL now has native connectivity, verified TLS policy and optional OS-protected passwords; bounded schema/query execution is the next increment, followed by native HTTP.",
   },
   {
     n: 6,
@@ -192,8 +192,8 @@ export function SetupPanel() {
               <Note>
                 <strong>No fake native results:</strong> opening the app with <code>npm run dev</code>
                 creates only a browser UI preview. Workspace Editor, PTY Terminal, Source Control
-                Docker and workspace-scoped SQLite are available through <code>npm run desktop:dev</code>;
-                PostgreSQL, native HTTP and test execution stay disabled until their own native capability is implemented.
+                Docker, workspace-scoped SQLite and native PostgreSQL connectivity are available through <code>npm run desktop:dev</code>;
+                PostgreSQL schema/query execution, native HTTP and test execution stay disabled until their own bounded native increment is implemented.
               </Note>
             </>
           )}
@@ -211,7 +211,7 @@ export function SetupPanel() {
                 <ArchitectureCard
                   icon={Cpu}
                   title="Rust core · phased"
-                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Scoped Git, OS credentials, bounded Docker and SQLite commands"]}
+                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Scoped Git, OS credentials, bounded Docker/SQLite and verified PostgreSQL connectivity"]}
                 />
               </div>
 
@@ -236,6 +236,7 @@ export function SetupPanel() {
                   "Saved Git tokens never return to the renderer; it receives only presence and backend metadata.",
                   "Docker commands accept validated IDs and typed creation fields; pulls have fixed arguments, and arbitrary CLI flags are not exposed.",
                   "SQLite files must resolve inside the selected workspace; writes are disabled by default and confirmed one statement at a time.",
+                  "PostgreSQL TLS policy is explicit; passwords are transient unless the user chooses the operating-system credential store.",
                   "Remote pages are never loaded into a privileged application context.",
                   "Every agent tool action will have timeout, cancellation and audit metadata.",
                 ].map((rule) => (

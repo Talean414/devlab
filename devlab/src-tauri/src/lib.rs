@@ -2,6 +2,7 @@ mod credentials;
 mod database;
 mod docker;
 mod git;
+mod postgres;
 mod terminal;
 mod workspace;
 
@@ -17,6 +18,10 @@ use docker::{
 use git::{
     git_commit, git_diff, git_fetch, git_pull, git_push, git_repository_snapshot,
     git_stage_all, git_stage_paths, git_unstage_all, git_unstage_paths,
+};
+use postgres::{
+    database_postgres_connect, database_postgres_connections, database_postgres_disconnect,
+    database_postgres_forget_password, PostgresService,
 };
 use serde::Serialize;
 use terminal::{
@@ -67,6 +72,7 @@ pub fn run() {
         .manage(WorkspaceService::default())
         .manage(TerminalService::default())
         .manage(DatabaseService::default())
+        .manage(PostgresService::default())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -125,6 +131,10 @@ pub fn run() {
             database_query,
             database_set_write_access,
             database_disconnect,
+            database_postgres_connections,
+            database_postgres_connect,
+            database_postgres_disconnect,
+            database_postgres_forget_password,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevLab");

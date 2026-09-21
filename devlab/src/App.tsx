@@ -217,7 +217,7 @@ export default function App() {
           <DatabasePanel onOpenWorkspace={() => navigate("editor")} />
         </Suspense>
         : nativeFeature(
-          "Database Client", "database", "Phase 5B.1 · workspace-scoped SQLite connections",
+          "Database Client", "database", "Phase 5B.2a · SQLite plus secure PostgreSQL connectivity",
         );
       case "api":      return nativeFeature(
         "API Client", "native-http", "Phase 5 · native HTTP client without browser CORS limits",
@@ -332,7 +332,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 5B.1 native SQLite</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 5B.2a native databases</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}

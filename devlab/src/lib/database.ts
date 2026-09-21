@@ -1,6 +1,32 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { NativeCommandError } from "./workspace";
 
+export type PostgresTlsMode = "verify-full" | "disable";
+
+export interface PostgresConnectRequest {
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  password: string;
+  tlsMode: PostgresTlsMode;
+  allowWrites: boolean;
+  storePassword: boolean;
+}
+
+export interface PostgresConnectionInfo {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  tlsMode: PostgresTlsMode;
+  allowWrites: boolean;
+  serverVersion: string;
+  credentialStored: boolean;
+}
+
 export interface DatabaseConnectionInfo {
   id: string;
   name: string;
@@ -111,4 +137,22 @@ export function setDatabaseWriteAccess(
 
 export function disconnectDatabase(id: string): Promise<void> {
   return command("database_disconnect", { id });
+}
+
+export function getPostgresConnections(): Promise<PostgresConnectionInfo[]> {
+  return command("database_postgres_connections");
+}
+
+export function connectPostgres(
+  request: PostgresConnectRequest,
+): Promise<PostgresConnectionInfo> {
+  return command("database_postgres_connect", { request });
+}
+
+export function disconnectPostgres(id: string): Promise<void> {
+  return command("database_postgres_disconnect", { id });
+}
+
+export function forgetPostgresPassword(id: string): Promise<PostgresConnectionInfo> {
+  return command("database_postgres_forget_password", { id });
 }

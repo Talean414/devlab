@@ -51,6 +51,10 @@
     "allow-database-schema",
     "allow-database-query",
     "allow-database-set-write-access",
-    "allow-database-disconnect"
+    "allow-database-disconnect",
+    "allow-database-postgres-connections",
+    "allow-database-postgres-connect",
+    "allow-database-postgres-disconnect",
+    "allow-database-postgres-forget-password"
   ]
 }
