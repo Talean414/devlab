@@ -344,7 +344,7 @@ fn open_sqlite(path: &Path, allow_writes: bool) -> Result<(Connection, String), 
     } else {
         OpenFlags::SQLITE_OPEN_READ_ONLY
     };
-    let mut connection = Connection::open_with_flags(path, access | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+    let connection = Connection::open_with_flags(path, access | OpenFlags::SQLITE_OPEN_NO_MUTEX)
         .map_err(|error| sqlite_error("open the SQLite database", error))?;
     connection
         .busy_timeout(BUSY_TIMEOUT)

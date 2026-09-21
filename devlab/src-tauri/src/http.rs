@@ -25,7 +25,7 @@ const PER_ADDRESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 trait ReadWrite: Read + Write {}
 impl<T: Read + Write> ReadWrite for T {}
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HttpHeader {
     name: String,
