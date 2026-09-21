@@ -1,11 +1,13 @@
 const APP_COMMANDS: &[&str] = &[
     "get_runtime_info",
+    "agent_audit_list",
     "workspace_select",
     "workspace_current",
     "workspace_close",
     "workspace_list",
     "workspace_read",
     "workspace_write",
+    "workspace_apply_reviewed_draft",
     "workspace_create_file",
     "workspace_create_directory",
     "workspace_rename",
