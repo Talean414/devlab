@@ -54,6 +54,8 @@ const APP_COMMANDS: &[&str] = &[
     "database_postgres_disconnect",
     "database_postgres_forget_password",
     "http_request",
+    "test_runner_snapshot",
+    "test_runner_run",
 ];
 
 fn main() {

@@ -60,6 +60,8 @@
     "allow-database-postgres-set-write-access",
     "allow-database-postgres-disconnect",
     "allow-database-postgres-forget-password",
-    "allow-http-request"
+    "allow-http-request",
+    "allow-test-runner-snapshot",
+    "allow-test-runner-run"
   ]
 }

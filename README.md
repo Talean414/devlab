@@ -6,7 +6,7 @@ DevLab is a native developer control plane built with **Tauri 2, Rust, React, Ty
 
 ## Native migration status
 
-Phases 1 through 4, Docker, SQLite, and the PostgreSQL connectivity/schema/read/write checkpoints of Phase 5 are implemented: DevLab has a Tauri desktop shell, typed Rust-to-React IPC, restricted capabilities, a real scoped workspace service connected to Monaco, a cross-platform PTY terminal connected to xterm.js, native source control, bounded access to a real Docker CLI and engine, workspace-scoped SQLite connections, and real PostgreSQL sessions with explicit TLS policy.
+Phases 1 through 4, Docker, SQLite, PostgreSQL, native HTTP, and the first Phase 6 native test-runner slice are implemented: DevLab has a Tauri desktop shell, typed Rust-to-React IPC, restricted capabilities, a real scoped workspace service connected to Monaco, a cross-platform PTY terminal connected to xterm.js, native source control, bounded access to a real Docker CLI and engine, workspace-scoped SQLite connections, real PostgreSQL sessions with explicit TLS policy, a native API client, and backend-owned test execution profiles.
 
 A workspace can be granted only through the native folder picker. The Rust backend holds its canonical root in memory, rejects absolute paths and parent traversal, blocks symlink access, limits text I/O, watches native filesystem changes, and uses content revisions to prevent silent overwrites.
 
@@ -18,7 +18,7 @@ Containers detects the real Docker CLI and daemon, then reads actual containers,
 
 Database opens an existing SQLite file only through the native picker and only when its canonical path remains inside the selected workspace. The bundled Rust-owned SQLite engine exposes the real user schema and one statement at a time with a five-second timeout, 1,000 displayed rows, 200 columns, bounded cells and a 2 MiB encoded-result budget. Connections default to operating-system-enforced read-only mode. Users can explicitly enable writes per in-memory connection, but every mutating statement still requires separate confirmation. Database attachment, configuration PRAGMAs, explicit transactions, temporary/virtual-table DDL and filesystem-capable SQL functions are blocked.
 
-PostgreSQL connectivity, schema inspection, bounded reads and separately confirmed writes are now native: DevLab opens a real process-memory session with a five-second per-address connection timeout, an explicit `verify-full` or `disable` TLS policy, server-enforced session timeouts, read-only-by-default configuration, and optional password storage in the operating-system credential store. A fixed Rust-owned catalog query returns genuine schema metadata. Every statement runs as exactly one parameter-free statement, and the server rather than a string parser classifies it: DevLab first attempts the statement inside a read-only transaction, where PostgreSQL rejects any mutation with SQLSTATE 25006 before it can change data. Reads return directly from that transaction, so a read is never executed twice. A mutation re-runs in a bounded write transaction only when writes are enabled for that in-memory session and the user confirms that exact statement. Accepted classes are `SELECT`, `WITH`, `VALUES`, `TABLE`, `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `CALL` and `REFRESH`; `CALL` and `MERGE` are accepted when they do not return a result set. Writes can be turned off again at any time, which sends `SET default_transaction_read_only = on` for the session. Time, row, column, cell and encoded-output bounds apply to reads and to `RETURNING` results alike, while statements without a result set report the server's real affected-row count. Identifiers, bound parameters and stacked statements remain rejected. Two statement classes are refused before they run when they would return a result set: PostgreSQL allows neither `CALL` nor `MERGE` inside a `FROM` sub-query or a `WITH` body, so DevLab has no way to apply its server-side cell bounds to their rows, and reports `postgres_result_set_unbounded` instead of running them with weaker bounds. Both work normally when they return no result set, which is the usual case. No sample server, schema or result is substituted. Native HTTP is also implemented: the API Client sends real `http://` and verified `https://` HTTP/1.1 requests from Rust instead of browser `fetch`, so browser CORS does not apply. The client accepts structured method, URL, header, body and timeout fields; rejects non-HTTP schemes, embedded URL credentials, raw spaces/control characters, hop-by-hop framing headers and unsupported methods; forces `Connection: close` and `Accept-Encoding: identity`; and bounds custom headers to 32 KiB, response headers to 64 KiB, request bodies to 2 MiB and response bodies to 5 MiB. Redirects are reported honestly with their status and `Location` header and are not followed automatically in this checkpoint. Deployment, CI, toolchain and test-runner results remain disabled. The normal Vite server remains available strictly as a UI preview.
+PostgreSQL connectivity, schema inspection, bounded reads and separately confirmed writes are now native: DevLab opens a real process-memory session with a five-second per-address connection timeout, an explicit `verify-full` or `disable` TLS policy, server-enforced session timeouts, read-only-by-default configuration, and optional password storage in the operating-system credential store. A fixed Rust-owned catalog query returns genuine schema metadata. Every statement runs as exactly one parameter-free statement, and the server rather than a string parser classifies it: DevLab first attempts the statement inside a read-only transaction, where PostgreSQL rejects any mutation with SQLSTATE 25006 before it can change data. Reads return directly from that transaction, so a read is never executed twice. A mutation re-runs in a bounded write transaction only when writes are enabled for that in-memory session and the user confirms that exact statement. Accepted classes are `SELECT`, `WITH`, `VALUES`, `TABLE`, `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `CALL` and `REFRESH`; `CALL` and `MERGE` are accepted when they do not return a result set. Writes can be turned off again at any time, which sends `SET default_transaction_read_only = on` for the session. Time, row, column, cell and encoded-output bounds apply to reads and to `RETURNING` results alike, while statements without a result set report the server's real affected-row count. Identifiers, bound parameters and stacked statements remain rejected. Two statement classes are refused before they run when they would return a result set: PostgreSQL allows neither `CALL` nor `MERGE` inside a `FROM` sub-query or a `WITH` body, so DevLab has no way to apply its server-side cell bounds to their rows, and reports `postgres_result_set_unbounded` instead of running them with weaker bounds. Both work normally when they return no result set, which is the usual case. No sample server, schema or result is substituted. Native HTTP is also implemented: the API Client sends real `http://` and verified `https://` HTTP/1.1 requests from Rust instead of browser `fetch`, so browser CORS does not apply. The client accepts structured method, URL, header, body and timeout fields; rejects non-HTTP schemes, embedded URL credentials, raw spaces/control characters, hop-by-hop framing headers and unsupported methods; forces `Connection: close` and `Accept-Encoding: identity`; and bounds custom headers to 32 KiB, response headers to 64 KiB, request bodies to 2 MiB and response bodies to 5 MiB. Redirects are reported honestly with their status and `Location` header and are not followed automatically in this checkpoint. Native test execution is also implemented as the first Phase 6 slice: Rust discovers package.json test scripts, Cargo, Go and pytest profiles from the selected workspace, exposes only those backend-owned profile IDs to React, runs the chosen command without a shell, captures bounded output, and kills the process after 60 seconds. Deployment, CI, toolchain and reviewed agent patch tools remain disabled. The normal Vite server remains available strictly as a UI preview.
 
 ## Current working features
 
@@ -44,12 +44,13 @@ PostgreSQL connectivity, schema inspection, bounded reads and separately confirm
 - Separately confirmed bounded PostgreSQL writes, classified by the server through a read-only probe transaction
 - Backend-enforced read-only PostgreSQL transactions with time, row, column, cell and encoded-output limits
 - Native HTTP/HTTPS API client with verified TLS, fixed framing, timeout controls and bounded headers/bodies
+- Native test runner with backend-discovered package, Cargo, Go and pytest profiles, 60-second timeout and bounded output
 - Project template and command references
 - BroadcastChannel/WebRTC collaboration primitives
 - Embedded web preview
 - WebView-local non-secret preferences; the Gemini BYOK key remains in its existing renderer flow
 
-Phase 5 is now complete through Docker, SQLite, PostgreSQL and native HTTP. Agent tool execution, real test running and signed distribution follow afterward. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
+Phase 5 is complete through Docker, SQLite, PostgreSQL and native HTTP. Phase 6 has started with bounded native test execution; reviewed agent patch tools and signed distribution follow afterward. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
 
 ## Requirements
 
@@ -218,7 +219,17 @@ PostgreSQL statements are prepared by the server, parameter-free in this increme
 
 Request bodies are limited to 2 MiB, response headers to 64 KiB and response bodies to 5 MiB. Text/JSON/XML/JavaScript responses are displayed as text, binary responses are summarized without dumping raw binary into the UI, compressed responses are not decompressed because the client requests `Accept-Encoding: identity`, and timeouts or protocol errors are returned as native errors rather than fabricated responses.
 
-## 12. Verify the complete build
+## 12. Run native workspace tests
+
+1. Select the workspace you want to test through **Code Editor**.
+2. Open **Self-Healing Tests / Native Test Runner**. In Phase 6A this panel runs real tests only; it does not apply AI patches yet.
+3. Click **Refresh profiles**. Rust re-discovers supported profiles from the selected workspace: package.json test-like scripts, `Cargo.toml`, `go.mod`, pytest config files or a `tests/` directory.
+4. Choose a profile and click **Run tests**. React sends only the profile ID. Rust recomputes the available profiles, rejects unknown IDs, and runs the backend-owned command from the selected workspace without a shell.
+5. Review the real status, exit code, elapsed time, stdout, stderr, timeout and truncation flags.
+
+Each run has a 60-second process timeout and captures at most 2 MiB per output stream. DevLab sets `CI=1`, `NO_COLOR=1` and `TERM=dumb`, uses the selected workspace as the working directory, and kills the owned process tree on timeout. Project test scripts still execute with the operating-system authority of the user running DevLab, so treat them like terminal commands from that repository.
+
+## 13. Verify the complete build
 
 Run both frontend and native checks before packaging:
 
@@ -228,7 +239,7 @@ npm run native:check
 npm run native:test
 ```
 
-The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary, revision, terminal-dimension, bounded-output, Git parser/path validation, Docker validation, SQLite access-mode/confirmation rules, SQL restrictions and result truncation, plus PostgreSQL connection-field, credential-identity, schema-size, UTF-8 truncation, read-statement and restricted-function validation, the write guard, and native HTTP URL/header/method/request-framing/chunked-body/binary-display validation.
+The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary, revision, terminal-dimension, bounded-output, Git parser/path validation, Docker validation, SQLite access-mode/confirmation rules, SQL restrictions and result truncation, plus PostgreSQL connection-field, credential-identity, schema-size, UTF-8 truncation, read-statement and restricted-function validation, the write guard, native HTTP URL/header/method/request-framing/chunked-body/binary-display validation, and test-runner profile discovery/output sanitization rules.
 
 Build the native application and this operating system's installer formats:
 
@@ -238,7 +249,7 @@ npm run desktop:build
 
 For an interface-only production preview, run `npm run preview -- --host 0.0.0.0`. Native capabilities intentionally remain unavailable in that browser preview.
 
-## 13. Deploy the optional web preview
+## 14. Deploy the optional web preview
 
 DevLab is a static frontend. It does not need a Node server after the build finishes.
 
@@ -343,7 +354,8 @@ Use this list before calling an installation complete:
 - [ ] Gemini key test says **Key valid**
 - [ ] AI Agent streams a response
 - [ ] API Client sends a real native HTTP request, reports status/headers/body/time honestly, rejects unsupported schemes and hop-by-hop headers, and marks large bodies as truncated
-- [ ] Deployment and test-runner panels explicitly say **Simulation removed**; Database clearly marks a read-only PostgreSQL session and shows the write state of every connection
+- [ ] Native Test Runner discovers a real workspace test profile, runs it with bounded output, reports pass/fail/timeout honestly, and rejects unknown profile IDs
+- [ ] Deployment panel explicitly says **Simulation removed**; Database clearly marks a read-only PostgreSQL session and shows the write state of every connection
 - [ ] `npm run desktop:build` creates the platform bundle
 
 ## Common problems
@@ -399,9 +411,9 @@ The connected role must be able to read PostgreSQL's normal catalog metadata. De
 
 This checkpoint accepts one parameter-free `SELECT`, `WITH`, `VALUES`, `TABLE`, `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `CALL` or `REFRESH` statement. It rejects other classes, stacked statements, configuration and filesystem helpers, advisory locks, backend-control functions, large-object import/export and `dblink`. Every statement first runs in an explicit read-only transaction with a five-second total/server timeout and bounded values/output, so a mutation is refused by the server before it changes anything. `postgres_write_disabled` means writes are off for that session, `postgres_write_confirmation_required` means the statement still needs its own confirmation, and `postgres_result_set_unbounded` means a `CALL` or `MERGE` returns rows that PostgreSQL gives DevLab no way to bound. Split work into individual statements.
 
-### API client is unavailable or a test runner says “Simulation removed”
+### API client or test runner is unavailable
 
-The API Client is available only in the native desktop app after the Rust runtime advertises `native-http`; the browser preview cannot open native sockets and does not fall back to browser `fetch`. Test-runner results remain disabled until their real backend is implemented and tested.
+The API Client is available only in the native desktop app after the Rust runtime advertises `native-http`; the browser preview cannot open native sockets and does not fall back to browser `fetch`. The Native Test Runner similarly requires the desktop app, a selected workspace, and the `test-runner` runtime capability. If no profile appears, confirm the workspace has a package.json test script, Cargo.toml, go.mod, pytest config file, or tests/ directory.
 
 ### Containers says Docker is unavailable
 
@@ -470,6 +482,7 @@ devlab/
     │   ├── docker.ts       # typed Docker state, pull, creation, logs and lifecycle IPC client
     │   ├── database.ts     # typed SQLite and PostgreSQL connectivity/schema/read IPC client
     │   ├── http.ts         # typed native HTTP IPC client
+    │   ├── testRunner.ts   # typed native test-runner IPC client
     │   ├── workspace.ts    # typed scoped-filesystem IPC client
     │   ├── settings.ts     # application settings
     │   └── sync.ts         # collaboration helpers
@@ -499,5 +512,6 @@ devlab/
 - Prepare exactly one PostgreSQL read statement, reject parameters and non-read classes, run it in an explicit read-only transaction, deny known server-filesystem/configuration/locking helpers, and bound time plus streamed output. Treat the database role as the authority boundary for user-defined functions and foreign tables.
 - Keep PostgreSQL passwords transient unless the user explicitly chooses the OS credential store; never return stored passwords to the renderer, and provide an explicit removal action.
 - Run API Client requests through the bounded native HTTP command only: accept structured fields, reject non-HTTP schemes and hop-by-hop framing headers, verify HTTPS by default, keep request data transient, and bound time, headers and bodies.
+- Run tests only through backend-discovered profiles, never renderer-supplied shell text; use fixed argv arrays, workspace scoping, process timeouts, output caps and process-tree termination.
 - Remember that the current Gemini key is still renderer-managed and separate from Rust-owned Git credentials.
 - Review generated commands and code before executing or deploying them.

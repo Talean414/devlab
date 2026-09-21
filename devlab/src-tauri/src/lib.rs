@@ -5,6 +5,7 @@ mod git;
 mod http;
 mod postgres;
 mod terminal;
+mod test_runner;
 mod workspace;
 
 use credentials::{git_credential_delete, git_credential_status, git_credential_store};
@@ -31,6 +32,7 @@ use terminal::{
     terminal_clear, terminal_close, terminal_create, terminal_kill, terminal_list,
     terminal_resize, terminal_snapshot, terminal_write, TerminalService,
 };
+use test_runner::{test_runner_run, test_runner_snapshot};
 use workspace::{
     workspace_close, workspace_create_directory, workspace_create_file, workspace_current,
     workspace_delete, workspace_list, workspace_read, workspace_rename, workspace_select,
@@ -66,6 +68,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
             "docker",
             "database",
             "native-http",
+            "test-runner",
         ],
     }
 }
@@ -144,6 +147,8 @@ pub fn run() {
             database_postgres_disconnect,
             database_postgres_forget_password,
             http_request,
+            test_runner_snapshot,
+            test_runner_run,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevLab");

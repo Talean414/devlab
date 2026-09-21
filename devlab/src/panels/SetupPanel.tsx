@@ -97,13 +97,13 @@ const PHASES: readonly MigrationPhase[] = [
     n: 5,
     title: "Docker, databases and native HTTP",
     status: "complete",
-    detail: "Docker, SQLite, PostgreSQL and native HTTP are complete. HTTP requests now run through a bounded Rust client instead of browser fetch; agent tools and test execution are next.",
+    detail: "Docker, SQLite, PostgreSQL and native HTTP are complete. The first Phase 6 slice adds a bounded native test runner; agent patch tools are next.",
   },
   {
     n: 6,
     title: "Agent tool execution",
-    status: "planned",
-    detail: "Permission-gated tools, actual test execution, reviewed patches, audit logs and Ollama support.",
+    status: "active",
+    detail: "Bounded native test execution is implemented first. Permission-gated agent patch tools, audit logs and Ollama support follow.",
   },
   {
     n: 7,
@@ -192,8 +192,8 @@ export function SetupPanel() {
               <Note>
                 <strong>No fake native results:</strong> opening the app with <code>npm run dev</code>
                 creates only a browser UI preview. Workspace Editor, PTY Terminal, Source Control
-                Docker, workspace-scoped SQLite, PostgreSQL connectivity/schema/bounded reads/separately confirmed writes, and native HTTP are available through <code>npm run desktop:dev</code>;
-                test execution stays disabled until its own bounded native increment is implemented.
+                Docker, workspace-scoped SQLite, PostgreSQL connectivity/schema/bounded reads/separately confirmed writes, native HTTP and bounded native test execution are available through <code>npm run desktop:dev</code>;
+                agent patch tools stay disabled until their own reviewed native increment is implemented.
               </Note>
             </>
           )}
@@ -211,7 +211,7 @@ export function SetupPanel() {
                 <ArchitectureCard
                   icon={Cpu}
                   title="Rust core · phased"
-                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Scoped Git, OS credentials, bounded Docker/SQLite/PostgreSQL and native HTTP"]}
+                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Scoped Git, OS credentials, bounded Docker/SQLite/PostgreSQL, native HTTP and native test execution"]}
                 />
               </div>
 

@@ -1,310 +1,271 @@
-import { useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { PanelHeader } from "./AgentPanel";
-import { getApiKey, streamChat } from "../lib/gemini";
-import { computeDiff, diffStats } from "../lib/diff";
-import type { VFile } from "../types";
 import {
-  Stethoscope, Play, Loader2, CheckCircle2, XCircle, Wand2,
-  FileCode2, ArrowRight, Bug, ShieldCheck, RefreshCw, FlaskConical,
+  testRunnerRun,
+  testRunnerSnapshot,
+  type TestProfile,
+  type TestRunResult,
+  type TestRunnerSnapshot,
+} from "../lib/testRunner";
+import {
+  AlertTriangle, CheckCircle2, Clock3, FileTerminal, Loader2,
+  Play, RefreshCw, ShieldCheck, Stethoscope, XCircle,
 } from "lucide-react";
 
-interface Loop {
-  n: number;
-  phase: "diagnosing" | "patching" | "verifying" | "passed" | "failed";
-  diagnosis: string;
-  patched: string;
-  notes: string;
-  base: string;
-}
-
-const SAMPLE_CODE = `export function computeInvoiceTotal(items) {
-  let total = 0;
-  for (let i = 0; i <= items.length; i++) {
-    total += items[i].price * items[i].qty;
-  }
-  const discount = total > 100 ? total * 0.1 : 0;
-  return total - discount;
-}
-
-export function formatCurrency(val) {
-  return "$" + val.toFixed(2);
-}`;
-
-const SAMPLE_ERROR = `FAIL  src/invoice.test.ts
-  ✕ adds line items · TypeError: Cannot read properties of undefined (reading 'price')
-    at computeInvoiceTotal (src/invoice.ts:4:7)
-  ✕ empty cart returns $0.00
-    Expected: "$0.00"  Received: "$NaN"
-Tests: 2 failed, 3 passed · Score: 60%`;
-
-export function HealerPanel({ onOpenFiles }: { onOpenFiles: (f: VFile[]) => void }) {
-  const [code, setCode] = useState(SAMPLE_CODE);
-  const [failLog, setFailLog] = useState(SAMPLE_ERROR);
-  const [path, setPath] = useState("src/invoice.ts");
-  const [loops, setLoops] = useState<Loop[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [running, setRunning] = useState<"idle" | "running" | "passed" | "failed">("idle");
-  const logRef = useRef<HTMLDivElement>(null);
-
-  function scrollLog() {
-    requestAnimationFrame(() => logRef.current?.scrollTo({ top: 99999, behavior: "smooth" }));
-  }
-
-  async function heal() {
-    if (!getApiKey()) return;
-    setBusy(true); setRunning("running"); setLoops([]);
-    let current = code;
-    let log = failLog;
-
-    for (let iter = 1; iter <= 3; iter++) {
-      const entry: Loop = { n: iter, phase: "diagnosing", diagnosis: "", patched: "", notes: "", base: current };
-      setLoops((ls) => [...ls, entry]);
-      scrollLog();
-
-      try {
-        // ── Pass 1: diagnose + patch ──
-        let acc = "";
-        const prompt = `You are DevLab's autonomous debugger. The following file is failing its test suite.
-
-FILE \`${path}\`:
-\`\`\`
-${current}
-\`\`\`
-
-TEST OUTPUT:
-\`\`\`
-${log}
-\`\`\`
-
-Respond with ONLY valid JSON (no fences):
-{
-  "diagnosis": "2-3 sentence root-cause analysis of every failing test",
-  "patched": "the ENTIRE fixed file contents, escaped as a JSON string",
-  "notes": "what changed, one line per fix, separated by newlines",
-  "resolved": true or false — your honest judgment of whether this patch fixes every reported failure
-}
-Never change public APIs unless a test demands it. Keep the same general structure.`;
-        for await (const ch of streamChat([{ role: "user", text: prompt }])) acc += ch;
-        const clean = acc.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
-        const parsed = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1)) as {
-          diagnosis: string; patched: string; notes: string; resolved: boolean;
-        };
-
-        entry.diagnosis = parsed.diagnosis;
-        entry.patched = parsed.patched;
-        entry.notes = parsed.notes;
-        entry.phase = "patching";
-        setLoops((ls) => ls.map((l) => (l.n === iter ? { ...entry } : l)));
-        scrollLog();
-        await new Promise((r) => setTimeout(r, 400));
-
-        // ── Pass 2: agent-verified "re-run" ──
-        entry.phase = "verifying";
-        setLoops((ls) => ls.map((l) => (l.n === iter ? { ...entry } : l)));
-        scrollLog();
-
-        let verify = "";
-        const verifyPrompt = `Act as a strict test runner. Re-execute the ORIGINAL failing tests mentally against this PATCHED file.
-
-PATCHED \`${path}\`:
-\`\`\`
-${parsed.patched}
-\`\`\`
-
-ORIGINAL FAILURES:
-\`\`\`
-${log}
-\`\`\`
-
-Respond with ONLY valid JSON:
-{
-  "passed": true or false,
-  "output": "mimic a realistic test-runner console output: per-test pass/fail lines and a summary like 'Tests: 5 passed · Score: 100%'. If any test would STILL fail, show the exact error."
-}`;
-        for await (const ch of streamChat([{ role: "user", text: verifyPrompt }])) verify += ch;
-        const vc = verify.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
-        const vres = JSON.parse(vc.slice(vc.indexOf("{"), vc.lastIndexOf("}") + 1)) as {
-          passed: boolean; output: string;
-        };
-
-        entry.phase = vres.passed ? "passed" : "failed";
-        entry.notes = parsed.notes + "\n\nTEST RUN:\n" + vres.output;
-        setLoops((ls) => ls.map((l) => (l.n === iter ? { ...entry } : l)));
-        scrollLog();
-
-        if (vres.passed) {
-          current = parsed.patched;
-          setCode(current);
-          setFailLog(vres.output);
-          setRunning("passed");
-          setBusy(false);
-          return;
-        }
-        current = parsed.patched;
-        log = vres.output;
-      } catch (e) {
-        entry.phase = "failed";
-        entry.notes += "\nerror: " + (e as Error).message;
-        setLoops((ls) => ls.map((l) => (l.n === iter ? { ...entry } : l)));
-        break;
-      }
+function formatError(error: unknown) {
+  if (error && typeof error === "object") {
+    const maybe = error as { code?: unknown; message?: unknown };
+    if (typeof maybe.message === "string" && typeof maybe.code === "string") {
+      return `${maybe.message}\n\n[${maybe.code}]`;
     }
-    setRunning("failed");
-    setBusy(false);
+    if (typeof maybe.message === "string") return maybe.message;
+  }
+  return String(error);
+}
+
+function statusStyle(status?: TestRunResult["status"]) {
+  if (status === "passed") return "border-emerald-500/30 bg-emerald-500/[0.06] text-emerald-200";
+  if (status === "timeout") return "border-amber-500/30 bg-amber-500/[0.06] text-amber-200";
+  if (status === "failed") return "border-rose-500/30 bg-rose-500/[0.06] text-rose-200";
+  return "border-white/10 bg-white/[0.02] text-zinc-400";
+}
+
+function ResultIcon({ status }: { status?: TestRunResult["status"] }) {
+  if (status === "passed") return <CheckCircle2 className="h-4 w-4 text-emerald-400" />;
+  if (status === "timeout") return <Clock3 className="h-4 w-4 text-amber-400" />;
+  if (status === "failed") return <XCircle className="h-4 w-4 text-rose-400" />;
+  return <Stethoscope className="h-4 w-4 text-zinc-500" />;
+}
+
+export function HealerPanel() {
+  const [snapshot, setSnapshot] = useState<TestRunnerSnapshot | null>(null);
+  const [selectedId, setSelectedId] = useState("");
+  const [result, setResult] = useState<TestRunResult | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [runningId, setRunningId] = useState<string | null>(null);
+  const [error, setError] = useState("");
+
+  const selected = useMemo(
+    () => snapshot?.profiles.find((profile) => profile.id === selectedId) ?? snapshot?.profiles[0],
+    [snapshot, selectedId],
+  );
+
+  async function refresh() {
+    setLoading(true);
+    setError("");
+    try {
+      const next = await testRunnerSnapshot();
+      setSnapshot(next);
+      setSelectedId((current) => (
+        next.profiles.some((profile) => profile.id === current)
+          ? current
+          : next.profiles[0]?.id ?? ""
+      ));
+    } catch (err) {
+      setSnapshot(null);
+      setError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
   }
 
-  const lastLoop = loops[loops.length - 1];
+  async function run(profile: TestProfile) {
+    setRunningId(profile.id);
+    setResult(null);
+    setError("");
+    try {
+      const next = await testRunnerRun(profile.id);
+      setResult(next);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setRunningId(null);
+    }
+  }
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  const badge = runningId
+    ? "Running…"
+    : result?.status === "passed"
+      ? "Passed"
+      : result?.status === "failed"
+        ? "Failed"
+        : result?.status === "timeout"
+          ? "Timed out"
+          : loading
+            ? "Loading"
+            : "Ready";
 
   return (
     <div className="flex h-full flex-col">
       <PanelHeader
-        title="Self-Healing Test Loop"
-        subtitle="Diagnose → patch → re-run — autonomous until green"
-        badge={
-          running === "passed" ? "All tests passing"
-          : running === "failed" ? "Still failing"
-          : running === "running" ? "Healing…"
-          : "Idle"
-        }
-        badgeOk={running === "passed"}
+        title="Native Test Runner"
+        subtitle="Phase 6A · run backend-discovered test profiles with bounded native processes"
+        badge={badge}
+        badgeOk={result?.status === "passed" || (!result && !error && !loading)}
       />
 
-      <div className="grid min-h-0 flex-1 grid-cols-2 gap-0">
-        {/* input */}
-        <div className="flex min-h-0 flex-col border-r border-white/5">
-          <div className="flex items-center gap-2 border-b border-white/5 px-4 py-2.5">
-            <Bug className="h-4 w-4 text-rose-400" />
-            <span className="text-[12.5px] font-medium text-zinc-200">Broken workspace</span>
-            <input value={path} onChange={(e) => setPath(e.target.value)}
-              className="ml-auto w-40 rounded border border-white/10 bg-[#0d1017] px-2 py-1 font-mono text-[11px] text-zinc-300 outline-none" />
-          </div>
-          <textarea value={code} onChange={(e) => setCode(e.target.value)} spellCheck={false}
-            className="min-h-0 flex-1 resize-none bg-[#0a0c11] p-4 font-mono text-[12px] leading-relaxed text-zinc-200 outline-none" />
-          <div className="border-t border-white/5">
-            <div className="border-b border-white/5 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-              Failing test output
+      <div className="grid min-h-0 flex-1 grid-cols-[22rem_minmax(0,1fr)]">
+        <aside className="flex min-h-0 flex-col border-r border-white/5 bg-[#0d1017]/40">
+          <div className="border-b border-white/5 p-4">
+            <div className="rounded-xl border border-cyan-500/15 bg-cyan-500/[0.04] p-3 text-[11.5px] leading-relaxed text-cyan-100/80">
+              <div className="flex gap-2">
+                <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-cyan-300" />
+                <div>
+                  DevLab does not accept arbitrary shell text here. Rust re-discovers test profiles from the selected workspace, runs the chosen backend-owned command without a shell, captures bounded output and kills it after {snapshot?.timeoutSecs ?? 60}s.
+                </div>
+              </div>
             </div>
-            <textarea value={failLog} onChange={(e) => setFailLog(e.target.value)} spellCheck={false} rows={5}
-              className="w-full resize-none bg-[#0a0c11] p-4 font-mono text-[11.5px] leading-relaxed text-rose-200/80 outline-none" />
-          </div>
-          <div className="flex items-center gap-2 border-t border-white/5 p-3">
-            <button onClick={heal} disabled={busy || !getApiKey()}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-br from-rose-500 to-orange-500 px-4 py-2 text-[12.5px] font-semibold text-white shadow-lg shadow-rose-900/30 transition hover:from-rose-400 hover:to-orange-400 disabled:opacity-40">
-              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-              {busy ? "Healing…" : "Run self-heal"}
+            <button
+              onClick={refresh}
+              disabled={loading || !!runningId}
+              className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-[12px] font-medium text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+            >
+              {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              Refresh profiles
             </button>
-            {lastLoop?.patched && (
-              <button
-                onClick={() => onOpenFiles([{ path, content: lastLoop.patched, language: path.split(".").pop() === "ts" ? "typescript" : "javascript" }])}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-[12.5px] font-semibold text-emerald-200 hover:bg-emerald-500/20">
-                <ArrowRight className="h-3.5 w-3.5" /> Apply fix to editor
-              </button>
-            )}
-            {!getApiKey() && <span className="text-[11.5px] text-amber-300">Add a Gemini key in Settings to enable.</span>}
           </div>
-        </div>
 
-        {/* loop log + diff */}
-        <div ref={logRef} className="min-h-0 flex-1 overflow-y-auto p-4">
-          {loops.length === 0 && (
-            <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-zinc-600">
-              <Stethoscope className="h-10 w-10" />
-              <p className="max-w-xs text-[13px]">
-                Paste broken code and its failing test output, then press
-                <strong className="text-zinc-300"> Run self-heal</strong>. DevLab iterates —
-                diagnose, patch, re-run — until the suite is green.
-              </p>
+          <div className="min-h-0 flex-1 overflow-y-auto p-3">
+            {loading && (
+              <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] p-4 text-[12px] text-zinc-500">
+                <Loader2 className="h-4 w-4 animate-spin text-cyan-400" /> Discovering test profiles…
+              </div>
+            )}
+
+            {!loading && snapshot && snapshot.profiles.length === 0 && (
+              <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.05] p-4 text-[12.5px] leading-relaxed text-amber-100/80">
+                <AlertTriangle className="mb-2 h-5 w-5 text-amber-300" />
+                No supported test profile was detected. Select a workspace with package.json test scripts, Cargo.toml, go.mod, pytest config or a tests/ directory.
+              </div>
+            )}
+
+            {snapshot?.profiles.map((profile) => {
+              const active = selected?.id === profile.id;
+              const isRunning = runningId === profile.id;
+              const profileResult = result?.profile.id === profile.id ? result.status : undefined;
+              return (
+                <button
+                  key={profile.id}
+                  onClick={() => setSelectedId(profile.id)}
+                  className={`mb-2 w-full rounded-xl border p-3 text-left transition ${
+                    active
+                      ? "border-cyan-500/35 bg-cyan-500/[0.07]"
+                      : "border-white/10 bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]"
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    {isRunning ? <Loader2 className="h-4 w-4 animate-spin text-cyan-400" /> : <ResultIcon status={profileResult} />}
+                    <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-zinc-100">{profile.label}</span>
+                  </div>
+                  <div className="mt-2 rounded-md bg-black/25 px-2 py-1 font-mono text-[10.5px] text-zinc-500">
+                    {profile.command}
+                  </div>
+                  <p className="mt-2 line-clamp-2 text-[11px] leading-relaxed text-zinc-500">{profile.reason}</p>
+                </button>
+              );
+            })}
+          </div>
+
+          {snapshot && (
+            <div className="border-t border-white/5 p-3 text-[10.5px] leading-relaxed text-zinc-600">
+              <div className="truncate">Workspace: <span className="text-zinc-400">{snapshot.workspaceName}</span></div>
+              <div>Output cap: {(snapshot.maxOutputBytes / 1024 / 1024).toFixed(0)} MiB per stream</div>
             </div>
           )}
+        </aside>
 
-          {loops.map((loop) => (
-            <div key={loop.n} className="mb-5 rounded-xl border border-white/10 bg-white/[0.02] ring-soft">
-              <div className="flex items-center gap-2.5 border-b border-white/5 px-4 py-2.5">
-                {loop.phase === "passed" ? <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                 : loop.phase === "failed" ? <XCircle className="h-4 w-4 text-rose-400" />
-                 : <Loader2 className="h-4 w-4 animate-spin text-amber-400" />}
-                <span className="text-[13px] font-semibold text-white">Iteration {loop.n}</span>
-                <span className="text-[11.5px] text-zinc-500 capitalize">{loop.phase}</span>
-              </div>
-
-              {loop.diagnosis && (
-                <div className="px-4 py-3">
-                  <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-rose-400">
-                    <Bug className="h-3 w-3" /> Diagnosis
-                  </div>
-                  <p className="text-[12.5px] leading-relaxed text-zinc-300">{loop.diagnosis}</p>
-                </div>
-              )}
-
-              {loop.patched && (
-                <div className="border-t border-white/5 px-4 py-3">
-                  <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-emerald-400">
-                    <Wand2 className="h-3 w-3" /> Patch
-                    {(() => {
-                      const s = diffStats(computeDiff(loop.base, loop.patched));
-                      return <span className="ml-auto font-mono text-[10px]"><span className="text-emerald-400">+{s.adds}</span> <span className="text-rose-400">−{s.dels}</span></span>;
-                    })()}
-                  </div>
-                  <div className="max-h-72 overflow-y-auto rounded-lg border border-white/10 bg-[#0a0c11] p-2 font-mono text-[11px] leading-[1.55]">
-                    {computeDiff(loop.base, loop.patched).map((r, i) => (
-                      <div key={i}
-                        className={
-                          r.type === "add" ? "bg-emerald-500/10 text-emerald-200"
-                          : r.type === "del" ? "bg-rose-500/10 text-rose-300/80 line-through decoration-rose-500/40"
-                          : "text-zinc-600"
-                        }>
-                        <span className="mr-2 inline-block w-7 select-none text-right text-[9.5px] opacity-50">
-                          {r.type === "del" ? r.lineOld : r.lineNew}
-                        </span>
-                        {r.type === "add" ? "+ " : r.type === "del" ? "− " : "  "}
-                        {r.text || " "}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {loop.notes && (
-                <div className="border-t border-white/5 px-4 py-3">
-                  <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-cyan-400">
-                    <FlaskConical className="h-3 w-3" /> Notes & re-run
-                  </div>
-                  <pre className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-zinc-400">{loop.notes}</pre>
-                </div>
-              )}
+        <section className="flex min-h-0 flex-col">
+          <div className="flex items-center justify-between gap-3 border-b border-white/5 px-5 py-3">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-white">{selected?.label ?? "No profile selected"}</div>
+              <div className="mt-0.5 truncate font-mono text-[11px] text-zinc-600">{selected?.command ?? "Select a detected test command."}</div>
             </div>
-          ))}
+            <button
+              onClick={() => selected && run(selected)}
+              disabled={!selected || !!runningId || loading}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-br from-rose-500 to-orange-500 px-4 py-2 text-[12.5px] font-semibold text-white shadow-lg shadow-rose-900/30 transition hover:from-rose-400 hover:to-orange-400 disabled:opacity-40"
+            >
+              {runningId ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+              {runningId ? "Running…" : "Run tests"}
+            </button>
+          </div>
 
-          {running === "passed" && lastLoop && (
-            <div className="flex items-center gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/[0.06] p-4">
-              <ShieldCheck className="h-6 w-6 text-emerald-400" />
-              <div className="flex-1">
-                <div className="text-sm font-semibold text-emerald-200">Suite healed autonomously</div>
-                <p className="text-[12px] text-emerald-200/70">{loops.length} iteration(s). Accept the patch to push it into your workspace.</p>
+          <div className="min-h-0 flex-1 overflow-y-auto p-5">
+            {error && (
+              <div className="mb-4 rounded-xl border border-rose-500/30 bg-rose-500/[0.06] p-4 text-[12.5px] leading-relaxed text-rose-100/90">
+                <div className="mb-2 flex items-center gap-2 font-semibold text-rose-200">
+                  <XCircle className="h-4 w-4" /> Native test runner error
+                </div>
+                <pre className="whitespace-pre-wrap font-mono text-[11.5px]">{error}</pre>
               </div>
-              <button onClick={() => onOpenFiles([{ path, content: lastLoop.patched, language: "typescript" }])}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-2 text-[12px] font-semibold text-white hover:bg-emerald-400">
-                <ArrowRight className="h-3.5 w-3.5" /> Apply fix
-              </button>
-            </div>
-          )}
+            )}
 
-          {running === "failed" && (
-            <div className="flex items-center gap-3 rounded-xl border border-rose-500/30 bg-rose-500/[0.06] p-4">
-              <XCircle className="h-6 w-6 text-rose-400" />
-              <div className="flex-1">
-                <div className="text-sm font-semibold text-rose-200">Max iterations reached</div>
-                <p className="text-[12px] text-rose-200/70">The latest patch may be partially correct — review it above, or run again with clearer test output.</p>
+            {snapshot?.warnings.map((warning) => (
+              <div key={warning} className="mb-3 rounded-xl border border-amber-500/25 bg-amber-500/[0.05] p-3 text-[12px] leading-relaxed text-amber-100/80">
+                <AlertTriangle className="mr-2 inline h-4 w-4 text-amber-300" /> {warning}
               </div>
-              <button onClick={heal} className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-[12px] text-zinc-200 hover:bg-white/5">
-                <RefreshCw className="h-3.5 w-3.5" /> Retry
-              </button>
-            </div>
-          )}
-        </div>
+            ))}
+
+            {!result && !runningId && !error && (
+              <div className="flex min-h-[24rem] flex-col items-center justify-center gap-3 text-center text-zinc-600">
+                <FileTerminal className="h-12 w-12" />
+                <div>
+                  <div className="text-sm font-semibold text-zinc-300">Run a real test profile</div>
+                  <p className="mt-1 max-w-md text-[12.5px] leading-relaxed">
+                    Choose a discovered profile on the left. DevLab will execute only that backend-owned command from the selected workspace, never a renderer-supplied shell string.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {runningId && (
+              <div className="flex min-h-[24rem] flex-col items-center justify-center gap-3 text-center text-zinc-500">
+                <Loader2 className="h-10 w-10 animate-spin text-cyan-400" />
+                <div className="text-sm font-semibold text-zinc-300">Tests are running…</div>
+                <p className="text-[12px]">Native timeout: {snapshot?.timeoutSecs ?? 60}s. Output is captured with hard byte limits.</p>
+              </div>
+            )}
+
+            {result && !runningId && (
+              <div className="space-y-4">
+                <div className={`rounded-xl border p-4 ${statusStyle(result.status)}`}>
+                  <div className="flex items-center gap-2">
+                    <ResultIcon status={result.status} />
+                    <span className="text-sm font-semibold capitalize">{result.status}</span>
+                    <span className="ml-auto font-mono text-[11px] opacity-80">{result.elapsedMs} ms</span>
+                  </div>
+                  <div className="mt-2 grid gap-2 text-[11.5px] sm:grid-cols-3">
+                    <div>Exit code: <span className="font-mono">{result.exitCode ?? "—"}</span></div>
+                    <div>Timed out: <span className="font-mono">{result.timedOut ? "yes" : "no"}</span></div>
+                    <div>Truncated: <span className="font-mono">{result.outputTruncated ? "yes" : "no"}</span></div>
+                  </div>
+                </div>
+
+                <OutputBlock title="stdout" value={result.stdout} tone="emerald" />
+                <OutputBlock title="stderr" value={result.stderr} tone="rose" />
+              </div>
+            )}
+          </div>
+        </section>
       </div>
     </div>
   );
 }
 
-void FileCode2;
+function OutputBlock({ title, value, tone }: { title: string; value: string; tone: "emerald" | "rose" }) {
+  const color = tone === "emerald" ? "text-emerald-300" : "text-rose-300";
+  return (
+    <div className="rounded-xl border border-white/10 bg-[#0a0c11] ring-soft">
+      <div className="flex items-center gap-2 border-b border-white/5 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+        <span className={color}>●</span> {title}
+      </div>
+      <pre className="max-h-[28rem] min-h-28 overflow-auto whitespace-pre-wrap p-4 font-mono text-[11.5px] leading-relaxed text-zinc-300">
+        {value || `(no ${title})`}
+      </pre>
+    </div>
+  );
+}
