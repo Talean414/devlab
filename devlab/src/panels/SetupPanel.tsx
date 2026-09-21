@@ -97,7 +97,7 @@ const PHASES: readonly MigrationPhase[] = [
     n: 5,
     title: "Docker, databases and native HTTP",
     status: "active",
-    detail: "Docker and SQLite are complete. PostgreSQL now has verified connectivity, protected passwords, bounded schema inspection and single-statement read queries in enforced read-only transactions; separately confirmed writes are next, followed by native HTTP.",
+    detail: "Docker and SQLite are complete. PostgreSQL now has verified connectivity, protected passwords, bounded schema inspection, single-statement reads and separately confirmed bounded writes; native HTTP is next.",
   },
   {
     n: 6,
@@ -192,8 +192,8 @@ export function SetupPanel() {
               <Note>
                 <strong>No fake native results:</strong> opening the app with <code>npm run dev</code>
                 creates only a browser UI preview. Workspace Editor, PTY Terminal, Source Control
-                Docker, workspace-scoped SQLite, PostgreSQL connectivity/schema and enforced read-only PostgreSQL queries are available through <code>npm run desktop:dev</code>;
-                PostgreSQL writes, native HTTP and test execution stay disabled until their own bounded native increment is implemented.
+                Docker, workspace-scoped SQLite and PostgreSQL connectivity, schema, bounded reads and separately confirmed writes are available through <code>npm run desktop:dev</code>;
+                native HTTP and test execution stay disabled until their own bounded native increment is implemented.
               </Note>
             </>
           )}
@@ -211,7 +211,7 @@ export function SetupPanel() {
                 <ArchitectureCard
                   icon={Cpu}
                   title="Rust core · phased"
-                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Scoped Git, OS credentials, bounded Docker/SQLite and read-only PostgreSQL inspection"]}
+                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Scoped Git, OS credentials, bounded Docker/SQLite and bounded PostgreSQL reads and confirmed writes"]}
                 />
               </div>
 
@@ -236,7 +236,7 @@ export function SetupPanel() {
                   "Saved Git tokens never return to the renderer; it receives only presence and backend metadata.",
                   "Docker commands accept validated IDs and typed creation fields; pulls have fixed arguments, and arbitrary CLI flags are not exposed.",
                   "SQLite files must resolve inside the selected workspace; writes are disabled by default and confirmed one statement at a time.",
-                  "PostgreSQL TLS is explicit; schema uses fixed SQL; user reads run as one bounded parameter-free statement in a backend-enforced read-only transaction.",
+                  "PostgreSQL TLS is explicit; schema uses fixed SQL; every statement runs as one bounded parameter-free statement, classified by the server in a read-only transaction before any confirmed mutation.",
                   "Remote pages are never loaded into a privileged application context.",
                   "Every agent tool action will have timeout, cancellation and audit metadata.",
                 ].map((rule) => (

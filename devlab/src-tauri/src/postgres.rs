@@ -36,6 +36,10 @@ const MAX_CELL_CHARACTERS: usize = 16_384;
 const MAX_RESULT_JSON_BYTES: usize = 2 * 1024 * 1024;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// SQLSTATE 25006: the server refused a statement because its transaction is read-only.
+const READ_ONLY_SQL_STATE: &str = "25006";
+/// Internal marker used when the read-only probe classifies a statement as a write.
+const READ_ONLY_PROBE_CODE: &str = "postgres_read_only_transaction";
 static KEYRING_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -201,6 +205,51 @@ impl PostgresService {
         let mut inner = self.lock()?;
         let session = require_session(&mut inner, workspace_root, id)?;
         run_read_query(&mut session.client, sql)
+    }
+
+    /// Runs one statement that may read or mutate.
+    ///
+    /// Classification is done by the server, not by string parsing: the first
+    /// attempt always runs inside a read-only transaction, so PostgreSQL
+    /// rejects any mutation with SQLSTATE 25006 before it can change data. A
+    /// statement is only re-run in a write transaction when the connection has
+    /// writes enabled and the user confirmed that exact statement.
+    fn execute(
+        &self,
+        workspace_root: &Path,
+        id: &str,
+        sql: &str,
+        confirmed_write: bool,
+    ) -> Result<PostgresQueryResult, CommandError> {
+        validate_connection_id(id)?;
+        validate_write_query(sql)?;
+        let mut inner = self.lock()?;
+        let session = require_session(&mut inner, workspace_root, id)?;
+        run_write_query(&mut session.client, sql, session.allow_writes, confirmed_write)
+    }
+
+    fn set_write_access(
+        &self,
+        workspace_root: &Path,
+        id: &str,
+        allow_writes: bool,
+    ) -> Result<PostgresConnectionInfo, CommandError> {
+        validate_connection_id(id)?;
+        let mut inner = self.lock()?;
+        let session = require_session(&mut inner, workspace_root, id)?;
+        if session.allow_writes == allow_writes {
+            return Ok(connection_info(id, session));
+        }
+        session
+            .client
+            .batch_execute(if allow_writes {
+                "SET default_transaction_read_only = off;"
+            } else {
+                "SET default_transaction_read_only = on;"
+            })
+            .map_err(|error| postgres_error("change the PostgreSQL write policy", error))?;
+        session.allow_writes = allow_writes;
+        Ok(connection_info(id, session))
     }
 
     fn connect(
@@ -704,6 +753,212 @@ fn validate_read_query(sql: &str) -> Result<(), CommandError> {
     Ok(())
 }
 
+/// Validates one statement for the read-or-write execute command. Reads keep
+/// their existing restrictions; writes add the mutating statement classes and
+/// reject anything that is not exactly one statement.
+fn validate_write_query(sql: &str) -> Result<(), CommandError> {
+    let sql = sql.trim();
+    if sql.is_empty() {
+        return Err(CommandError::new(
+            "postgres_statement_required",
+            "Enter one PostgreSQL statement.",
+        ));
+    }
+    if sql.len() > MAX_SQL_BYTES || sql.contains('\0') {
+        return Err(CommandError::new(
+            "postgres_sql_too_large",
+            format!(
+                "PostgreSQL statements are limited to {MAX_SQL_BYTES} bytes and cannot contain null characters."
+            ),
+        ));
+    }
+    if contains_multiple_statements(sql) || has_content_after_semicolon(sql) {
+        return Err(CommandError::new(
+            "postgres_multiple_statements",
+            "DevLab executes exactly one PostgreSQL statement at a time. Remove the extra statements or the trailing semicolon content.",
+        ));
+    }
+    let identifiers = sql_identifiers(sql);
+    let first = identifiers.first().map(String::as_str).unwrap_or("");
+    if !matches!(
+        first,
+        "select"
+            | "with"
+            | "values"
+            | "table"
+            | "insert"
+            | "update"
+            | "delete"
+            | "merge"
+            | "create"
+            | "alter"
+            | "drop"
+            | "truncate"
+            | "call"
+            | "refresh"
+    ) {
+        return Err(CommandError::new(
+            "postgres_write_statement_unsupported",
+            "This statement class is unavailable. DevLab accepts SELECT, WITH, VALUES, TABLE, INSERT, UPDATE, DELETE, MERGE, CREATE, ALTER, DROP, TRUNCATE, CALL and REFRESH.",
+        ));
+    }
+    if let Some(identifier) = identifiers
+        .iter()
+        .find(|identifier| restricted_read_identifier(identifier))
+    {
+        return Err(CommandError::new(
+            "postgres_query_restricted",
+            format!(
+                "The PostgreSQL function or identifier \u{201c}{identifier}\u{201d} is unavailable in DevLab's bounded client."
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Splits SQL on semicolons that appear outside string literals, quoted
+/// identifiers, comments and dollar-quoted bodies, reporting for each segment
+/// whether it holds real content rather than whitespace or comments only.
+fn sql_statement_segments(sql: &str) -> Vec<bool> {
+    let bytes = sql.as_bytes();
+    let mut segments = vec![false];
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        if bytes[index..].starts_with(b"--") {
+            index += 2;
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            index += 2;
+            let mut depth = 1_usize;
+            while index < bytes.len() && depth > 0 {
+                if bytes[index..].starts_with(b"/*") {
+                    depth = depth.saturating_add(1);
+                    index += 2;
+                } else if bytes[index..].starts_with(b"*/") {
+                    depth = depth.saturating_sub(1);
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if bytes[index] == b';' {
+            segments.push(false);
+            index += 1;
+            continue;
+        }
+        // Anything below is real content for the current segment.
+        let last = segments.len() - 1;
+        segments[last] = true;
+        if bytes[index] == b'\'' {
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\\' && index + 1 < bytes.len() {
+                    index += 2;
+                } else if bytes[index] == b'\'' {
+                    if index + 1 < bytes.len() && bytes[index + 1] == b'\'' {
+                        index += 2;
+                    } else {
+                        index += 1;
+                        break;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if bytes[index] == b'"' {
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'"' {
+                    if index + 1 < bytes.len() && bytes[index + 1] == b'"' {
+                        index += 2;
+                    } else {
+                        index += 1;
+                        break;
+                    }
+                } else {
+                    let Some(character) = sql[index..].chars().next() else {
+                        break;
+                    };
+                    index += character.len_utf8();
+                }
+            }
+            continue;
+        }
+        if bytes[index] == b'$' {
+            if let Some(delimiter_end) = sql[index + 1..].find('$') {
+                let delimiter_end = index + 1 + delimiter_end;
+                let tag = &sql[index + 1..delimiter_end];
+                if tag.bytes().all(|value| value.is_ascii_alphanumeric() || value == b'_') {
+                    let delimiter = &sql[index..=delimiter_end];
+                    let body_start = delimiter_end + 1;
+                    if let Some(body_end) = sql[body_start..].find(delimiter) {
+                        index = body_start + body_end + delimiter.len();
+                        continue;
+                    }
+                }
+            }
+        }
+        let Some(character) = sql[index..].chars().next() else {
+            break;
+        };
+        index += character.len_utf8();
+    }
+    segments
+}
+
+/// True when two or more semicolon-delimited statements carry real content.
+fn contains_multiple_statements(sql: &str) -> bool {
+    sql_statement_segments(sql)
+        .iter()
+        .filter(|has_content| **has_content)
+        .count()
+        > 1
+}
+
+/// True when real content follows a semicolon, which is how DevLab rejects
+/// `SELECT 1; SELECT 2` and stray trailing fragments.
+fn has_content_after_semicolon(sql: &str) -> bool {
+    let segments = sql_statement_segments(sql);
+    segments.len() > 1 && segments[1..].iter().any(|has_content| *has_content)
+}
+
+/// The statement's leading keyword, lowercased, ignoring comments and literals.
+fn first_statement_keyword(sql: &str) -> Option<String> {
+    sql_identifiers(sql).into_iter().next()
+}
+
+/// True when the statement hands rows back from a mutation. PostgreSQL forbids
+/// a data-modifying statement inside a FROM sub-query but allows one as a WITH
+/// body, so this decides which bounding wrapper is generated. A false positive
+/// on a plain read is harmless because the CTE form is equivalent there.
+fn uses_returning(sql: &str) -> bool {
+    sql_identifiers(sql).iter().any(|value| value == "returning")
+}
+
+/// True for statement classes that PostgreSQL allows neither in a FROM
+/// sub-query nor as a WITH body, so DevLab has no way to apply its server-side
+/// cell bounds to their result set. Such statements are rejected before they
+/// run rather than executed with weaker bounds or a confusing syntax error.
+/// Both still work when they return no result set, which is the normal case.
+fn result_set_cannot_be_bounded(sql: &str) -> bool {
+    matches!(
+        first_statement_keyword(sql).as_deref(),
+        Some("call") | Some("merge")
+    )
+}
+
 fn restricted_read_identifier(identifier: &str) -> bool {
     identifier.starts_with("pg_advisory_")
         || identifier.starts_with("pg_read_")
@@ -851,12 +1106,67 @@ fn sql_identifiers(sql: &str) -> Vec<String> {
 }
 
 fn run_read_query(client: &mut Client, sql: &str) -> Result<PostgresQueryResult, CommandError> {
+    run_bounded_statement(client, sql, true, true)
+}
+
+/// Classifies a statement with the server and only then allows a mutation.
+///
+/// The probe runs the statement inside a read-only transaction. Reads succeed
+/// there and are returned directly, so a read is never executed twice. A
+/// mutation is rejected by PostgreSQL with SQLSTATE 25006 before it can change
+/// anything; only then does DevLab check write access and per-statement
+/// confirmation and re-run the statement in a bounded write transaction.
+fn run_write_query(
+    client: &mut Client,
+    sql: &str,
+    allow_writes: bool,
+    confirmed_write: bool,
+) -> Result<PostgresQueryResult, CommandError> {
+    match run_bounded_statement(client, sql, true, false) {
+        Ok(result) => Ok(result),
+        Err(error) if error.code == READ_ONLY_PROBE_CODE => {
+            if !allow_writes {
+                return Err(CommandError::new(
+                    "postgres_write_disabled",
+                    "This PostgreSQL connection is read-only. Enable writes for the connection before running a mutating statement.",
+                ));
+            }
+            if !confirmed_write {
+                return Err(CommandError::new(
+                    "postgres_write_confirmation_required",
+                    "This statement can modify the PostgreSQL database and requires confirmation before execution.",
+                ));
+            }
+            run_bounded_statement(client, sql, false, false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Runs one statement inside an explicit transaction with server-side timeouts,
+/// parameter rejection, column/row/cell bounds and an encoded-output budget.
+/// `require_columns` keeps the legacy reader's insistence on a result set.
+fn run_bounded_statement(
+    client: &mut Client,
+    sql: &str,
+    read_only: bool,
+    require_columns: bool,
+) -> Result<PostgresQueryResult, CommandError> {
     let started = Instant::now();
     let mut transaction = client
         .build_transaction()
-        .read_only(true)
+        .read_only(read_only)
         .start()
-        .map_err(|error| postgres_error("start a read-only PostgreSQL transaction", error))?;
+        .map_err(|error| {
+            postgres_error(
+                if read_only {
+                    "start a read-only PostgreSQL transaction"
+                } else {
+                    "start a bounded PostgreSQL write transaction"
+                },
+                error,
+            )
+        })?;
     transaction
         .batch_execute("SET LOCAL statement_timeout = '5s'; SET LOCAL lock_timeout = '2s';")
         .map_err(|error| postgres_error("apply PostgreSQL query limits", error))?;
@@ -870,10 +1180,36 @@ fn run_read_query(client: &mut Client, sql: &str) -> Result<PostgresQueryResult,
         ));
     }
     if statement.columns().is_empty() {
-        return Err(CommandError::new(
-            "postgres_read_only_statement",
-            "The PostgreSQL statement must return at least one column.",
-        ));
+        if require_columns {
+            return Err(CommandError::new(
+                "postgres_read_only_statement",
+                "The PostgreSQL statement must return at least one column.",
+            ));
+        }
+        // DDL and mutations without RETURNING report the server's real count.
+        let affected_rows = transaction
+            .execute(&statement, &[])
+            .map_err(|error| postgres_error("execute the PostgreSQL statement", error))?;
+        transaction.commit().map_err(|error| {
+            postgres_error(
+                if read_only {
+                    "finish the read-only PostgreSQL statement"
+                } else {
+                    "commit the bounded PostgreSQL write"
+                },
+                error,
+            )
+        })?;
+        return Ok(PostgresQueryResult {
+            columns: Vec::new(),
+            column_types: Vec::new(),
+            rows: Vec::new(),
+            row_count: 0,
+            affected_rows,
+            read_only,
+            truncated: false,
+            elapsed_ms: elapsed_ms(started),
+        });
     }
     if statement.columns().len() > MAX_RESULT_COLUMNS {
         return Err(CommandError::new(
@@ -881,6 +1217,12 @@ fn run_read_query(client: &mut Client, sql: &str) -> Result<PostgresQueryResult,
             format!(
                 "PostgreSQL results are limited to {MAX_RESULT_COLUMNS} displayed columns."
             ),
+        ));
+    }
+    if result_set_cannot_be_bounded(sql) {
+        return Err(CommandError::new(
+            "postgres_result_set_unbounded",
+            "This statement returns a result set that DevLab cannot bound: PostgreSQL allows neither CALL nor MERGE inside a FROM sub-query or a WITH body. Run it without a result set, or read the affected data with a separate SELECT.",
         ));
     }
     let columns = statement
@@ -904,7 +1246,7 @@ fn run_read_query(client: &mut Client, sql: &str) -> Result<PostgresQueryResult,
         .iter()
         .map(|column| column.type_().name().to_string())
         .collect::<Vec<_>>();
-    let bounded_sql = build_bounded_read_sql(sql, statement.columns())?;
+    let bounded_sql = build_bounded_sql(sql, statement.columns())?;
     let bounded_statement = transaction
         .prepare(&bounded_sql)
         .map_err(|error| postgres_error("prepare the bounded PostgreSQL reader", error))?;
@@ -978,19 +1320,34 @@ fn run_read_query(client: &mut Client, sql: &str) -> Result<PostgresQueryResult,
         }
     }
     drop(portal);
-    transaction
-        .commit()
-        .map_err(|error| postgres_error("finish the read-only PostgreSQL query", error))?;
+    transaction.commit().map_err(|error| {
+        postgres_error(
+            if read_only {
+                "finish the read-only PostgreSQL query"
+            } else {
+                "commit the bounded PostgreSQL write"
+            },
+            error,
+        )
+    })?;
+    let row_count = rows.len();
     Ok(PostgresQueryResult {
         columns,
         column_types,
-        row_count: rows.len(),
+        row_count,
         rows,
-        affected_rows: 0,
-        read_only: true,
+        // For statements with a result set DevLab reports the rows the server
+        // actually handed back inside the display bounds; `truncated` states
+        // when the server produced more than that.
+        affected_rows: row_count as u64,
+        read_only,
         truncated,
-        elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        elapsed_ms: elapsed_ms(started),
     })
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn remaining_query_ms(started: Instant) -> Result<u64, CommandError> {
@@ -1003,7 +1360,7 @@ fn remaining_query_ms(started: Instant) -> Result<u64, CommandError> {
     Ok(remaining.as_millis().clamp(1, u128::from(u64::MAX)) as u64)
 }
 
-fn build_bounded_read_sql(
+fn build_bounded_sql(
     sql: &str,
     columns: &[::postgres::Column],
 ) -> Result<String, CommandError> {
@@ -1039,12 +1396,23 @@ fn build_bounded_read_sql(
             ));
         }
     }
-    Ok(format!(
-        "SELECT {} FROM (\n{}\n) AS devlab_source({})",
-        expressions.join(",\n"),
-        inner,
-        aliases.join(", ")
-    ))
+    if uses_returning(sql) {
+        // PostgreSQL rejects a data-modifying statement in a FROM sub-query but
+        // accepts one as a WITH body, where it executes exactly once.
+        Ok(format!(
+            "WITH devlab_source({}) AS (\n{}\n) SELECT {} FROM devlab_source",
+            aliases.join(", "),
+            inner,
+            expressions.join(",\n")
+        ))
+    } else {
+        Ok(format!(
+            "SELECT {} FROM (\n{}\n) AS devlab_source({})",
+            expressions.join(",\n"),
+            inner,
+            aliases.join(", ")
+        ))
+    }
 }
 
 fn postgres_cell_kind(data_type: &Type) -> &'static str {
@@ -1190,7 +1558,28 @@ fn delete_password(account: &str) -> Result<(), CommandError> {
     }
 }
 
+fn is_read_only_sql_state(code: &str) -> bool {
+    code == READ_ONLY_SQL_STATE
+}
+
+/// True when PostgreSQL refused a statement purely because the transaction was
+/// read-only. This is the signal that classifies a statement as a write.
+fn is_read_only_error(error: &::postgres::Error) -> bool {
+    error
+        .as_db_error()
+        .map(|database_error| is_read_only_sql_state(database_error.code().code()))
+        .unwrap_or(false)
+}
+
 fn postgres_error(action: &str, error: ::postgres::Error) -> CommandError {
+    if is_read_only_error(&error) {
+        return CommandError::new(
+            READ_ONLY_PROBE_CODE,
+            format!(
+                "Could not {action}: PostgreSQL refused the statement because the transaction is read-only (SQLSTATE {READ_ONLY_SQL_STATE})."
+            ),
+        );
+    }
     if let Some(database_error) = error.as_db_error() {
         CommandError::new(
             "postgres_server_error",
@@ -1281,6 +1670,35 @@ pub async fn database_postgres_query(
         let workspace_root = app.state::<WorkspaceService>().root_path()?;
         app.state::<PostgresService>()
             .query(&workspace_root, &id, &sql)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn database_postgres_execute(
+    app: AppHandle,
+    id: String,
+    sql: String,
+    confirmed_write: bool,
+) -> Result<PostgresQueryResult, CommandError> {
+    blocking(move || {
+        let workspace_root = app.state::<WorkspaceService>().root_path()?;
+        app.state::<PostgresService>()
+            .execute(&workspace_root, &id, &sql, confirmed_write)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn database_postgres_set_write_access(
+    app: AppHandle,
+    id: String,
+    allow_writes: bool,
+) -> Result<PostgresConnectionInfo, CommandError> {
+    blocking(move || {
+        let workspace_root = app.state::<WorkspaceService>().root_path()?;
+        app.state::<PostgresService>()
+            .set_write_access(&workspace_root, &id, allow_writes)
     })
     .await
 }
@@ -1427,6 +1845,183 @@ mod tests {
                 .expect_err("configuration changes must fail")
                 .code,
             "postgres_query_restricted"
+        );
+    }
+
+    #[test]
+    fn write_query_policy_accepts_reads_and_mutations() {
+        for sql in [
+            "SELECT 1;",
+            "WITH rows AS (SELECT 1) SELECT * FROM rows",
+            "VALUES (1), (2)",
+            "INSERT INTO notes(value) VALUES ('x')",
+            "UPDATE notes SET value = 'y' WHERE id = 1",
+            "DELETE FROM notes WHERE id = 1",
+            "MERGE INTO notes AS target USING staged AS source ON target.id = source.id \
+             WHEN MATCHED THEN UPDATE SET value = source.value",
+            "CREATE TABLE notes(id integer PRIMARY KEY, value text)",
+            "ALTER TABLE notes ADD COLUMN created_at timestamptz",
+            "DROP TABLE notes",
+            "TRUNCATE TABLE notes",
+            "CALL refresh_reports()",
+            "REFRESH MATERIALIZED VIEW report_summary",
+        ] {
+            assert!(validate_write_query(sql).is_ok(), "should accept: {sql}");
+        }
+    }
+
+    #[test]
+    fn write_query_policy_rejects_other_statement_classes() {
+        for sql in [
+            "GRANT ALL ON notes TO developer",
+            "COPY notes FROM STDIN",
+            "BEGIN",
+            "VACUUM",
+            "SET statement_timeout = '0'",
+            "",
+            "   ",
+        ] {
+            assert_eq!(
+                validate_write_query(sql)
+                    .expect_err("statement class must be rejected")
+                    .code,
+                if sql.trim().is_empty() {
+                    "postgres_statement_required"
+                } else {
+                    "postgres_write_statement_unsupported"
+                },
+                "unexpected code for {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_query_policy_accepts_exactly_one_statement_only() {
+        assert_eq!(
+            validate_write_query("SELECT 1; SELECT 2")
+                .expect_err("two statements must fail")
+                .code,
+            "postgres_multiple_statements"
+        );
+        assert_eq!(
+            validate_write_query("INSERT INTO notes(value) VALUES ('x'); DROP TABLE notes;")
+                .expect_err("stacked mutations must fail")
+                .code,
+            "postgres_multiple_statements"
+        );
+        // A single trailing semicolon, comments and whitespace stay acceptable.
+        assert!(validate_write_query("DELETE FROM notes WHERE id = 1;").is_ok());
+        assert!(validate_write_query("DELETE FROM notes WHERE id = 1;  -- done\n").is_ok());
+        assert!(validate_write_query("/* lead */ SELECT 1 /* trail */").is_ok());
+    }
+
+    #[test]
+    fn statement_scanner_ignores_semicolons_inside_literals_and_comments() {
+        assert!(!contains_multiple_statements(
+            "INSERT INTO notes(value) VALUES ('a;b;c')"
+        ));
+        assert!(!contains_multiple_statements(
+            "SELECT $$; DROP TABLE notes;$$ AS harmless_text"
+        ));
+        assert!(!contains_multiple_statements(
+            "SELECT 1 /* ; */ ; -- ; trailing comment"
+        ));
+        assert!(contains_multiple_statements("SELECT 1; SELECT 2"));
+        assert!(has_content_after_semicolon("; SELECT 1"));
+        assert!(!has_content_after_semicolon("SELECT 1;"));
+        assert_eq!(sql_statement_segments("SELECT 1;  ; -- nothing").len(), 3);
+    }
+
+    #[test]
+    fn write_query_policy_still_blocks_restricted_identifiers() {
+        for sql in [
+            "SELECT pg_catalog.pg_read_file('/etc/passwd')",
+            "UPDATE notes SET value = set_config('statement_timeout', '0', false)",
+            "SELECT pg_advisory_lock(1)",
+            "DELETE FROM notes WHERE id = lo_import('/etc/passwd')",
+        ] {
+            assert_eq!(
+                validate_write_query(sql)
+                    .expect_err("restricted identifier must be blocked")
+                    .code,
+                "postgres_query_restricted"
+            );
+        }
+        // The same names inside a literal stay harmless.
+        assert!(validate_write_query("INSERT INTO notes(value) VALUES ('pg_read_file')").is_ok());
+    }
+
+    #[test]
+    fn write_query_policy_enforces_the_sql_size_limit() {
+        let oversized = format!("SELECT '{}'", "x".repeat(MAX_SQL_BYTES));
+        assert_eq!(
+            validate_write_query(&oversized)
+                .expect_err("oversized SQL must fail")
+                .code,
+            "postgres_sql_too_large"
+        );
+        assert_eq!(
+            validate_write_query("SELECT 1;\u{0}")
+                .expect_err("null bytes must fail")
+                .code,
+            "postgres_sql_too_large"
+        );
+    }
+
+    #[test]
+    fn read_only_sqlstate_classification_is_exact() {
+        assert!(is_read_only_sql_state(READ_ONLY_SQL_STATE));
+        assert!(is_read_only_sql_state("25006"));
+        for other in ["25000", "25007", "25P01", "42501", "250065", "", "25006 "] {
+            assert!(!is_read_only_sql_state(other), "must not classify {other:?}");
+        }
+        assert_eq!(READ_ONLY_PROBE_CODE, "postgres_read_only_transaction");
+    }
+
+    #[test]
+    fn returning_statements_use_the_cte_bounding_wrapper() {
+        assert!(uses_returning("INSERT INTO notes(value) VALUES ('x') RETURNING id"));
+        assert!(uses_returning("UPDATE notes SET value = 'y' RETURNING id, value"));
+        assert!(uses_returning("DELETE FROM notes WHERE id = 1 RETURNING *"));
+        assert!(uses_returning(
+            "WITH staged AS (SELECT 1 AS id) INSERT INTO notes(id) SELECT id FROM staged RETURNING id"
+        ));
+        assert!(!uses_returning("SELECT id, value FROM notes LIMIT 10"));
+        assert!(!uses_returning("CREATE TABLE notes(id integer)"));
+        // The word inside a literal must not change the wrapper choice.
+        assert!(!uses_returning("SELECT 'returning' AS label"));
+    }
+
+    #[test]
+    fn first_keyword_detection_skips_comments_and_literals() {
+        assert_eq!(first_statement_keyword("  -- lead\nSELECT 1").as_deref(), Some("select"));
+        assert_eq!(first_statement_keyword("/* c */ INSERT INTO t VALUES (1)").as_deref(), Some("insert"));
+        assert_eq!(first_statement_keyword("WITH x AS (SELECT 1) SELECT * FROM x").as_deref(), Some("with"));
+        assert_eq!(first_statement_keyword("call refresh_reports()").as_deref(), Some("call"));
+        assert_eq!(first_statement_keyword("\"SELECT\" 1").as_deref(), Some("select"));
+        assert_eq!(first_statement_keyword("   "), None);
+    }
+
+    #[test]
+    fn unbounded_result_sets_are_rejected_honestly() {
+        assert!(result_set_cannot_be_bounded("CALL report()"));
+        assert!(result_set_cannot_be_bounded("merge into t using s on t.id = s.id"));
+        assert!(!result_set_cannot_be_bounded("INSERT INTO t(a) VALUES (1) RETURNING a"));
+        assert!(!result_set_cannot_be_bounded("UPDATE t SET a = 1 RETURNING a"));
+        assert!(!result_set_cannot_be_bounded("DELETE FROM t RETURNING *"));
+        assert!(!result_set_cannot_be_bounded("SELECT 1"));
+        assert!(!result_set_cannot_be_bounded("CREATE TABLE t(a integer)"));
+        assert!(!result_set_cannot_be_bounded("TRUNCATE TABLE t"));
+    }
+
+    #[test]
+    fn read_query_policy_is_unchanged_by_the_write_checkpoint() {
+        assert!(validate_read_query("SELECT 1;").is_ok());
+        assert_eq!(
+            validate_read_query("INSERT INTO notes(value) VALUES ('x')")
+                .expect_err("reads must still reject writes")
+                .code,
+            "postgres_read_only_statement"
         );
     }
 

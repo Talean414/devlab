@@ -11,9 +11,10 @@ import {
   getPostgresConnections,
   getPostgresSchema,
   runDatabaseQuery,
-  runPostgresReadQuery,
+  runPostgresExecute,
   selectSqliteDatabase,
   setDatabaseWriteAccess,
+  setPostgresWriteAccess,
   type DatabaseCell,
   type DatabaseConnectionInfo,
   type DatabaseObject,
@@ -246,7 +247,7 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
       setPostgresConnectOpen(false);
       setNeedsWorkspace(false);
       setNotice(
-        `Connected to PostgreSQL ${connection.serverVersion} at ${connection.host}:${connection.port} using TLS policy ${connection.tlsMode}.`,
+        `Connected to PostgreSQL ${connection.serverVersion} at ${connection.host}:${connection.port} using TLS policy ${connection.tlsMode}.${connection.allowWrites ? " Writes are enabled; each mutation still needs its own confirmation." : " The session is read-only."}`,
       );
     } catch (caught) {
       if (caught instanceof DatabaseCommandError && caught.code === "workspace_not_selected") {
@@ -342,9 +343,56 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
     setError("");
     setNotice("");
     try {
-      const next = await runPostgresReadQuery(activePostgres.id, postgresSql);
+      let next: DatabaseQueryResult;
+      try {
+        next = await runPostgresExecute(activePostgres.id, postgresSql, false);
+      } catch (caught) {
+        if (
+          caught instanceof DatabaseCommandError
+          && caught.code === "postgres_write_confirmation_required"
+        ) {
+          const confirmed = confirm(
+            `Run this mutating statement against PostgreSQL \u201c${activePostgres.name}\u201d?\n\nPostgreSQL executes exactly one statement in a bounded transaction. DevLab cannot undo a committed change.`,
+          );
+          if (!confirmed) return;
+          next = await runPostgresExecute(activePostgres.id, postgresSql, true);
+        } else {
+          throw caught;
+        }
+      }
       setPostgresResult(next);
-      setNotice(`Read ${next.rowCount} displayed row${next.rowCount === 1 ? "" : "s"} from PostgreSQL in ${next.elapsedMs} ms.`);
+      if (next.readOnly) {
+        setNotice(`Read ${next.rowCount} displayed row${next.rowCount === 1 ? "" : "s"} from PostgreSQL in ${next.elapsedMs} ms.`);
+      } else {
+        setNotice(`Write completed \u00b7 ${next.affectedRows} row${next.affectedRows === 1 ? "" : "s"}${next.truncated ? " displayed within bounds" : ""} \u00b7 ${next.elapsedMs} ms.`);
+        void loadPostgresSchema(activePostgres.id);
+      }
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function togglePostgresWriteAccess() {
+    if (!activePostgres) return;
+    const enable = !activePostgres.allowWrites;
+    if (enable && !confirm(
+      `Enable write statements for PostgreSQL \u201c${activePostgres.name}\u201d?\n\nDevLab sends SET default_transaction_read_only = off for this in-memory session only. Every mutating statement still requires its own separate confirmation.`,
+    )) return;
+    setBusy("postgres-access");
+    setError("");
+    try {
+      const updated = await setPostgresWriteAccess(activePostgres.id, enable);
+      setPostgresConnections((current) => current.map((connection) => (
+        connection.id === updated.id ? updated : connection
+      )));
+      setPostgresSchema((current) => current?.connection.id === updated.id
+        ? { ...current, connection: updated }
+        : current);
+      setNotice(enable
+        ? "PostgreSQL writes enabled for this session. Every mutating statement still requires confirmation."
+        : "PostgreSQL session returned to enforced read-only mode.");
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
@@ -411,7 +459,7 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
   const subtitle = active
     ? `SQLite ${active.sqliteVersion} · ${active.path} · ${active.allowWrites ? "writes enabled" : "read-only"}`
     : activePostgres
-      ? `PostgreSQL ${activePostgres.serverVersion} · ${activePostgres.username}@${activePostgres.host}:${activePostgres.port}/${activePostgres.database}`
+      ? `PostgreSQL ${activePostgres.serverVersion} · ${activePostgres.username}@${activePostgres.host}:${activePostgres.port}/${activePostgres.database} · ${activePostgres.allowWrites ? "writes enabled" : "read-only"}`
       : "Workspace-scoped SQLite · bounded PostgreSQL schema inspection";
 
   return (
@@ -421,8 +469,10 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
         subtitle={subtitle}
         badge={active
           ? (active.allowWrites ? "Writes enabled" : "Read only")
-          : activePostgres ? `TLS ${activePostgres.tlsMode}` : "SQLite + PostgreSQL"}
-        badgeOk={active ? !active.allowWrites : activePostgres?.tlsMode === "verify-full"}
+          : activePostgres ? `TLS ${activePostgres.tlsMode} · ${activePostgres.allowWrites ? "writes on" : "read only"}` : "SQLite + PostgreSQL"}
+        badgeOk={active
+          ? !active.allowWrites
+          : activePostgres ? activePostgres.tlsMode === "verify-full" && !activePostgres.allowWrites : true}
       />
 
       {error && <Banner tone="error" text={error} onClose={() => setError("")} />}
@@ -494,7 +544,7 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-[11.5px] font-medium text-zinc-200">{connection.name}</span>
                         <span className="block truncate font-mono text-[9.5px] text-zinc-600">{connection.username}@{connection.host}:{connection.port}</span>
-                        <span className="mt-1 block text-[9px] text-zinc-700">PostgreSQL {connection.serverVersion} · TLS {connection.tlsMode}</span>
+                        <span className="mt-1 block text-[9px] text-zinc-700">PostgreSQL {connection.serverVersion} · TLS {connection.tlsMode} · {connection.allowWrites ? "writes enabled" : "read only"}</span>
                       </span>
                     </button>
                     <div className="mt-2 flex items-center justify-end gap-1.5">
@@ -518,7 +568,7 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
                     </div>
                   </div>
                 ))}
-                <div className="px-1 text-[9px] leading-relaxed text-zinc-700">Schema and read queries are bounded. PostgreSQL writes remain disabled until their separate confirmation checkpoint.</div>
+                <div className="px-1 text-[9px] leading-relaxed text-zinc-700">Schema, reads and writes are all bounded. Writes need the session toggle plus a separate confirmation for every mutating statement.</div>
               </div>
             )}
           </div>
@@ -586,8 +636,10 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
               sql={postgresSql}
               result={postgresResult}
               queryBusy={busy === "postgres-query"}
+              accessBusy={busy === "postgres-access"}
               onSql={setPostgresSql}
               onRun={() => void executePostgresQuery()}
+              onToggleWrites={() => void togglePostgresWriteAccess()}
               onRefresh={() => void loadPostgresSchema(activePostgres.id)}
             />
           ) : !active ? (
@@ -717,8 +769,10 @@ function PostgresSchemaSummary({
   sql,
   result,
   queryBusy,
+  accessBusy,
   onSql,
   onRun,
+  onToggleWrites,
   onRefresh,
 }: {
   connection: PostgresConnectionInfo;
@@ -727,8 +781,10 @@ function PostgresSchemaSummary({
   sql: string;
   result: DatabaseQueryResult | null;
   queryBusy: boolean;
+  accessBusy: boolean;
   onSql: (value: string) => void;
   onRun: () => void;
+  onToggleWrites: () => void;
   onRefresh: () => void;
 }) {
   const objects = schema?.objects ?? [];
@@ -771,13 +827,35 @@ function PostgresSchemaSummary({
         <div className="mt-4 overflow-hidden rounded-xl border border-white/10 bg-[#0d1017] ring-soft">
           <div className="flex items-center justify-between border-b border-white/5 px-4 py-2.5">
             <div>
-              <div className="flex items-center gap-2 text-[11px] font-semibold text-zinc-300"><LockKeyhole className="h-3.5 w-3.5 text-emerald-400" /> Enforced read-only PostgreSQL query</div>
-              <div className="mt-0.5 text-[9.5px] text-zinc-600">One SELECT, WITH, VALUES, or TABLE statement · Ctrl/⌘+Enter</div>
+              <div className="flex items-center gap-2 text-[11px] font-semibold text-zinc-300">
+                {connection.allowWrites
+                  ? <UnlockKeyhole className="h-3.5 w-3.5 text-amber-400" />
+                  : <LockKeyhole className="h-3.5 w-3.5 text-emerald-400" />}
+                Bounded PostgreSQL client
+              </div>
+              <div className="mt-0.5 text-[9.5px] text-zinc-600">
+                {connection.allowWrites
+                  ? "Reads run directly; each mutation needs its own confirmation · Ctrl/⌘+Enter"
+                  : "Read-only session · enable writes to run a separately confirmed mutation"}
+              </div>
             </div>
-            <button onClick={onRun} disabled={queryBusy || loading || !sql.trim()} className="inline-flex items-center gap-1.5 rounded-md bg-gradient-to-br from-blue-500 to-cyan-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:from-blue-400 hover:to-cyan-500 disabled:opacity-40">
-              {queryBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3 fill-current" />}
-              {queryBusy ? "Reading…" : "Run read"}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={onToggleWrites}
+                disabled={accessBusy || queryBusy || loading}
+                title={connection.allowWrites
+                  ? "Return this session to enforced read-only mode"
+                  : "Allow separately confirmed writes on this session"}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[10.5px] disabled:opacity-40 ${connection.allowWrites ? "border-amber-500/25 bg-amber-500/[0.07] text-amber-200" : "border-emerald-500/20 bg-emerald-500/[0.05] text-emerald-300"}`}
+              >
+                {accessBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : connection.allowWrites ? <UnlockKeyhole className="h-3 w-3" /> : <LockKeyhole className="h-3 w-3" />}
+                {connection.allowWrites ? "Disable writes" : "Enable writes"}
+              </button>
+              <button onClick={onRun} disabled={queryBusy || loading || !sql.trim()} className="inline-flex items-center gap-1.5 rounded-md bg-gradient-to-br from-blue-500 to-cyan-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:from-blue-400 hover:to-cyan-500 disabled:opacity-40">
+                {queryBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3 fill-current" />}
+                {queryBusy ? "Running…" : "Run statement"}
+              </button>
+            </div>
           </div>
           <textarea
             value={sql}
@@ -796,7 +874,7 @@ function PostgresSchemaSummary({
           />
           <div className="grid gap-1 border-t border-white/5 px-4 py-2 text-[9.5px] text-zinc-700 sm:grid-cols-3">
             <span>5 second timeout</span><span>1,000 displayed rows</span><span>200 displayed columns</span>
-            <span>16,384 displayed characters/cell</span><span>2 MiB encoded rows</span><span>Writes and parameters rejected</span>
+            <span>16,384 displayed characters/cell</span><span>2 MiB encoded rows</span><span>Parameters and stacked statements rejected</span>
           </div>
         </div>
         <div className="mt-4 h-[420px] min-h-[260px]">
@@ -834,7 +912,7 @@ function EmptyDatabaseState({
           {needsWorkspace ? "Open workspace" : "Choose SQLite file"}
         </button>
         <div className="mt-5 rounded-lg border border-white/10 bg-black/20 p-3 text-left text-[11px] leading-relaxed text-zinc-600">
-          SQLite supports bounded reads and confirmed writes. PostgreSQL supports verified connections, bounded schemas and enforced read-only queries; write execution remains disabled.
+          SQLite supports bounded reads and confirmed writes. PostgreSQL supports verified connections, bounded schemas, bounded reads and separately confirmed writes; both stay read-only until writes are explicitly enabled.
         </div>
       </div>
     </div>
@@ -941,7 +1019,7 @@ function ConnectPostgresDialog({
         <div className="flex items-start justify-between gap-4">
           <div>
             <h3 className="flex items-center gap-2 text-base font-semibold text-white"><Server className="h-4 w-4 text-blue-300" /> Connect PostgreSQL</h3>
-            <p className="mt-1 text-[12px] leading-relaxed text-zinc-500">This opens a real native session with bounded schema inspection and enforced read-only queries. PostgreSQL writes remain disabled until their separate checkpoint.</p>
+            <p className="mt-1 text-[12px] leading-relaxed text-zinc-500">This opens a real native session with bounded schema inspection and bounded reads. Writes stay off until you enable them for the session, and every mutating statement then needs its own confirmation.</p>
           </div>
           <button type="button" onClick={onClose} disabled={busy} className="rounded p-1.5 text-zinc-500 hover:bg-white/5 hover:text-white disabled:opacity-40"><X className="h-4 w-4" /></button>
         </div>
@@ -975,7 +1053,7 @@ function ConnectPostgresDialog({
             </label>
             <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-white/10 p-2.5">
               <input type="checkbox" checked={request.allowWrites} onChange={(event) => update("allowWrites", event.target.checked)} disabled={busy} className="mt-0.5 h-3.5 w-3.5 accent-amber-500" />
-              <span className="text-[10.5px] leading-relaxed text-zinc-500">Record write intent for the future individually confirmed write checkpoint. It does not enable writes yet.</span>
+              <span className="text-[10.5px] leading-relaxed text-zinc-500">Opens the session with SET default_transaction_read_only = off. Every mutating statement still requires its own confirmation, and writes can be turned off again at any time.</span>
             </label>
           </div>
         </div>

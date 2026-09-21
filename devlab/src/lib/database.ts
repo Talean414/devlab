@@ -183,6 +183,26 @@ export function runPostgresReadQuery(
   return command("database_postgres_query", { id, sql });
 }
 
+/**
+ * Runs one PostgreSQL statement that may read or mutate. The backend attempts
+ * it in a read-only transaction first, so a mutation is refused by the server
+ * before anything changes and only re-runs once `confirmedWrite` is true.
+ */
+export function runPostgresExecute(
+  id: string,
+  sql: string,
+  confirmedWrite = false,
+): Promise<DatabaseQueryResult> {
+  return command("database_postgres_execute", { id, sql, confirmedWrite });
+}
+
+export function setPostgresWriteAccess(
+  id: string,
+  allowWrites: boolean,
+): Promise<PostgresConnectionInfo> {
+  return command("database_postgres_set_write_access", { id, allowWrites });
+}
+
 export function disconnectPostgres(id: string): Promise<void> {
   return command("database_postgres_disconnect", { id });
 }
