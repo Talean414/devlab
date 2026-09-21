@@ -31,6 +31,12 @@ const APP_COMMANDS: &[&str] = &[
     "git_credential_status",
     "git_credential_store",
     "git_credential_delete",
+    "docker_snapshot",
+    "docker_start",
+    "docker_stop",
+    "docker_restart",
+    "docker_remove",
+    "docker_logs",
 ];
 
 fn main() {

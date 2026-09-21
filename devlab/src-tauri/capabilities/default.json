@@ -37,6 +37,12 @@
     "allow-git-push",
     "allow-git-credential-status",
     "allow-git-credential-store",
-    "allow-git-credential-delete"
+    "allow-git-credential-delete",
+    "allow-docker-snapshot",
+    "allow-docker-start",
+    "allow-docker-stop",
+    "allow-docker-restart",
+    "allow-docker-remove",
+    "allow-docker-logs"
   ]
 }

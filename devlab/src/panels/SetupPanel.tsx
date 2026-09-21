@@ -96,8 +96,8 @@ const PHASES: readonly MigrationPhase[] = [
   {
     n: 5,
     title: "Docker, databases and native HTTP",
-    status: "next",
-    detail: "Detect real services and display only live data returned by their native integrations.",
+    status: "active",
+    detail: "Docker CLI/daemon detection, real containers, statistics, images, logs and confirmed lifecycle actions are complete. Database connections and native HTTP are next.",
   },
   {
     n: 6,
@@ -191,9 +191,9 @@ export function SetupPanel() {
 
               <Note>
                 <strong>No fake native results:</strong> opening the app with <code>npm run dev</code>
-                creates only a browser UI preview. The real Workspace Editor, PTY Terminal and
-                Source Control are available through <code>npm run desktop:dev</code>; Docker,
-                database and test execution stay disabled until their own native capability is implemented.
+                creates only a browser UI preview. Workspace Editor, PTY Terminal, Source Control
+                and Docker are available through <code>npm run desktop:dev</code>; database, native
+                HTTP and test execution stay disabled until their own native capability is implemented.
               </Note>
             </>
           )}
@@ -211,7 +211,7 @@ export function SetupPanel() {
                 <ArchitectureCard
                   icon={Cpu}
                   title="Rust core · phased"
-                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Scoped Git commands and OS credential storage"]}
+                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Scoped Git, OS credentials and bounded Docker commands"]}
                 />
               </div>
 
@@ -234,6 +234,7 @@ export function SetupPanel() {
                   "PTY shells start in that workspace but retain the user account's full authority.",
                   "Destructive agent commands require explicit approval unless a narrow policy permits them.",
                   "Saved Git tokens never return to the renderer; it receives only presence and backend metadata.",
+                  "Docker commands accept validated full container IDs; arbitrary CLI arguments are not exposed.",
                   "Remote pages are never loaded into a privileged application context.",
                   "Every agent tool action will have timeout, cancellation and audit metadata.",
                 ].map((rule) => (

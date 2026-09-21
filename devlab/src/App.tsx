@@ -34,6 +34,10 @@ const GitPanel = lazy(() => import("./panels/GitPanel").then((module) => ({
   default: module.GitPanel,
 })));
 
+const DockerPanel = lazy(() => import("./panels/DockerPanel").then((module) => ({
+  default: module.DockerPanel,
+})));
+
 interface NavItem { id: ViewId; icon: typeof Sparkles; label: string; shortcut?: string }
 
 const NAV: NavItem[] = [
@@ -210,9 +214,13 @@ export default function App() {
       case "api":      return nativeFeature(
         "API Client", "native-http", "Phase 5 · native HTTP client without browser CORS limits",
       );
-      case "docker":   return nativeFeature(
-        "Docker & Containers", "docker", "Phase 5 · Docker engine integration",
-      );
+      case "docker":   return hasNativeCapability(runtime, "docker")
+        ? <Suspense fallback={<NativePanelLoading label="Loading native Docker integration…" />}>
+          <DockerPanel />
+        </Suspense>
+        : nativeFeature(
+          "Docker & Containers", "docker", "Phase 5A · Docker engine integration",
+        );
       case "preview":  return <PreviewPanel />;
       case "tools":    return nativeFeature(
         "Toolchain", "toolchain", "Phase 6 · detect and manage real local developer tools",
@@ -316,7 +324,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 4 native Git</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 5A native Docker</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}
@@ -324,7 +332,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-4">
             <span className="hidden font-mono md:inline">{model}</span>
-            <span className="font-mono">DevLab v1.4</span>
+            <span className="font-mono">DevLab v1.5</span>
           </div>
         </footer>
       )}

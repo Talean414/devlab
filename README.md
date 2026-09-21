@@ -6,7 +6,7 @@ DevLab is a native developer control plane built with **Tauri 2, Rust, React, Ty
 
 ## Native migration status
 
-Phases 1 through 4 are implemented: DevLab has a Tauri desktop shell, typed Rust-to-React IPC, restricted capabilities, a real scoped workspace service connected to Monaco, a cross-platform PTY terminal connected to xterm.js, and native source control backed by the installed Git executable.
+Phases 1 through 4 and the Docker portion of Phase 5 are implemented: DevLab has a Tauri desktop shell, typed Rust-to-React IPC, restricted capabilities, a real scoped workspace service connected to Monaco, a cross-platform PTY terminal connected to xterm.js, native source control, and bounded access to a real Docker CLI and engine.
 
 A workspace can be granted only through the native folder picker. The Rust backend holds its canonical root in memory, rejects absolute paths and parent traversal, blocks symlink access, limits text I/O, watches native filesystem changes, and uses content revisions to prevent silent overwrites.
 
@@ -14,7 +14,9 @@ A terminal starts only after an explicit click and launches the operating system
 
 Source Control discovers only a repository whose canonical root exactly matches the selected workspace. Fixed Rust commands read real porcelain status, diffs, history, branches and remotes; stage and unstage paths; create commits; and run confirmed fetch, fast-forward pull and non-force push operations with time and output limits. Git hooks and fsmonitor helpers are disabled for DevLab-owned commands. GitHub, GitLab and Bitbucket tokens are stored by the operating system credential store and are never returned to the renderer.
 
-Simulated Docker, database, deployment, CI, toolchain, API-client and test-runner results remain disabled. Those panels are re-enabled only after their real native backend is completed. The normal Vite server remains available strictly as a UI preview.
+Containers detects the real Docker CLI and daemon, then reads actual containers, one-shot resource statistics, images and bounded logs. Start, stop, restart and non-force removal use validated full container IDs; disruptive actions require confirmation. Arbitrary Docker arguments, builds, pulls, image/volume deletion and Compose deployment are not exposed by this step.
+
+Simulated database, deployment, CI, toolchain, API-client and test-runner results remain disabled. Those panels are re-enabled only after their real native backend is completed. The normal Vite server remains available strictly as a UI preview.
 
 ## Current working features
 
@@ -31,12 +33,14 @@ Simulated Docker, database, deployment, CI, toolchain, API-client and test-runne
 - Real Git detection, status, diffs, staging, unstaging, commits, history, branches and remotes
 - Confirmed fetch, fast-forward pull and non-force push operations with bounded native processes
 - OS-protected GitHub, GitLab and Bitbucket credentials with presence-only renderer metadata
+- Real Docker CLI/daemon detection, container state, one-shot statistics, local images and bounded logs
+- Confirmed container stop/restart/removal with validated IDs; explicit start and no force removal
 - Project template and command references
 - BroadcastChannel/WebRTC collaboration primitives
 - Embedded web preview
 - WebView-local non-secret preferences; the Gemini BYOK key remains in its existing renderer flow
 
-The remaining native backends are being delivered in explicit phases: Docker/databases/native HTTP next, then agent tool execution and signed distribution. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
+The remaining Phase 5 backends are native database connections and native HTTP. Agent tool execution and signed distribution follow afterward. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
 
 ## Requirements
 
@@ -47,7 +51,8 @@ Install these before starting:
 3. npm, which is included with Node.js
 4. The current stable [Rust toolchain](https://www.rust-lang.org/tools/install)
 5. Your operating system's [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
-6. A [Google AI Studio API key](https://aistudio.google.com/app/apikey) for cloud AI features
+6. [Docker Engine or Docker Desktop](https://docs.docker.com/get-docker/) for the optional Containers panel
+7. A [Google AI Studio API key](https://aistudio.google.com/app/apikey) for cloud AI features
 
 Node.js 22 is recommended. If you use [nvm](https://github.com/nvm-sh/nvm), the included `.nvmrc` selects the correct major version.
 
@@ -153,7 +158,18 @@ To remove the key, use **Settings → Providers → Clear**. To erase WebView pr
 
 DevLab never initializes a repository, adds a remote, changes Git identity, checks out a branch, merges, rebases or force-pushes on its own. Use the real terminal for those administrative operations.
 
-## 8. Verify the complete build
+## 8. Use native Containers
+
+1. Install and start Docker Engine or Docker Desktop.
+2. Confirm `docker version` succeeds for the same operating-system account that launches DevLab.
+3. Open **Containers**. DevLab reports the real CLI/engine versions, all containers, local images and one-shot resource statistics.
+4. Open **Logs** on a container to read at most the latest 500 timestamped lines.
+5. Start a stopped container explicitly. Stop and restart require confirmation and use Docker's 10-second grace period.
+6. Removal is available only for stopped containers, requires confirmation and never uses force.
+
+DevLab refreshes Docker state every 15 seconds while the panel is open. This step intentionally does not expose arbitrary Docker arguments, builds, pulls, image or volume deletion, or Compose deployment.
+
+## 9. Verify the complete build
 
 Run both frontend and native checks before packaging:
 
@@ -163,7 +179,7 @@ npm run native:check
 npm run native:test
 ```
 
-The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary, revision, terminal-dimension, bounded-output, Git status-parser and Git path-validation tests.
+The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary, revision, terminal-dimension, bounded-output, Git parser/path validation, and Docker record/ID validation tests.
 
 Build the native application and this operating system's installer formats:
 
@@ -173,7 +189,7 @@ npm run desktop:build
 
 For an interface-only production preview, run `npm run preview -- --host 0.0.0.0`. Native capabilities intentionally remain unavailable in that browser preview.
 
-## 9. Deploy the optional web preview
+## 10. Deploy the optional web preview
 
 DevLab is a static frontend. It does not need a Node server after the build finishes.
 
@@ -254,9 +270,12 @@ Use this list before calling an installation complete:
 - [ ] Selecting a repository subdirectory is rejected until the canonical repository root is selected
 - [ ] Fetch, fast-forward Pull and Push require confirmation and report actual network/authentication failures
 - [ ] Saving a Git token exposes only configured metadata, survives restart in the OS credential store, and can be deleted
+- [ ] Containers reports the actual Docker CLI/engine versions, containers, images and current one-shot statistics
+- [ ] Container logs contain real output, and starting a stopped test container updates its actual Docker state
+- [ ] Stop/restart/removal require confirmation, removal refuses running containers, and daemon permission failures are reported honestly
 - [ ] Gemini key test says **Key valid**
 - [ ] AI Agent streams a response
-- [ ] Docker, database, API-client, deployment and test-runner panels explicitly say **Simulation removed**
+- [ ] Database, API-client, deployment and test-runner panels explicitly say **Simulation removed**
 - [ ] `npm run desktop:build` creates the platform bundle
 
 ## Common problems
@@ -300,9 +319,13 @@ Use the same browser profile and origin where the key was saved. Browser `localS
 
 Canvas, migration and vision tools produce source previews but do not automatically write AI output into the selected workspace. Open the native editor and explicitly create or update files after reviewing the generated source. A reviewed multi-file import flow will be added separately.
 
-### Docker, database, API client or test runner says “Simulation removed”
+### Database, API client or test runner says “Simulation removed”
 
-This is intentional—not an installation failure. The previous fabricated results have been disabled. Each panel will be re-enabled only when its real native milestone is implemented and tested. The next milestone is Docker, database and native HTTP integration.
+This is intentional—not an installation failure. The previous fabricated results remain disabled until each real backend is implemented and tested. Native database connections and HTTP requests are the remaining Phase 5 work.
+
+### Containers says Docker is unavailable
+
+Run `docker version` in a normal terminal. If the CLI is missing, install Docker Engine or Docker Desktop. If only the server section fails, start the daemon or Docker Desktop and make sure your account can access the active Docker context. On Linux, adding a user to the `docker` group grants powerful daemon access and should be treated as a security decision—not an automatic DevLab setup step.
 
 ### Source Control says the repository root does not match
 
@@ -341,7 +364,7 @@ devlab/
 │   ├── Cargo.toml
 │   ├── capabilities/       # default-deny native permission manifests
 │   ├── icons/              # generated desktop application icons
-│   ├── src/                # trusted Rust core, workspace, PTY, Git and credential services
+│   ├── src/                # trusted Rust core, workspace, PTY, Git, credentials and Docker
 │   └── tauri.conf.json
 └── src/
     ├── App.tsx
@@ -352,6 +375,7 @@ devlab/
     │   ├── native.ts       # typed native runtime bridge
     │   ├── terminal.ts     # typed PTY lifecycle and event IPC client
     │   ├── git.ts          # typed repository, operation and credential IPC client
+    │   ├── docker.ts       # typed Docker detection, state, logs and lifecycle IPC client
     │   ├── workspace.ts    # typed scoped-filesystem IPC client
     │   ├── settings.ts     # application settings
     │   └── sync.ts         # collaboration helpers
@@ -373,5 +397,6 @@ devlab/
 - Keep Git provider tokens in the OS credential store; expose only presence/backend metadata to the renderer and redact command failures.
 - Scope Git operations to a canonical repository root that exactly matches the selected workspace; use fixed argument arrays, output limits and timeouts instead of a shell.
 - Require explicit confirmation for every Git network operation; do not expose force push, merge or rebase through this panel.
+- Treat Docker daemon access as privileged: validate full IDs, use fixed commands and timeouts, confirm disruptive actions, and never imply workload sandboxing.
 - Remember that the current Gemini key is still renderer-managed and separate from Rust-owned Git credentials.
 - Review generated commands and code before executing or deploying them.

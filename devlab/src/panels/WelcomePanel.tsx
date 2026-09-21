@@ -3,12 +3,12 @@ import { CodeBlock } from "../components/CodeBlock";
 import {
   Bot, ArrowRight,
   Shield, KeyRound, Download, Package,
-  Wand2, Code2, GitBranch, PenTool, Stethoscope, ScanLine, Radio, Terminal as TerminalIcon,
+  Wand2, Code2, Container, GitBranch, PenTool, Stethoscope, ScanLine, Terminal as TerminalIcon,
 } from "lucide-react";
 
 const stats = [
-  { label: "Migration phase", value: "4 / 7" },
-  { label: "Native capabilities", value: "5" },
+  { label: "Migration phase", value: "5A / 7" },
+  { label: "Native capabilities", value: "6" },
   { label: "Simulations enabled", value: "0" },
   { label: "License", value: "MIT" },
 ];
@@ -21,13 +21,14 @@ const quickCards: { view: ViewId; Icon: typeof Bot; title: string; desc: string;
   { view: "editor",   Icon: Code2,        title: "Native Workspace",     desc: "Select a real folder and safely edit its files with Monaco" },
   { view: "terminal", Icon: TerminalIcon, title: "Native Terminal",      desc: "Run your real shell through a cross-platform PTY" },
   { view: "git",      Icon: GitBranch,    title: "Native Source Control", desc: "Inspect and operate on the selected real Git repository" },
+  { view: "docker",   Icon: Container,    title: "Native Containers",     desc: "Inspect and control real Docker containers with bounded commands" },
 ];
 
 const features = [
   { Icon: PenTool,    title: "Sketch-to-code architecture", desc: "Draw a system on an infinite canvas and ask Gemini to produce reviewable source. AI output is never written to your workspace without a separate reviewed action." },
   { Icon: TerminalIcon,title: "Real PTY terminal",          desc: "Start your operating system’s default shell in the selected workspace with real streaming output, resize handling, termination and exit codes." },
   { Icon: ScanLine,   title: "Reverse-engineer interfaces", desc: "Paste a screenshot or URL. Gemini vision extracts visual details and generates source for you to review without pretending it has been built or run." },
-  { Icon: Radio,      title: "Zero-server live sharing",    desc: "BroadcastChannel and WebRTC provide real peer-to-peer sharing for the current in-app scratch data without a collaboration server." },
+  { Icon: Container,  title: "Real Docker engine data",     desc: "Read actual containers, resource statistics, images and logs, then explicitly start, stop, restart or remove validated container IDs." },
   { Icon: GitBranch,  title: "Real native Git",             desc: "Read real status, diffs, commits, branches and remotes, then stage, commit or run a confirmed remote operation through fixed Rust commands." },
   { Icon: KeyRound,   title: "Protected Git credentials",   desc: "Saved Git provider tokens live in the operating system credential store and are never returned to the renderer. Gemini retains its separate BYOK renderer flow." },
 ];
@@ -49,7 +50,7 @@ export function WelcomePanel({
         <div className="relative mx-auto max-w-5xl px-8 py-16">
           <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-300">
             <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-pulse" />
-            Phase 4 · real native Git
+            Phase 5A · real Docker integration
           </div>
           <h1 className="mt-5 max-w-3xl text-5xl font-bold tracking-tight text-white sm:text-6xl text-balance">
             Native shell.{" "}
@@ -58,8 +59,8 @@ export function WelcomePanel({
           </h1>
           <p className="mt-5 max-w-2xl text-lg text-zinc-400 text-pretty">
             DevLab now connects Monaco to real files, xterm.js to your operating system shell,
-            and Source Control to the selected repository through fixed Rust Git commands.
-            Unavailable tools stay disabled until their own native backends are implemented.
+            Source Control to real Git, and Containers to the local Docker engine through bounded
+            Rust commands. Unavailable tools stay disabled until their native backends are implemented.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <button
