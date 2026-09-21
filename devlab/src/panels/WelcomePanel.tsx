@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 
 const stats = [
-  { label: "Migration phase", value: "5B.2b / 7" },
+  { label: "Migration phase", value: "5B.2c / 7" },
   { label: "Native capabilities", value: "7" },
   { label: "Simulations enabled", value: "0" },
   { label: "License", value: "MIT" },
@@ -22,7 +22,7 @@ const quickCards: { view: ViewId; Icon: typeof Bot; title: string; desc: string;
   { view: "terminal", Icon: TerminalIcon, title: "Native Terminal",      desc: "Run your real shell through a cross-platform PTY" },
   { view: "git",      Icon: GitBranch,    title: "Native Source Control", desc: "Inspect and operate on the selected real Git repository" },
   { view: "docker",   Icon: Container,    title: "Native Containers",     desc: "Pull images, create stopped containers and control real Docker state" },
-  { view: "database", Icon: Database,     title: "Native Databases",      desc: "Query scoped SQLite or inspect a real PostgreSQL schema" },
+  { view: "database", Icon: Database,     title: "Native Databases",      desc: "Run bounded SQLite or enforced read-only PostgreSQL queries" },
 ];
 
 const features = [
@@ -30,7 +30,7 @@ const features = [
   { Icon: TerminalIcon,title: "Real PTY terminal",          desc: "Start your operating system’s default shell in the selected workspace with real streaming output, resize handling, termination and exit codes." },
   { Icon: ScanLine,   title: "Reverse-engineer interfaces", desc: "Paste a screenshot or URL. Gemini vision extracts visual details and generates source for you to review without pretending it has been built or run." },
   { Icon: Container,  title: "Real Docker engine operations", desc: "Read actual engine data, pull validated image references, create constrained stopped containers, and explicitly control validated container IDs." },
-  { Icon: Database,   title: "Native SQLite and PostgreSQL", desc: "Run bounded SQLite work, or inspect a real PostgreSQL schema with explicit TLS policy and optional OS-protected password storage." },
+  { Icon: Database,   title: "Native SQLite and PostgreSQL", desc: "Run bounded SQLite work, or inspect and query PostgreSQL through explicit TLS and an enforced read-only transaction." },
   { Icon: GitBranch,  title: "Real native Git",             desc: "Read real status, diffs, commits, branches and remotes, then stage, commit or run a confirmed remote operation through fixed Rust commands." },
   { Icon: KeyRound,   title: "Protected Git credentials",   desc: "Saved Git provider tokens live in the operating system credential store and are never returned to the renderer. Gemini retains its separate BYOK renderer flow." },
 ];
@@ -52,7 +52,7 @@ export function WelcomePanel({
         <div className="relative mx-auto max-w-5xl px-8 py-16">
           <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-300">
             <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-pulse" />
-            Phase 5B.2b · bounded PostgreSQL schema
+            Phase 5B.2c · read-only PostgreSQL queries
           </div>
           <h1 className="mt-5 max-w-3xl text-5xl font-bold tracking-tight text-white sm:text-6xl text-balance">
             Native shell.{" "}
@@ -62,7 +62,7 @@ export function WelcomePanel({
           <p className="mt-5 max-w-2xl text-lg text-zinc-400 text-pretty">
             DevLab now connects Monaco to real files, xterm.js to your operating system shell,
             Source Control to real Git, Containers to the local Docker engine, and Database to a
-            bounded SQLite engine plus verified PostgreSQL connectivity and fixed native schema inspection. Unavailable operations stay disabled until their native backends are implemented.
+            bounded SQLite plus verified PostgreSQL connectivity, fixed schema inspection, and enforced read-only queries. Unavailable operations stay disabled until their native backends are implemented.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <button

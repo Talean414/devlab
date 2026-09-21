@@ -6,7 +6,7 @@ DevLab is a native developer control plane built with **Tauri 2, Rust, React, Ty
 
 ## Native migration status
 
-Phases 1 through 4, Docker, SQLite, and the PostgreSQL connectivity/schema checkpoints of Phase 5 are implemented: DevLab has a Tauri desktop shell, typed Rust-to-React IPC, restricted capabilities, a real scoped workspace service connected to Monaco, a cross-platform PTY terminal connected to xterm.js, native source control, bounded access to a real Docker CLI and engine, workspace-scoped SQLite connections, and real PostgreSQL sessions with explicit TLS policy.
+Phases 1 through 4, Docker, SQLite, and the PostgreSQL connectivity/schema/read checkpoints of Phase 5 are implemented: DevLab has a Tauri desktop shell, typed Rust-to-React IPC, restricted capabilities, a real scoped workspace service connected to Monaco, a cross-platform PTY terminal connected to xterm.js, native source control, bounded access to a real Docker CLI and engine, workspace-scoped SQLite connections, and real PostgreSQL sessions with explicit TLS policy.
 
 A workspace can be granted only through the native folder picker. The Rust backend holds its canonical root in memory, rejects absolute paths and parent traversal, blocks symlink access, limits text I/O, watches native filesystem changes, and uses content revisions to prevent silent overwrites.
 
@@ -18,7 +18,7 @@ Containers detects the real Docker CLI and daemon, then reads actual containers,
 
 Database opens an existing SQLite file only through the native picker and only when its canonical path remains inside the selected workspace. The bundled Rust-owned SQLite engine exposes the real user schema and one statement at a time with a five-second timeout, 1,000 displayed rows, 200 columns, bounded cells and a 2 MiB encoded-result budget. Connections default to operating-system-enforced read-only mode. Users can explicitly enable writes per in-memory connection, but every mutating statement still requires separate confirmation. Database attachment, configuration PRAGMAs, explicit transactions, temporary/virtual-table DDL and filesystem-capable SQL functions are blocked.
 
-PostgreSQL connectivity and schema inspection are now native: DevLab opens a real process-memory session with a five-second per-address connection timeout, an explicit `verify-full` or `disable` TLS policy, server-enforced session timeouts, read-only-by-default configuration, and optional password storage in the operating-system credential store. A fixed Rust-owned catalog query returns genuine schemas, tables, views, columns, types, defaults and primary-key flags with object, column and encoded-response bounds. User-supplied PostgreSQL statements remain explicitly disabled until their separate backend increment is complete; no sample server, schema or result is substituted. Deployment, CI, toolchain, API-client and test-runner results also remain disabled. The normal Vite server remains available strictly as a UI preview.
+PostgreSQL connectivity, schema inspection and read queries are now native: DevLab opens a real process-memory session with a five-second per-address connection timeout, an explicit `verify-full` or `disable` TLS policy, server-enforced session timeouts, read-only-by-default configuration, and optional password storage in the operating-system credential store. A fixed Rust-owned catalog query returns genuine schema metadata. Users can run one parameter-free `SELECT`, `WITH`, `VALUES`, or `TABLE` statement inside a backend-enforced read-only transaction; PostgreSQL renders bounded text values through a generated wrapper and Rust caps rows, columns, cells, time, and encoded output. Writes remain explicitly disabled until their separate confirmation checkpoint; no sample server, schema or result is substituted. Deployment, CI, toolchain, API-client and test-runner results also remain disabled. The normal Vite server remains available strictly as a UI preview.
 
 ## Current working features
 
@@ -40,13 +40,14 @@ PostgreSQL connectivity and schema inspection are now native: DevLab opens a rea
 - Confirmed container stop/restart/removal with validated IDs; explicit start and no force removal
 - Workspace-scoped native SQLite connections with real schema inspection and bounded query results
 - User-configurable SQLite read-only/write access with backend-enforced confirmation for every mutating statement
-- Real PostgreSQL connectivity and bounded schema inspection with verified TLS by default, explicit plaintext opt-in and optional OS-protected passwords
+- Real PostgreSQL connectivity, bounded schema inspection and single-statement reads with verified TLS by default
+- Backend-enforced read-only PostgreSQL transactions with time, row, column, cell and encoded-output limits
 - Project template and command references
 - BroadcastChannel/WebRTC collaboration primitives
 - Embedded web preview
 - WebView-local non-secret preferences; the Gemini BYOK key remains in its existing renderer flow
 
-The remaining Phase 5 backends are bounded PostgreSQL statement execution and native HTTP. Agent tool execution and signed distribution follow afterward. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
+The remaining Phase 5 backends are separately confirmed PostgreSQL writes and native HTTP. Agent tool execution and signed distribution follow afterward. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
 
 ## Requirements
 
@@ -198,9 +199,10 @@ DevLab does not create a database file in this checkpoint. It blocks `ATTACH`, `
 4. Enter a password. It remains transient unless **Store or reuse this password** is selected; stored passwords go to the operating-system credential store and are never returned to React. Leaving the field blank with storage selected reuses an existing entry.
 5. Connect. DevLab reports the actual server version or the genuine DNS, network, authentication, TLS or server error. Each socket address has a five-second connection timeout.
 6. Select the live connection. DevLab runs one fixed catalog query and displays the real non-system schemas, tables, views, columns, data types and primary keys. The response is limited to 2,000 objects, 20,000 columns and approximately 2 MiB of encoded schema data.
-7. Use **Refresh schema** after an external change. Use **Forget password** to remove a saved credential while keeping the live session open, and **Disconnect** to close the session. Disconnecting does not silently delete a credential the user chose to store.
+7. Run one `SELECT`, `WITH`, `VALUES`, or `TABLE` statement. The backend rejects parameters and other statement classes, prepares exactly one statement, wraps its output with server-side text/cell bounds, and executes it in an explicit read-only transaction. Results are limited to five seconds, 1,000 rows, 200 columns, 16,384 displayed characters per value, and approximately 2 MiB encoded rows.
+8. Use **Refresh schema** after an external change. Use **Forget password** to remove a saved credential while keeping the live session open, and **Disconnect** to close the session. Disconnecting does not silently delete a credential the user chose to store.
 
-This schema checkpoint accepts no renderer-provided SQL. The live connection configures server-side statement, lock and idle-transaction timeouts, and the catalog response is streamed and bounded before IPC serialization. User-supplied PostgreSQL statements remain disabled until the next increment adds bounded result values, per-operation read-only transactions and separate confirmation for every write. DevLab does not fabricate tables or query results while those operations are unavailable.
+PostgreSQL reads are prepared by the server, parameter-free in this increment, and streamed through a bounded portal. Direct filesystem/configuration, advisory-lock, backend-control, large-object import/export, and `dblink` identifiers are rejected in addition to PostgreSQL's read-only transaction enforcement. Database roles and server permissions remain an essential boundary because user-defined functions and foreign tables are controlled by the connected server. Writes remain unavailable until the next increment adds separate confirmation for each mutating statement.
 
 ## 11. Verify the complete build
 
@@ -212,7 +214,7 @@ npm run native:check
 npm run native:test
 ```
 
-The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary, revision, terminal-dimension, bounded-output, Git parser/path validation, Docker validation, SQLite access-mode/confirmation rules, SQL restrictions and result truncation, plus PostgreSQL connection-field, credential-identity, schema-size and UTF-8 truncation validation.
+The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary, revision, terminal-dimension, bounded-output, Git parser/path validation, Docker validation, SQLite access-mode/confirmation rules, SQL restrictions and result truncation, plus PostgreSQL connection-field, credential-identity, schema-size, UTF-8 truncation, read-statement and restricted-function validation.
 
 Build the native application and this operating system's installer formats:
 
@@ -314,11 +316,14 @@ Use this list before calling an installation complete:
 - [ ] `ATTACH`, configuration PRAGMAs, explicit transactions and virtual-table creation are rejected at the native boundary
 - [ ] PostgreSQL connects to a real server and reports its actual version or the genuine DNS, network, authentication or TLS error
 - [ ] PostgreSQL schema inspection shows genuine user schemas, tables/views, columns, types and primary keys; refresh reflects an external DDL change
+- [ ] A PostgreSQL `SELECT` returns real values/types while NULLs, binary values and large output are represented or truncated honestly
+- [ ] PostgreSQL rejects `INSERT`, parameters, multiple statements, `set_config`, filesystem functions and advisory locks at the native boundary
+- [ ] A long PostgreSQL read times out and generated results stop at the documented row/encoded-output bounds
 - [ ] Verified TLS rejects an untrusted or hostname-mismatched certificate; disabling TLS shows an explicit plaintext warning
 - [ ] A PostgreSQL password is transient by default, can be stored only by explicit choice, can be reused after restart and can be removed with **Forget password**
 - [ ] Gemini key test says **Key valid**
 - [ ] AI Agent streams a response
-- [ ] API-client, deployment and test-runner panels explicitly say **Simulation removed**; Database clearly marks PostgreSQL statement execution as unavailable while real schema inspection remains active
+- [ ] API-client, deployment and test-runner panels explicitly say **Simulation removed**; Database clearly marks PostgreSQL reads as enforced read-only and writes as unavailable
 - [ ] `npm run desktop:build` creates the platform bundle
 
 ## Common problems
@@ -370,13 +375,13 @@ Verify the host, port, database, username and server reachability with a trusted
 
 The connected role must be able to read PostgreSQL's normal catalog metadata. DevLab's fixed query has a five-second server timeout and hard limits of 2,000 objects, 20,000 columns and approximately 2 MiB encoded output. A timeout, permission denial or limit error is returned honestly instead of showing a partial fabricated schema.
 
-### PostgreSQL query execution is unavailable
+### PostgreSQL query is rejected or times out
 
-This is intentional during the schema checkpoint—not an installation failure. The live session, server version and displayed catalog are real, but user-supplied SQL stays disabled until bounded values, transactional read-only enforcement and per-write confirmation are implemented. DevLab never substitutes successful query results.
+This checkpoint accepts one parameter-free `SELECT`, `WITH`, `VALUES`, or `TABLE` statement. It rejects write/utility classes, multiple statements, configuration and filesystem helpers, advisory locks, backend-control functions, large-object import/export and `dblink`. Every read runs in an explicit read-only transaction with a five-second total/server timeout and bounded values/output. Split normal reads into individual statements; writes remain unavailable until their separately confirmed checkpoint.
 
 ### API client or test runner says “Simulation removed”
 
-This is intentional—not an installation failure. The previous fabricated results remain disabled until each real backend is implemented and tested. Native HTTP is the remaining Phase 5 backend after PostgreSQL statement execution.
+This is intentional—not an installation failure. The previous fabricated results remain disabled until each real backend is implemented and tested. Native HTTP is the remaining Phase 5 backend after separately confirmed PostgreSQL writes.
 
 ### Containers says Docker is unavailable
 
@@ -443,7 +448,7 @@ devlab/
     │   ├── terminal.ts     # typed PTY lifecycle and event IPC client
     │   ├── git.ts          # typed repository, operation and credential IPC client
     │   ├── docker.ts       # typed Docker state, pull, creation, logs and lifecycle IPC client
-    │   ├── database.ts     # typed SQLite operations and PostgreSQL connectivity/schema IPC client
+    │   ├── database.ts     # typed SQLite and PostgreSQL connectivity/schema/read IPC client
     │   ├── workspace.ts    # typed scoped-filesystem IPC client
     │   ├── settings.ts     # application settings
     │   └── sync.ts         # collaboration helpers
@@ -470,6 +475,7 @@ devlab/
 - Deny SQLite database attachment, connection-changing PRAGMAs, explicit transactions, temporary/virtual-table DDL and filesystem-capable functions so SQL cannot escape the selected database policy.
 - Require structured PostgreSQL connection fields, explicit TLS policy and bounded connection attempts; verify certificates and hostnames by default and never silently downgrade to plaintext.
 - Inspect PostgreSQL metadata only through a fixed Rust-owned catalog query with server timeouts and object, column, value and encoded-response bounds; do not accept renderer SQL through the schema command.
+- Prepare exactly one PostgreSQL read statement, reject parameters and non-read classes, run it in an explicit read-only transaction, deny known server-filesystem/configuration/locking helpers, and bound time plus streamed output. Treat the database role as the authority boundary for user-defined functions and foreign tables.
 - Keep PostgreSQL passwords transient unless the user explicitly chooses the OS credential store; never return stored passwords to the renderer, and provide an explicit removal action.
 - Remember that the current Gemini key is still renderer-managed and separate from Rust-owned Git credentials.
 - Review generated commands and code before executing or deploying them.

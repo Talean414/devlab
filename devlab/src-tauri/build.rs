@@ -48,6 +48,7 @@ const APP_COMMANDS: &[&str] = &[
     "database_postgres_connections",
     "database_postgres_connect",
     "database_postgres_schema",
+    "database_postgres_query",
     "database_postgres_disconnect",
     "database_postgres_forget_password",
 ];

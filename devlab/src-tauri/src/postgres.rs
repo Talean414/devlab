@@ -1,6 +1,6 @@
 use keyring::{error::Error as KeyringError, Entry};
 use native_tls::TlsConnector;
-use ::postgres::{config::SslMode, Client, Config, NoTls};
+use ::postgres::{config::SslMode, types::Type, Client, Config, NoTls};
 use fallible_iterator::FallibleIterator;
 use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use std::{
     error::Error as StdError,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager};
 use zeroize::Zeroizing;
@@ -29,6 +29,12 @@ const MAX_SCHEMA_COLUMNS: usize = 20_000;
 const MAX_SCHEMA_JSON_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 1_024;
 const MAX_DEFAULT_BYTES: usize = 64 * 1024;
+const MAX_SQL_BYTES: usize = 64 * 1024;
+const MAX_RESULT_ROWS: usize = 1_000;
+const MAX_RESULT_COLUMNS: usize = 200;
+const MAX_CELL_CHARACTERS: usize = 16_384;
+const MAX_RESULT_JSON_BYTES: usize = 2 * 1024 * 1024;
+const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 static KEYRING_LOCK: Mutex<()> = Mutex::new(());
 
@@ -93,6 +99,27 @@ pub struct PostgresColumn {
     default_value: Option<String>,
     default_value_truncated: bool,
     primary_key: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresCell {
+    kind: &'static str,
+    value: String,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresQueryResult {
+    columns: Vec<String>,
+    column_types: Vec<String>,
+    rows: Vec<Vec<PostgresCell>>,
+    row_count: usize,
+    affected_rows: u64,
+    read_only: bool,
+    truncated: bool,
+    elapsed_ms: u64,
 }
 
 struct PostgresSession {
@@ -161,6 +188,19 @@ impl PostgresService {
             connection,
             objects,
         })
+    }
+
+    fn query(
+        &self,
+        workspace_root: &Path,
+        id: &str,
+        sql: &str,
+    ) -> Result<PostgresQueryResult, CommandError> {
+        validate_connection_id(id)?;
+        validate_read_query(sql)?;
+        let mut inner = self.lock()?;
+        let session = require_session(&mut inner, workspace_root, id)?;
+        run_read_query(&mut session.client, sql)
     }
 
     fn connect(
@@ -626,6 +666,397 @@ fn schema_limit_error(message: impl Into<String>) -> CommandError {
     CommandError::new("postgres_schema_too_large", message)
 }
 
+fn validate_read_query(sql: &str) -> Result<(), CommandError> {
+    let sql = sql.trim();
+    if sql.is_empty() {
+        return Err(CommandError::new(
+            "postgres_statement_required",
+            "Enter one read-only PostgreSQL statement.",
+        ));
+    }
+    if sql.len() > MAX_SQL_BYTES || sql.contains('\0') {
+        return Err(CommandError::new(
+            "postgres_sql_too_large",
+            format!(
+                "PostgreSQL statements are limited to {MAX_SQL_BYTES} bytes and cannot contain null characters."
+            ),
+        ));
+    }
+    let identifiers = sql_identifiers(sql);
+    let first = identifiers.first().map(String::as_str).unwrap_or("");
+    if !matches!(first, "select" | "with" | "values" | "table") {
+        return Err(CommandError::new(
+            "postgres_read_only_statement",
+            "This checkpoint accepts only SELECT, WITH, VALUES, or TABLE statements inside an enforced read-only transaction.",
+        ));
+    }
+    if let Some(identifier) = identifiers
+        .iter()
+        .find(|identifier| restricted_read_identifier(identifier))
+    {
+        return Err(CommandError::new(
+            "postgres_query_restricted",
+            format!(
+                "The PostgreSQL function or identifier “{identifier}” is unavailable in DevLab's bounded reader."
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn restricted_read_identifier(identifier: &str) -> bool {
+    identifier.starts_with("pg_advisory_")
+        || identifier.starts_with("pg_read_")
+        || identifier.starts_with("pg_ls_")
+        || identifier.starts_with("dblink_")
+        || matches!(
+            identifier,
+            "dblink"
+                | "lo_import"
+                | "lo_export"
+                | "set_config"
+                | "pg_read_file"
+                | "pg_read_binary_file"
+                | "pg_ls_dir"
+                | "pg_stat_file"
+                | "pg_logdir_ls"
+                | "pg_cancel_backend"
+                | "pg_terminate_backend"
+                | "pg_reload_conf"
+                | "pg_rotate_logfile"
+                | "pg_promote"
+                | "pg_create_restore_point"
+                | "pg_switch_wal"
+                | "pg_export_snapshot"
+                | "pg_log_backend_memory_contexts"
+                | "pg_create_physical_replication_slot"
+                | "pg_create_logical_replication_slot"
+                | "pg_drop_replication_slot"
+        )
+}
+
+fn sql_identifiers(sql: &str) -> Vec<String> {
+    let bytes = sql.as_bytes();
+    let mut identifiers = Vec::new();
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        if bytes[index..].starts_with(b"--") {
+            index += 2;
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            index += 2;
+            let mut depth = 1_usize;
+            while index < bytes.len() && depth > 0 {
+                if bytes[index..].starts_with(b"/*") {
+                    depth = depth.saturating_add(1);
+                    index += 2;
+                } else if bytes[index..].starts_with(b"*/") {
+                    depth = depth.saturating_sub(1);
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if bytes[index] == b'\'' {
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\\' && index + 1 < bytes.len() {
+                    index += 2;
+                } else if bytes[index] == b'\'' {
+                    if index + 1 < bytes.len() && bytes[index + 1] == b'\'' {
+                        index += 2;
+                    } else {
+                        index += 1;
+                        break;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if bytes[index] == b'"' {
+            index += 1;
+            let mut identifier = String::new();
+            while index < bytes.len() {
+                if bytes[index] == b'"' {
+                    if index + 1 < bytes.len() && bytes[index + 1] == b'"' {
+                        identifier.push('"');
+                        index += 2;
+                    } else {
+                        index += 1;
+                        break;
+                    }
+                } else {
+                    let rest = &sql[index..];
+                    let Some(character) = rest.chars().next() else {
+                        break;
+                    };
+                    identifier.push(character);
+                    index += character.len_utf8();
+                }
+            }
+            if !identifier.is_empty() {
+                identifiers.push(identifier.to_lowercase());
+            }
+            continue;
+        }
+        if bytes[index] == b'$' {
+            if let Some(delimiter_end) = sql[index + 1..].find('$') {
+                let delimiter_end = index + 1 + delimiter_end;
+                let tag = &sql[index + 1..delimiter_end];
+                if tag.bytes().all(|value| value.is_ascii_alphanumeric() || value == b'_') {
+                    let delimiter = &sql[index..=delimiter_end];
+                    let body_start = delimiter_end + 1;
+                    if let Some(body_end) = sql[body_start..].find(delimiter) {
+                        index = body_start + body_end + delimiter.len();
+                        continue;
+                    }
+                }
+            }
+        }
+        let rest = &sql[index..];
+        let Some(character) = rest.chars().next() else {
+            break;
+        };
+        if character == '_' || character.is_alphabetic() {
+            let start = index;
+            index += character.len_utf8();
+            while index < bytes.len() {
+                let Some(next) = sql[index..].chars().next() else {
+                    break;
+                };
+                if next == '_' || next == '$' || next.is_alphanumeric() {
+                    index += next.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            identifiers.push(sql[start..index].to_lowercase());
+        } else {
+            index += character.len_utf8();
+        }
+    }
+    identifiers
+}
+
+fn run_read_query(client: &mut Client, sql: &str) -> Result<PostgresQueryResult, CommandError> {
+    let started = Instant::now();
+    let mut transaction = client
+        .build_transaction()
+        .read_only(true)
+        .start()
+        .map_err(|error| postgres_error("start a read-only PostgreSQL transaction", error))?;
+    transaction
+        .batch_execute("SET LOCAL statement_timeout = '5s'; SET LOCAL lock_timeout = '2s';")
+        .map_err(|error| postgres_error("apply PostgreSQL query limits", error))?;
+    let statement = transaction
+        .prepare(sql)
+        .map_err(|error| postgres_error("prepare the PostgreSQL statement", error))?;
+    if !statement.params().is_empty() {
+        return Err(CommandError::new(
+            "postgres_parameters_unsupported",
+            "Parameterized PostgreSQL statements are not available in this checkpoint.",
+        ));
+    }
+    if statement.columns().is_empty() {
+        return Err(CommandError::new(
+            "postgres_read_only_statement",
+            "The PostgreSQL statement must return at least one column.",
+        ));
+    }
+    if statement.columns().len() > MAX_RESULT_COLUMNS {
+        return Err(CommandError::new(
+            "postgres_result_too_wide",
+            format!(
+                "PostgreSQL results are limited to {MAX_RESULT_COLUMNS} displayed columns."
+            ),
+        ));
+    }
+    let columns = statement
+        .columns()
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let name = column.name();
+            if name.len() > MAX_IDENTIFIER_BYTES || name.contains('\0') {
+                Err(CommandError::new(
+                    "postgres_identifier_too_large",
+                    format!("Result column {} has an invalid or oversized name.", index + 1),
+                ))
+            } else {
+                Ok(name.to_string())
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let column_types = statement
+        .columns()
+        .iter()
+        .map(|column| column.type_().name().to_string())
+        .collect::<Vec<_>>();
+    let bounded_sql = build_bounded_read_sql(sql, statement.columns())?;
+    let bounded_statement = transaction
+        .prepare(&bounded_sql)
+        .map_err(|error| postgres_error("prepare the bounded PostgreSQL reader", error))?;
+    let portal = transaction
+        .bind(&bounded_statement, &[])
+        .map_err(|error| postgres_error("open the bounded PostgreSQL result", error))?;
+    let bytes_per_row = statement
+        .columns()
+        .len()
+        .saturating_mul(MAX_DEFAULT_BYTES)
+        .max(1);
+    let batch_rows = (MAX_RESULT_JSON_BYTES / bytes_per_row).clamp(1, 128) as i32;
+    let mut rows = Vec::new();
+    let mut encoded_bytes = 0_usize;
+    let mut truncated = false;
+    'result: loop {
+        let remaining_ms = remaining_query_ms(started)?;
+        transaction
+            .batch_execute(&format!(
+                "SET LOCAL statement_timeout = '{remaining_ms}ms';"
+            ))
+            .map_err(|error| postgres_error("refresh the PostgreSQL query timeout", error))?;
+        let batch = transaction
+            .query_portal(&portal, batch_rows)
+            .map_err(|error| postgres_error("read the bounded PostgreSQL result", error))?;
+        if batch.is_empty() {
+            break;
+        }
+        for row in batch {
+            if rows.len() >= MAX_RESULT_ROWS {
+                truncated = true;
+                break 'result;
+            }
+            let mut values = Vec::with_capacity(statement.columns().len());
+            for (index, column) in statement.columns().iter().enumerate() {
+                let value = row
+                    .try_get::<_, Option<String>>(index * 2)
+                    .map_err(|error| postgres_error("decode a PostgreSQL result value", error))?;
+                let value_truncated = row
+                    .try_get::<_, bool>(index * 2 + 1)
+                    .map_err(|error| postgres_error("decode a PostgreSQL truncation flag", error))?;
+                let cell = match value {
+                    Some(value) => PostgresCell {
+                        kind: postgres_cell_kind(column.type_()),
+                        value,
+                        truncated: value_truncated,
+                    },
+                    None => PostgresCell {
+                        kind: "null",
+                        value: "NULL".to_string(),
+                        truncated: false,
+                    },
+                };
+                truncated |= cell.truncated;
+                values.push(cell);
+            }
+            let row_bytes = serde_json::to_vec(&values)
+                .map_err(|_| {
+                    CommandError::new(
+                        "postgres_result_failed",
+                        "Could not encode a PostgreSQL result row.",
+                    )
+                })?
+                .len();
+            if encoded_bytes.saturating_add(row_bytes) > MAX_RESULT_JSON_BYTES {
+                truncated = true;
+                break 'result;
+            }
+            encoded_bytes = encoded_bytes.saturating_add(row_bytes);
+            rows.push(values);
+        }
+    }
+    drop(portal);
+    transaction
+        .commit()
+        .map_err(|error| postgres_error("finish the read-only PostgreSQL query", error))?;
+    Ok(PostgresQueryResult {
+        columns,
+        column_types,
+        row_count: rows.len(),
+        rows,
+        affected_rows: 0,
+        read_only: true,
+        truncated,
+        elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+    })
+}
+
+fn remaining_query_ms(started: Instant) -> Result<u64, CommandError> {
+    let remaining = QUERY_TIMEOUT.checked_sub(started.elapsed()).ok_or_else(|| {
+        CommandError::new(
+            "postgres_query_timeout",
+            "The PostgreSQL query exceeded DevLab's five-second execution limit.",
+        )
+    })?;
+    Ok(remaining.as_millis().clamp(1, u128::from(u64::MAX)) as u64)
+}
+
+fn build_bounded_read_sql(
+    sql: &str,
+    columns: &[::postgres::Column],
+) -> Result<String, CommandError> {
+    let mut inner = sql.trim_end();
+    if let Some(without_semicolon) = inner.strip_suffix(';') {
+        inner = without_semicolon.trim_end();
+    }
+    if inner.is_empty() {
+        return Err(CommandError::new(
+            "postgres_statement_required",
+            "Enter one read-only PostgreSQL statement.",
+        ));
+    }
+    let aliases = (0..columns.len())
+        .map(|index| format!("devlab_col_{}", index + 1))
+        .collect::<Vec<_>>();
+    let mut expressions = Vec::with_capacity(columns.len().saturating_mul(2));
+    for (index, column) in columns.iter().enumerate() {
+        let alias = &aliases[index];
+        if column.type_().name() == "bytea" {
+            expressions.push(format!(
+                "CASE WHEN {alias} IS NULL THEN NULL ELSE '<BYTEA · ' || pg_catalog.octet_length({alias})::text || ' bytes>' END"
+            ));
+            expressions.push(format!(
+                "CASE WHEN {alias} IS NULL THEN false ELSE pg_catalog.octet_length({alias}) > 0 END"
+            ));
+        } else {
+            expressions.push(format!(
+                "CASE WHEN ({alias})::text IS NULL THEN NULL ELSE pg_catalog.left(({alias})::text, {MAX_CELL_CHARACTERS}) END"
+            ));
+            expressions.push(format!(
+                "CASE WHEN ({alias})::text IS NULL THEN false ELSE pg_catalog.length(({alias})::text) > {MAX_CELL_CHARACTERS} OR pg_catalog.octet_length(({alias})::text) > {MAX_DEFAULT_BYTES} END"
+            ));
+        }
+    }
+    Ok(format!(
+        "SELECT {} FROM (\n{}\n) AS devlab_source({})",
+        expressions.join(",\n"),
+        inner,
+        aliases.join(", ")
+    ))
+}
+
+fn postgres_cell_kind(data_type: &Type) -> &'static str {
+    match data_type.name() {
+        "bool" => "boolean",
+        "int2" | "int4" | "int8" | "oid" => "integer",
+        "float4" | "float8" | "numeric" | "money" => "real",
+        "bytea" => "blob",
+        _ => "text",
+    }
+}
+
 fn validate_request(request: &PostgresConnectRequest) -> Result<(), CommandError> {
     validate_host(&request.host)?;
     if request.port == 0 || request.port > u16::MAX as u32 {
@@ -841,6 +1272,20 @@ pub async fn database_postgres_schema(
 }
 
 #[tauri::command]
+pub async fn database_postgres_query(
+    app: AppHandle,
+    id: String,
+    sql: String,
+) -> Result<PostgresQueryResult, CommandError> {
+    blocking(move || {
+        let workspace_root = app.state::<WorkspaceService>().root_path()?;
+        app.state::<PostgresService>()
+            .query(&workspace_root, &id, &sql)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn database_postgres_connect(
     app: AppHandle,
     request: PostgresConnectRequest,
@@ -953,5 +1398,44 @@ mod tests {
                 .code,
             "postgres_schema_too_large"
         );
+    }
+
+    #[test]
+    fn read_query_policy_accepts_reads_and_rejects_writes() {
+        assert!(validate_read_query("-- inspect\nSELECT 1;").is_ok());
+        assert!(validate_read_query("WITH values AS (SELECT 1) SELECT * FROM values").is_ok());
+        assert_eq!(
+            validate_read_query("INSERT INTO notes(value) VALUES ('x')")
+                .expect_err("writes must fail")
+                .code,
+            "postgres_read_only_statement"
+        );
+    }
+
+    #[test]
+    fn read_query_policy_ignores_literals_but_blocks_dangerous_functions() {
+        assert!(validate_read_query("SELECT 'pg_read_file' AS harmless_text").is_ok());
+        assert!(validate_read_query("SELECT $$set_config$$ AS harmless_text").is_ok());
+        assert_eq!(
+            validate_read_query("SELECT pg_catalog.pg_read_file('/etc/passwd')")
+                .expect_err("filesystem reads must fail")
+                .code,
+            "postgres_query_restricted"
+        );
+        assert_eq!(
+            validate_read_query("SELECT \"set_config\"('statement_timeout', '0', false)")
+                .expect_err("configuration changes must fail")
+                .code,
+            "postgres_query_restricted"
+        );
+    }
+
+    #[test]
+    fn sql_identifier_scanner_skips_nested_comments() {
+        let identifiers = sql_identifiers(
+            "/* outer /* SELECT pg_read_file */ done */ VALUES (1), (2)",
+        );
+        assert_eq!(identifiers.first().map(String::as_str), Some("values"));
+        assert!(!identifiers.iter().any(|value| value == "pg_read_file"));
     }
 }

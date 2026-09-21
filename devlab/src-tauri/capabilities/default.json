@@ -55,6 +55,7 @@
     "allow-database-postgres-connections",
     "allow-database-postgres-connect",
     "allow-database-postgres-schema",
+    "allow-database-postgres-query",
     "allow-database-postgres-disconnect",
     "allow-database-postgres-forget-password"
   ]

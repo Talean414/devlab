@@ -11,6 +11,7 @@ import {
   getPostgresConnections,
   getPostgresSchema,
   runDatabaseQuery,
+  runPostgresReadQuery,
   selectSqliteDatabase,
   setDatabaseWriteAccess,
   type DatabaseCell,
@@ -52,6 +53,10 @@ WHERE type IN ('table', 'view')
 ORDER BY type, name
 LIMIT 100;`;
 
+const DEFAULT_POSTGRES_SQL = `SELECT current_database() AS database,
+       current_user AS username,
+       current_setting('server_version') AS server_version;`;
+
 const DEFAULT_POSTGRES_REQUEST: PostgresConnectRequest = {
   host: "localhost",
   port: 5432,
@@ -72,6 +77,8 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
   const [postgresSchema, setPostgresSchema] = useState<PostgresSchema | null>(null);
   const [sql, setSql] = useState(DEFAULT_SQL);
   const [result, setResult] = useState<DatabaseQueryResult | null>(null);
+  const [postgresSql, setPostgresSql] = useState(DEFAULT_POSTGRES_SQL);
+  const [postgresResult, setPostgresResult] = useState<DatabaseQueryResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [postgresSchemaLoading, setPostgresSchemaLoading] = useState(false);
@@ -178,6 +185,7 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
   }, [activeId, loadSchema]);
 
   useEffect(() => {
+    setPostgresResult(null);
     void loadPostgresSchema(activePostgresId);
   }, [activePostgresId, loadPostgresSchema]);
 
@@ -328,6 +336,22 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
     }
   }
 
+  async function executePostgresQuery() {
+    if (!activePostgres || !postgresSql.trim() || busy || postgresSchemaLoading) return;
+    setBusy("postgres-query");
+    setError("");
+    setNotice("");
+    try {
+      const next = await runPostgresReadQuery(activePostgres.id, postgresSql);
+      setPostgresResult(next);
+      setNotice(`Read ${next.rowCount} displayed row${next.rowCount === 1 ? "" : "s"} from PostgreSQL in ${next.elapsedMs} ms.`);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function toggleWriteAccess() {
     if (!active) return;
     const enable = !active.allowWrites;
@@ -377,6 +401,11 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
   function queryObject(object: DatabaseObject) {
     setSql(`SELECT *\nFROM ${quoteIdentifier(object.name)}\nLIMIT 100;`);
     setResult(null);
+  }
+
+  function queryPostgresObject(object: PostgresObject) {
+    setPostgresSql(`SELECT *\nFROM ${quoteIdentifier(object.schema)}.${quoteIdentifier(object.name)}\nLIMIT 100;`);
+    setPostgresResult(null);
   }
 
   const subtitle = active
@@ -433,7 +462,7 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
               <button
                 key={connection.id}
                 onClick={() => { setActivePostgresId(""); setActiveId(connection.id); }}
-                disabled={schemaLoading || postgresSchemaLoading}
+                disabled={!!busy || schemaLoading || postgresSchemaLoading}
                 className={`mb-1 flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition ${
                   activeId === connection.id
                     ? "border-violet-500/30 bg-violet-500/10"
@@ -458,7 +487,7 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
                   <div key={connection.id} className={`mb-2 rounded-lg border p-2.5 ${activePostgresId === connection.id ? "border-blue-500/35 bg-blue-500/10" : "border-blue-500/15 bg-blue-500/[0.04]"}`}>
                     <button
                       onClick={() => { setActiveId(""); setActivePostgresId(connection.id); }}
-                      disabled={schemaLoading || postgresSchemaLoading}
+                      disabled={!!busy || schemaLoading || postgresSchemaLoading}
                       className="flex w-full items-start gap-2 text-left disabled:opacity-40"
                     >
                       <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-blue-500/10 text-blue-300"><Server className="h-3.5 w-3.5" /></span>
@@ -489,7 +518,7 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
                     </div>
                   </div>
                 ))}
-                <div className="px-1 text-[9px] leading-relaxed text-zinc-700">Schema inspection is bounded and read-only. SQL execution remains disabled until its separate checkpoint.</div>
+                <div className="px-1 text-[9px] leading-relaxed text-zinc-700">Schema and read queries are bounded. PostgreSQL writes remain disabled until their separate confirmation checkpoint.</div>
               </div>
             )}
           </div>
@@ -514,7 +543,14 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
               ) : activePostgres ? (
                 filteredPostgresObjects.length === 0
                   ? <div className="px-3 py-5 text-center text-[11px] text-zinc-700">No matching user tables or views.</div>
-                  : filteredPostgresObjects.map((object) => <PostgresSchemaObjectView key={`${object.schema}-${object.kind}-${object.name}`} object={object} />)
+                  : filteredPostgresObjects.map((object) => (
+                    <PostgresSchemaObjectView
+                      key={`${object.schema}-${object.kind}-${object.name}`}
+                      object={object}
+                      disabled={!!busy}
+                      onQuery={() => queryPostgresObject(object)}
+                    />
+                  ))
               ) : filteredObjects.length === 0 ? (
                 <div className="px-3 py-5 text-center text-[11px] text-zinc-700">No matching user tables or views.</div>
               ) : filteredObjects.map((object) => (
@@ -547,6 +583,11 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
               connection={activePostgres}
               schema={postgresSchema}
               loading={postgresSchemaLoading}
+              sql={postgresSql}
+              result={postgresResult}
+              queryBusy={busy === "postgres-query"}
+              onSql={setPostgresSql}
+              onRun={() => void executePostgresQuery()}
               onRefresh={() => void loadPostgresSchema(activePostgres.id)}
             />
           ) : !active ? (
@@ -645,7 +686,7 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
   );
 }
 
-function PostgresSchemaObjectView({ object }: { object: PostgresObject }) {
+function PostgresSchemaObjectView({ object, disabled, onQuery }: { object: PostgresObject; disabled: boolean; onQuery: () => void }) {
   return (
     <details className="group mb-1 rounded-lg open:bg-white/[0.025]">
       <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-2.5 py-2 text-[11.5px] text-zinc-300 hover:bg-white/5">
@@ -655,6 +696,7 @@ function PostgresSchemaObjectView({ object }: { object: PostgresObject }) {
         <span className="text-[9px] uppercase text-zinc-700">{object.kind}</span>
       </summary>
       <div className="pb-2 pl-8 pr-2">
+        <button onClick={onQuery} disabled={disabled} className="mb-1 text-[10px] font-medium text-blue-400 hover:text-blue-300 disabled:opacity-40">Prepare read-only query</button>
         {object.columns.length === 0 && <div className="py-1 text-[10px] text-zinc-700">No user columns.</div>}
         {object.columns.map((column) => (
           <div key={`${object.schema}-${object.name}-${column.position}-${column.name}`} className="flex items-center gap-2 py-1 text-[10.5px]">
@@ -672,11 +714,21 @@ function PostgresSchemaSummary({
   connection,
   schema,
   loading,
+  sql,
+  result,
+  queryBusy,
+  onSql,
+  onRun,
   onRefresh,
 }: {
   connection: PostgresConnectionInfo;
   schema: PostgresSchema | null;
   loading: boolean;
+  sql: string;
+  result: DatabaseQueryResult | null;
+  queryBusy: boolean;
+  onSql: (value: string) => void;
+  onRun: () => void;
   onRefresh: () => void;
 }) {
   const objects = schema?.objects ?? [];
@@ -691,7 +743,7 @@ function PostgresSchemaSummary({
             <div className="flex items-center gap-2 text-lg font-semibold text-white"><Server className="h-5 w-5 text-blue-300" /> {connection.database}</div>
             <div className="mt-1 font-mono text-[11px] text-zinc-600">{connection.username}@{connection.host}:{connection.port} · PostgreSQL {connection.serverVersion}</div>
           </div>
-          <button onClick={onRefresh} disabled={loading} className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-[11px] text-zinc-400 hover:bg-white/5 hover:text-white disabled:opacity-40">
+          <button onClick={onRefresh} disabled={loading || queryBusy} className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-[11px] text-zinc-400 hover:bg-white/5 hover:text-white disabled:opacity-40">
             <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh schema
           </button>
         </div>
@@ -716,13 +768,39 @@ function PostgresSchemaSummary({
           </div>
         </div>
 
-        <div className="mt-4 rounded-xl border border-white/10 bg-[#0d1017] p-4 text-[11px] leading-relaxed text-zinc-500">
-          <div className="font-semibold text-zinc-300">Current checkpoint boundaries</div>
-          <div className="mt-2 grid gap-2 sm:grid-cols-2">
-            <span>5 second server statement timeout</span><span>2 second lock timeout</span>
-            <span>2,000 schema objects maximum</span><span>20,000 columns maximum</span>
-            <span>2 MiB encoded schema response</span><span>SQL execution remains unavailable</span>
+        <div className="mt-4 overflow-hidden rounded-xl border border-white/10 bg-[#0d1017] ring-soft">
+          <div className="flex items-center justify-between border-b border-white/5 px-4 py-2.5">
+            <div>
+              <div className="flex items-center gap-2 text-[11px] font-semibold text-zinc-300"><LockKeyhole className="h-3.5 w-3.5 text-emerald-400" /> Enforced read-only PostgreSQL query</div>
+              <div className="mt-0.5 text-[9.5px] text-zinc-600">One SELECT, WITH, VALUES, or TABLE statement · Ctrl/⌘+Enter</div>
+            </div>
+            <button onClick={onRun} disabled={queryBusy || loading || !sql.trim()} className="inline-flex items-center gap-1.5 rounded-md bg-gradient-to-br from-blue-500 to-cyan-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:from-blue-400 hover:to-cyan-500 disabled:opacity-40">
+              {queryBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3 fill-current" />}
+              {queryBusy ? "Reading…" : "Run read"}
+            </button>
           </div>
+          <textarea
+            value={sql}
+            onChange={(event) => onSql(event.target.value)}
+            onKeyDown={(event) => {
+              if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                event.preventDefault();
+                onRun();
+              }
+            }}
+            spellCheck={false}
+            rows={7}
+            maxLength={64 * 1024}
+            className="w-full resize-y bg-transparent p-4 font-mono text-[12.5px] leading-relaxed text-blue-100 outline-none placeholder:text-zinc-700"
+            placeholder="SELECT * FROM public.your_table LIMIT 100;"
+          />
+          <div className="grid gap-1 border-t border-white/5 px-4 py-2 text-[9.5px] text-zinc-700 sm:grid-cols-3">
+            <span>5 second timeout</span><span>1,000 displayed rows</span><span>200 displayed columns</span>
+            <span>16,384 displayed characters/cell</span><span>2 MiB encoded rows</span><span>Writes and parameters rejected</span>
+          </div>
+        </div>
+        <div className="mt-4 h-[420px] min-h-[260px]">
+          <QueryResultView result={result} />
         </div>
         {!loading && schema && objects.length === 0 && (
           <div className="mt-4 rounded-xl border border-dashed border-white/10 p-6 text-center text-[12px] text-zinc-600">The server returned no visible user tables or views for this account.</div>
@@ -756,7 +834,7 @@ function EmptyDatabaseState({
           {needsWorkspace ? "Open workspace" : "Choose SQLite file"}
         </button>
         <div className="mt-5 rounded-lg border border-white/10 bg-black/20 p-3 text-left text-[11px] leading-relaxed text-zinc-600">
-          This SQLite checkpoint uses a bundled native engine. PostgreSQL connections, protected server credentials and TLS policy are the next database step.
+          SQLite supports bounded reads and confirmed writes. PostgreSQL supports verified connections, bounded schemas and enforced read-only queries; write execution remains disabled.
         </div>
       </div>
     </div>
@@ -790,7 +868,10 @@ function QueryResultView({ result }: { result: DatabaseQueryResult | null }) {
             <tr>
               <th className="border-b border-r border-white/10 px-3 py-2.5 text-right font-medium">#</th>
               {result.columns.map((column, index) => (
-                <th key={`${column}-${index}`} className="whitespace-nowrap border-b border-r border-white/10 px-3 py-2.5 font-medium last:border-r-0">{column || `(column ${index + 1})`}</th>
+                <th key={`${column}-${index}`} className="whitespace-nowrap border-b border-r border-white/10 px-3 py-2.5 font-medium last:border-r-0">
+                  <span className="block">{column || `(column ${index + 1})`}</span>
+                  {result.columnTypes?.[index] && <span className="mt-0.5 block normal-case tracking-normal text-zinc-700">{result.columnTypes[index]}</span>}
+                </th>
               ))}
             </tr>
           </thead>
@@ -820,7 +901,9 @@ function ResultCell({ cell }: { cell: DatabaseCell }) {
       ? "text-violet-300"
       : cell.kind === "integer" || cell.kind === "real"
         ? "text-cyan-300"
-        : "text-zinc-300";
+        : cell.kind === "boolean"
+          ? "text-amber-300"
+          : "text-zinc-300";
   return (
     <td className={`max-w-md whitespace-pre-wrap break-words border-b border-r border-white/5 px-3 py-2 font-mono text-[11px] last:border-r-0 ${colors}`} title={cell.truncated ? "Value was truncated or binary content was omitted" : undefined}>
       {cell.value}
@@ -858,7 +941,7 @@ function ConnectPostgresDialog({
         <div className="flex items-start justify-between gap-4">
           <div>
             <h3 className="flex items-center gap-2 text-base font-semibold text-white"><Server className="h-4 w-4 text-blue-300" /> Connect PostgreSQL</h3>
-            <p className="mt-1 text-[12px] leading-relaxed text-zinc-500">This opens a real native session with bounded catalog inspection. User-supplied PostgreSQL statements remain disabled until the next checkpoint.</p>
+            <p className="mt-1 text-[12px] leading-relaxed text-zinc-500">This opens a real native session with bounded schema inspection and enforced read-only queries. PostgreSQL writes remain disabled until their separate checkpoint.</p>
           </div>
           <button type="button" onClick={onClose} disabled={busy} className="rounded p-1.5 text-zinc-500 hover:bg-white/5 hover:text-white disabled:opacity-40"><X className="h-4 w-4" /></button>
         </div>
@@ -892,7 +975,7 @@ function ConnectPostgresDialog({
             </label>
             <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-white/10 p-2.5">
               <input type="checkbox" checked={request.allowWrites} onChange={(event) => update("allowWrites", event.target.checked)} disabled={busy} className="mt-0.5 h-3.5 w-3.5 accent-amber-500" />
-              <span className="text-[10.5px] leading-relaxed text-zinc-500">Prepare this session for individually confirmed writes in the next query increment.</span>
+              <span className="text-[10.5px] leading-relaxed text-zinc-500">Record write intent for the future individually confirmed write checkpoint. It does not enable writes yet.</span>
             </label>
           </div>
         </div>

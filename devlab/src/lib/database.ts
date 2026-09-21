@@ -81,7 +81,7 @@ export interface DatabaseSchema {
   objects: DatabaseObject[];
 }
 
-export type DatabaseCellKind = "null" | "integer" | "real" | "text" | "blob";
+export type DatabaseCellKind = "null" | "boolean" | "integer" | "real" | "text" | "blob";
 
 export interface DatabaseCell {
   kind: DatabaseCellKind;
@@ -91,6 +91,7 @@ export interface DatabaseCell {
 
 export interface DatabaseQueryResult {
   columns: string[];
+  columnTypes?: string[];
   rows: DatabaseCell[][];
   rowCount: number;
   affectedRows: number;
@@ -173,6 +174,13 @@ export function connectPostgres(
 
 export function getPostgresSchema(id: string): Promise<PostgresSchema> {
   return command("database_postgres_schema", { id });
+}
+
+export function runPostgresReadQuery(
+  id: string,
+  sql: string,
+): Promise<DatabaseQueryResult> {
+  return command("database_postgres_query", { id, sql });
 }
 
 export function disconnectPostgres(id: string): Promise<void> {
