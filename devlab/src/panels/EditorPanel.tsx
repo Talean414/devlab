@@ -346,6 +346,59 @@ export function EditorPanel({
     }
   }
 
+  async function applyDraftToWorkspace(draft: VFile) {
+    if (!workspace) {
+      setError("Select a workspace before applying a reviewed draft.");
+      return;
+    }
+    const path = draft.path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    if (!path) {
+      setError("The reviewed draft does not have a valid workspace-relative path.");
+      return;
+    }
+    if (!confirm(`Apply the reviewed draft to ${path}? This writes to the selected workspace.`)) return;
+
+    setWorking(true);
+    setError("");
+    setNotice("");
+    try {
+      ignoredEvents.current.set(path, Date.now() + 2_000);
+      let saved: WorkspaceDocument;
+      let action = "Created";
+      try {
+        saved = await writeWorkspaceFile(path, draft.content, null);
+      } catch (commandError) {
+        if (!(commandError instanceof WorkspaceCommandError) || commandError.code !== "revision_required") {
+          throw commandError;
+        }
+        const existing = await readWorkspaceFile(path);
+        if (!confirm(`${path} already exists. Replace it with this reviewed draft using a native revision check?`)) {
+          ignoredEvents.current.delete(path);
+          return;
+        }
+        ignoredEvents.current.set(path, Date.now() + 2_000);
+        saved = await writeWorkspaceFile(path, draft.content, existing.revision);
+        action = "Updated";
+      }
+
+      setDocuments((current) => ({
+        ...current,
+        [path]: { ...saved, dirty: false, saving: false, changedOnDisk: false },
+      }));
+      setOpenTabs((tabs) => [...tabs.filter((tab) => tab !== path), path]);
+      setActivePath(path);
+      setCurrentDirectory(parentPath(path));
+      setDraftReviewOpen(false);
+      setRefreshVersion((version) => version + 1);
+      setNotice(`${action} ${path} from a reviewed draft.`);
+    } catch (commandError) {
+      ignoredEvents.current.delete(path);
+      setError(errorMessage(commandError));
+    } finally {
+      setWorking(false);
+    }
+  }
+
   async function reloadDocument(path: string) {
     const existing = documents[path];
     if (existing?.dirty && !confirm(`Discard unsaved changes to ${path} and reload from disk?`)) return;
@@ -792,10 +845,18 @@ export function EditorPanel({
               <pre className="min-h-0 flex-1 overflow-auto whitespace-pre p-5 font-mono text-[11.5px] leading-relaxed text-zinc-300">
                 {selectedDraft.content}
               </pre>
-              <div className="border-t border-white/10 bg-amber-500/[0.04] px-4 py-3 text-[11.5px] leading-relaxed text-amber-100/75">
-                Review this output before using it. To persist it, create the intended path in the
-                scoped workspace and paste only the content you approve; DevLab will not write this
-                generated draft automatically.
+              <div className="flex items-center gap-3 border-t border-white/10 bg-amber-500/[0.04] px-4 py-3 text-[11.5px] leading-relaxed text-amber-100/75">
+                <div className="min-w-0 flex-1">
+                  Review this output before using it. DevLab writes it only when you explicitly apply the reviewed draft; existing files are protected by the native revision check.
+                </div>
+                <button
+                  onClick={() => void applyDraftToWorkspace(selectedDraft)}
+                  disabled={working || !workspace}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-violet-500 px-3 py-2 text-[12px] font-semibold text-white hover:bg-violet-400 disabled:opacity-40"
+                >
+                  {working ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                  Apply reviewed draft
+                </button>
               </div>
             </section>
           </div>

@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 
 const stats = [
-  { label: "Migration phase", value: "6B / 7" },
+  { label: "Migration phase", value: "6C / 7" },
   { label: "Native capabilities", value: "9" },
   { label: "Simulations enabled", value: "0" },
   { label: "License", value: "MIT" },
@@ -15,7 +15,7 @@ const stats = [
 
 const quickCards: { view: ViewId; Icon: typeof Bot; title: string; desc: string; hot?: boolean }[] = [
   { view: "canvas",   Icon: PenTool,      title: "Sketch → Source",      desc: "Draw an architecture and generate a reviewable code preview", hot: true },
-  { view: "healer",   Icon: Stethoscope,  title: "Reviewed Repair Loop", desc: "Run native tests and draft one-file repairs for editor review" },
+  { view: "healer",   Icon: Stethoscope,  title: "Reviewed Repair Loop", desc: "Run native tests, draft repairs and explicitly apply reviewed drafts" },
   { view: "builder",  Icon: Wand2,        title: "Project Builder",      desc: "Reviewed multi-file workspace generation is a later milestone" },
   { view: "vision",   Icon: ScanLine,     title: "Screenshot → Source",  desc: "Use Gemini vision to generate a reviewable React preview" },
   { view: "editor",   Icon: Code2,        title: "Native Workspace",     desc: "Select a real folder and safely edit its files with Monaco" },
@@ -33,7 +33,7 @@ const features = [
   { Icon: Container,  title: "Real Docker engine operations", desc: "Read actual engine data, pull validated image references, create constrained stopped containers, and explicitly control validated container IDs." },
   { Icon: Database,   title: "Native SQLite and PostgreSQL", desc: "Run bounded SQLite work, or inspect and query PostgreSQL through explicit TLS, with bounded reads and separately confirmed writes." },
   { Icon: Plug,       title: "Native HTTP client",           desc: "Send real HTTP/HTTPS requests from Rust with verified TLS, fixed framing and bounded request, header and response sizes." },
-  { Icon: Stethoscope,title: "Reviewed test repair",        desc: "Run backend-discovered tests, then use the real failure output to draft a one-file repair that opens in editor review without writing automatically." },
+  { Icon: Stethoscope,title: "Reviewed test repair",        desc: "Run backend-discovered tests, draft a one-file repair from real output, then apply it only after explicit editor review." },
   { Icon: GitBranch,  title: "Real native Git",             desc: "Read real status, diffs, commits, branches and remotes, then stage, commit or run a confirmed remote operation through fixed Rust commands." },
   { Icon: KeyRound,   title: "Protected Git credentials",   desc: "Saved Git provider tokens live in the operating system credential store and are never returned to the renderer. Gemini retains its separate BYOK renderer flow." },
 ];
@@ -55,7 +55,7 @@ export function WelcomePanel({
         <div className="relative mx-auto max-w-5xl px-8 py-16">
           <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-300">
             <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-pulse" />
-            Phase 6B · reviewed repair drafts
+            Phase 6C · reviewed draft apply
           </div>
           <h1 className="mt-5 max-w-3xl text-5xl font-bold tracking-tight text-white sm:text-6xl text-balance">
             Native shell.{" "}
@@ -65,7 +65,7 @@ export function WelcomePanel({
           <p className="mt-5 max-w-2xl text-lg text-zinc-400 text-pretty">
             DevLab now connects Monaco to real files, xterm.js to your operating system shell,
             Source Control to real Git, Containers to the local Docker engine, and Database to a
-            bounded SQLite plus verified PostgreSQL connectivity, fixed schema inspection, bounded reads, separately confirmed writes, a native HTTP client with no browser CORS path, a real bounded test runner, and reviewed in-memory repair drafts from failed test evidence. Unavailable operations stay disabled until their native backends are implemented.
+            bounded SQLite plus verified PostgreSQL connectivity, fixed schema inspection, bounded reads, separately confirmed writes, a native HTTP client with no browser CORS path, a real bounded test runner, reviewed repair drafts from failed test evidence, and explicit native application of approved drafts. Unavailable operations stay disabled until their native backends are implemented.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <button

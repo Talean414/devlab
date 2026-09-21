@@ -97,13 +97,13 @@ const PHASES: readonly MigrationPhase[] = [
     n: 5,
     title: "Docker, databases and native HTTP",
     status: "complete",
-    detail: "Docker, SQLite, PostgreSQL and native HTTP are complete. Phase 6 now has bounded test execution plus reviewed one-file repair drafts; broader agent patch tools are next.",
+    detail: "Docker, SQLite, PostgreSQL and native HTTP are complete. Phase 6 now has bounded test execution, reviewed one-file repair drafts and explicit reviewed-draft application; broader agent patch tools are next.",
   },
   {
     n: 6,
     title: "Agent tool execution",
     status: "active",
-    detail: "Bounded native test execution and reviewed in-memory repair drafts are implemented first. Broader permission-gated agent patch tools, audit logs and Ollama support follow.",
+    detail: "Bounded native test execution, reviewed in-memory repair drafts and explicit draft application are implemented first. Broader permission-gated agent patch tools, audit logs and Ollama support follow.",
   },
   {
     n: 7,
@@ -192,7 +192,7 @@ export function SetupPanel() {
               <Note>
                 <strong>No fake native results:</strong> opening the app with <code>npm run dev</code>
                 creates only a browser UI preview. Workspace Editor, PTY Terminal, Source Control
-                Docker, workspace-scoped SQLite, PostgreSQL connectivity/schema/bounded reads/separately confirmed writes, native HTTP, bounded native test execution, and reviewed one-file repair drafts are available through <code>npm run desktop:dev</code>;
+                Docker, workspace-scoped SQLite, PostgreSQL connectivity/schema/bounded reads/separately confirmed writes, native HTTP, bounded native test execution, reviewed one-file repair drafts, and explicit reviewed-draft application are available through <code>npm run desktop:dev</code>;
                 broader agent patch tools stay disabled until their own reviewed native increment is implemented.
               </Note>
             </>
@@ -211,7 +211,7 @@ export function SetupPanel() {
                 <ArchitectureCard
                   icon={Cpu}
                   title="Rust core · phased"
-                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Scoped Git, OS credentials, bounded Docker/SQLite/PostgreSQL, native HTTP, native test execution and reviewed repair drafts"]}
+                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Scoped Git, OS credentials, bounded Docker/SQLite/PostgreSQL, native HTTP, native test execution, reviewed repair drafts and explicit draft application"]}
                 />
               </div>
 
