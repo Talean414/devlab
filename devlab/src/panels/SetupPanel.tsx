@@ -83,13 +83,13 @@ const PHASES: readonly MigrationPhase[] = [
   {
     n: 3,
     title: "Real terminal",
-    status: "next",
-    detail: "PTY-backed shell sessions with streaming output, resize, cancellation and real exit codes.",
+    status: "complete",
+    detail: "PTY-backed shell sessions with byte-stream output, resize, bounded history, termination and real exit codes.",
   },
   {
     n: 4,
     title: "Git and secure secrets",
-    status: "planned",
+    status: "next",
     detail: "Real repository status and operations plus encrypted credentials outside browser localStorage.",
   },
   {
@@ -190,9 +190,9 @@ export function SetupPanel() {
 
               <Note>
                 <strong>No fake native results:</strong> opening the app with <code>npm run dev</code>
-                creates only a browser UI preview. The real Workspace Editor is available through
-                <code>npm run desktop:dev</code>; Terminal, Git, Docker, database and test execution
-                stay disabled until their own native capability is implemented.
+                creates only a browser UI preview. The real Workspace Editor and PTY Terminal are
+                available through <code>npm run desktop:dev</code>; Git, Docker, database and test
+                execution stay disabled until their own native capability is implemented.
               </Note>
             </>
           )}
@@ -200,7 +200,7 @@ export function SetupPanel() {
           {tab === "architecture" && (
             <>
               <Head icon={Cpu} title="Native boundary"
-                sub="The React renderer has no direct shell, filesystem or secret access." />
+                sub="The React renderer receives typed session and workspace commands, never raw OS handles." />
               <div className="grid gap-3 md:grid-cols-2">
                 <ArchitectureCard
                   icon={Laptop}
@@ -210,16 +210,16 @@ export function SetupPanel() {
                 <ArchitectureCard
                   icon={Cpu}
                   title="Rust core · phased"
-                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "PTY, Git and Docker later", "Secrets and audit log later"]}
+                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Git, secrets and audit log later"]}
                 />
               </div>
 
               <div className="my-5 flex items-center gap-3 rounded-xl border border-cyan-500/20 bg-cyan-500/[0.05] p-4">
                 <Shield className="h-5 w-5 shrink-0 text-cyan-300" />
                 <p className="text-[13px] leading-relaxed text-zinc-300">
-                  Every privileged action will cross a narrowly typed Tauri command. Before a new
-                  action is enabled, its backend must validate the selected workspace, requested
-                  capability and autonomy policy.
+                  Every privileged action crosses a typed Tauri command. Each backend validates
+                  its capability-specific boundary: canonical paths for file operations and
+                  Rust-owned session IDs, dimensions and payload limits for PTY operations.
                 </p>
               </div>
 
@@ -229,8 +229,9 @@ export function SetupPanel() {
                   "Only the main application window receives core Tauri permissions.",
                   "Every custom command has an explicit generated allow permission for that window.",
                   "A capability is not advertised until its backend and tests exist.",
-                  "Paths must resolve inside a user-selected workspace.",
-                  "Destructive commands require explicit approval unless a narrow policy permits them.",
+                  "Filesystem API paths must resolve inside a user-selected workspace.",
+                  "PTY shells start in that workspace but retain the user account's full authority.",
+                  "Destructive agent commands require explicit approval unless a narrow policy permits them.",
                   "The renderer never receives raw long-lived secrets after secure storage is enabled.",
                   "Remote pages are never loaded into a privileged application context.",
                   "Every agent tool action will have timeout, cancellation and audit metadata.",

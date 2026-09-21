@@ -6,11 +6,13 @@ DevLab is a native developer control plane built with **Tauri 2, Rust, React, Ty
 
 ## Native migration status
 
-Phases 1 and 2 are implemented: DevLab has a Tauri desktop shell, typed Rust-to-React IPC, restricted capabilities, and a real scoped workspace service connected to Monaco.
+Phases 1 through 3 are implemented: DevLab has a Tauri desktop shell, typed Rust-to-React IPC, restricted capabilities, a real scoped workspace service connected to Monaco, and a cross-platform PTY terminal connected to xterm.js.
 
 A workspace can be granted only through the native folder picker. The Rust backend holds its canonical root in memory, rejects absolute paths and parent traversal, blocks symlink access, limits text I/O, watches native filesystem changes, and uses content revisions to prevent silent overwrites.
 
-Simulated terminal, Git, Docker, database, deployment, CI, toolchain, API-client and test-runner results remain disabled. Those panels are re-enabled only after their real native backend is completed. The normal Vite server remains available strictly as a UI preview.
+A terminal starts only after an explicit click and launches the operating system’s real default shell in the selected workspace. Rust streams raw PTY bytes, validates session IDs, bounds retained history, handles resize and termination, and reports the real process exit status. Shell commands are intentionally not confined to the workspace and have the same authority as the user running DevLab.
+
+Simulated Git, Docker, database, deployment, CI, toolchain, API-client and test-runner results remain disabled. Those panels are re-enabled only after their real native backend is completed. The normal Vite server remains available strictly as a UI preview.
 
 ## Current working features
 
@@ -23,12 +25,13 @@ Simulated terminal, Git, Docker, database, deployment, CI, toolchain, API-client
 - Explicit file and empty-directory create, rename and delete operations
 - Review-only in-memory AI drafts that are never written automatically
 - Native filesystem change notifications and save-conflict detection
+- Real multi-session PTY terminal with raw streaming, resize, bounded replay and exit status
 - Project template and command references
 - BroadcastChannel/WebRTC collaboration primitives
 - Embedded web preview
 - WebView-local settings and credentials until secure native storage lands
 
-The remaining native backends are being delivered in explicit phases: PTY terminal next, then Git and secure secrets, Docker/databases/native HTTP, agent tool execution, and signed distribution. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
+The remaining native backends are being delivered in explicit phases: Git and secure secrets next, then Docker/databases/native HTTP, agent tool execution, and signed distribution. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
 
 ## Requirements
 
@@ -142,7 +145,7 @@ npm run native:check
 npm run native:test
 ```
 
-The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary and revision tests.
+The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary, revision, terminal-dimension and bounded-output tests.
 
 Build the native application and this operating system's installer formats:
 
@@ -224,6 +227,10 @@ Use this list before calling an installation complete:
 - [ ] A real UTF-8 file can be opened, changed and saved with `Ctrl/Cmd+S`
 - [ ] An external file change produces a **Changed on disk** warning
 - [ ] Parent traversal, symlinks, binary files and files over 2 MiB are rejected
+- [ ] Native Terminal requires a selected workspace and explicit start action
+- [ ] `pwd`/`cd`, interactive input, ANSI colors and full-screen terminal programs work
+- [ ] Terminal resizing works and a long-running process can be terminated
+- [ ] `exit 7` on Unix or `exit /b 7` on Windows is reported as the real exit code, and terminal tabs restore bounded history
 - [ ] Gemini key test says **Key valid**
 - [ ] AI Agent streams a response
 - [ ] Unimplemented native panels explicitly say **Simulation removed**
@@ -270,9 +277,13 @@ Use the same browser profile and origin where the key was saved. Browser `localS
 
 Canvas, migration and vision tools produce source previews but do not automatically write AI output into the selected workspace. Open the native editor and explicitly create or update files after reviewing the generated source. A reviewed multi-file import flow will be added separately.
 
-### Terminal, Git, Docker, database or test runner says “Simulation removed”
+### Git, Docker, database or test runner says “Simulation removed”
 
-This is intentional—not an installation failure. The previous fabricated results have been disabled. Each panel will be re-enabled only when its real native milestone is implemented and tested. The next milestone is the scoped workspace filesystem.
+This is intentional—not an installation failure. The previous fabricated results have been disabled. Each panel will be re-enabled only when its real native milestone is implemented and tested. The next milestone is real Git operations and encrypted credential storage.
+
+### Native Terminal says a workspace is required
+
+Open **Code Editor**, choose **Select workspace folder**, and then return to **Terminal**. The selected canonical folder is kept in Rust process memory and becomes the shell’s initial working directory. Selecting a starting folder does not sandbox shell commands; they retain your operating-system account’s normal permissions.
 
 ## Available scripts
 
@@ -299,7 +310,7 @@ devlab/
 │   ├── Cargo.toml
 │   ├── capabilities/       # default-deny native permission manifests
 │   ├── icons/              # generated desktop application icons
-│   ├── src/                # trusted Rust core and scoped workspace service
+│   ├── src/                # trusted Rust core, workspace service and PTY manager
 │   └── tauri.conf.json
 └── src/
     ├── App.tsx
@@ -308,6 +319,7 @@ devlab/
     ├── lib/
     │   ├── gemini.ts       # BYOK Gemini client, retry, quota, fallback
     │   ├── native.ts       # typed native runtime bridge
+    │   ├── terminal.ts     # typed PTY lifecycle and event IPC client
     │   ├── workspace.ts    # typed scoped-filesystem IPC client
     │   ├── settings.ts     # application settings
     │   └── sync.ts         # collaboration helpers
@@ -319,8 +331,10 @@ devlab/
 - Never commit API keys or tokens.
 - Never use one shared Gemini key in a public frontend.
 - Keep the Tauri capability manifest default-deny and allow each custom command explicitly.
-- Do not expose shell or filesystem primitives directly to the renderer.
-- Validate and canonicalize every path against the user-selected workspace.
+- Do not expose arbitrary process-spawn or filesystem primitives directly to the renderer; PTY operations must target Rust-owned session IDs.
+- Treat every terminal session as full user-level shell access: require an explicit start action and never imply that its commands are workspace-sandboxed.
+- Bound terminal input, retained output, dimensions and concurrent session counts; terminate owned processes on close.
+- Validate and canonicalize every filesystem path against the user-selected workspace.
 - Reject traversal and symbolic links at the native boundary; never rely on renderer validation.
 - Require revision matches before overwriting an existing file.
 - Rotate a key immediately if it is pasted into source code, an issue, a commit, or a public chat.

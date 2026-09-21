@@ -1,292 +1,515 @@
-import { useEffect, useRef, useState } from "react";
-import { projectTemplates } from "../data/templates";
-import { runtimes } from "../data/runtimes";
-import { deployProviders } from "../data/runtimes";
-import { loadGit } from "../lib/settings";
-import { Terminal as TerminalIcon } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
+import {
+  AlertTriangle,
+  Ban,
+  CircleStop,
+  Eraser,
+  FolderOpen,
+  Loader2,
+  Plus,
+  ShieldAlert,
+  Terminal as TerminalIcon,
+  X,
+} from "lucide-react";
+import { loadSettings } from "../lib/settings";
+import {
+  clearTerminal,
+  closeTerminal,
+  createTerminal,
+  getTerminalSnapshot,
+  killTerminal,
+  listTerminals,
+  onTerminalExit,
+  onTerminalOutput,
+  resizeTerminal,
+  TerminalCommandError,
+  writeTerminal,
+  type TerminalExitEvent,
+  type TerminalOutputEvent,
+  type TerminalSessionInfo,
+} from "../lib/terminal";
 
-interface Line {
-  id: number;
-  text: string;
-  type: "in" | "out" | "err" | "ok";
+interface HydrationState {
+  sessionId: string;
+  events: TerminalOutputEvent[];
 }
 
-let counter = 0;
-const nid = () => ++counter;
+export function TerminalPanel({ onOpenWorkspace }: { onOpenWorkspace: () => void }) {
+  const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
+  const [activeId, setActiveId] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [historyTruncated, setHistoryTruncated] = useState(false);
+  const [rehydrateVersion, setRehydrateVersion] = useState(0);
+  const creatingRef = useRef(false);
+  const hostRef = useRef<HTMLDivElement>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const activeIdRef = useRef("");
+  const nextOffsetRef = useRef(0);
+  const hydrationRef = useRef<HydrationState | null>(null);
+  const inputQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const sessionsRef = useRef<TerminalSessionInfo[]>([]);
+  const settings = loadSettings();
 
-export function TerminalPanel() {
-  const [lines, setLines] = useState<Line[]>([
-    { id: nid(), text: "DevLab Terminal v1.0 — type `help` to see built-in commands.", type: "out" },
-    { id: nid(), text: "Grid-split terminal · runs Aider / Git CLI / any shell in the real build.", type: "out" },
-  ]);
-  const [input, setInput] = useState("");
-  const [cwd] = useState("~/devlab");
-  const [history, setHistory] = useState<string[]>([]);
-  const [hIdx, setHIdx] = useState(-1);
-  const endRef = useRef<HTMLDivElement>(null);
+  const activeSession = useMemo(
+    () => sessions.find((session) => session.id === activeId) ?? null,
+    [sessions, activeId],
+  );
+
+  activeIdRef.current = activeId;
+  sessionsRef.current = sessions;
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [lines]);
+    let disposed = false;
+    let stopOutput: (() => void) | undefined;
+    let stopExit: (() => void) | undefined;
 
-  function push(text: string, type: Line["type"] = "out") {
-    setLines((l) => [...l, { id: nid(), text, type }]);
+    async function connect() {
+      try {
+        [stopOutput, stopExit] = await Promise.all([
+          onTerminalOutput(handleOutput),
+          onTerminalExit(handleExit),
+        ]);
+        if (disposed) {
+          stopOutput();
+          stopExit();
+          return;
+        }
+        const current = await listTerminals();
+        if (disposed) return;
+        setSessions(current);
+        setActiveId((selected) => (
+          selected && current.some((session) => session.id === selected)
+            ? selected
+            : (current[0]?.id ?? "")
+        ));
+      } catch (commandError) {
+        if (!disposed) setError(errorMessage(commandError));
+      } finally {
+        if (!disposed) setLoading(false);
+      }
+    }
+
+    function handleOutput(event: TerminalOutputEvent) {
+      if (event.sessionId !== activeIdRef.current) return;
+      const hydration = hydrationRef.current;
+      if (hydration?.sessionId === event.sessionId) {
+        hydration.events.push(event);
+        return;
+      }
+      applyOutputEvent(event);
+    }
+
+    function handleExit(event: TerminalExitEvent) {
+      setSessions((current) => current.map((session) => (
+        session.id === event.sessionId
+          ? {
+            ...session,
+            status: event.status,
+            exitCode: event.exitCode,
+            signal: event.signal,
+            error: event.error,
+          }
+          : session
+      )));
+      if (event.sessionId === activeIdRef.current) {
+        setNotice(exitDescription(event));
+      }
+    }
+
+    void connect();
+    return () => {
+      disposed = true;
+      stopOutput?.();
+      stopExit?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || !activeId) {
+      terminalRef.current?.dispose();
+      terminalRef.current = null;
+      fitRef.current = null;
+      return;
+    }
+
+    let disposed = false;
+    let resizeTimer: number | undefined;
+    const terminal = new Terminal({
+      allowTransparency: true,
+      convertEol: false,
+      cursorBlink: true,
+      cursorStyle: "bar",
+      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+      fontSize: Math.max(11, settings.fontSize),
+      lineHeight: 1.25,
+      scrollback: 10_000,
+      theme: {
+        background: "#090b10",
+        foreground: "#d4d4d8",
+        cursor: "#22d3ee",
+        cursorAccent: "#090b10",
+        selectionBackground: "#164e63aa",
+        black: "#18181b",
+        red: "#fb7185",
+        green: "#4ade80",
+        yellow: "#facc15",
+        blue: "#60a5fa",
+        magenta: "#c084fc",
+        cyan: "#22d3ee",
+        white: "#e4e4e7",
+        brightBlack: "#71717a",
+        brightRed: "#fda4af",
+        brightGreen: "#86efac",
+        brightYellow: "#fde047",
+        brightBlue: "#93c5fd",
+        brightMagenta: "#d8b4fe",
+        brightCyan: "#67e8f9",
+        brightWhite: "#fafafa",
+      },
+    });
+    const fit = new FitAddon();
+    terminal.loadAddon(fit);
+    terminal.open(host);
+    terminalRef.current = terminal;
+    fitRef.current = fit;
+    hydrationRef.current = { sessionId: activeId, events: [] };
+    setHistoryTruncated(false);
+
+    function queueInput(data: string | Uint8Array) {
+      const session = sessionsRef.current.find((item) => item.id === activeId);
+      if (session?.status !== "running") return;
+      inputQueueRef.current = inputQueueRef.current
+        .then(() => writeTerminal(activeId, data))
+        .catch((commandError) => setError(errorMessage(commandError)));
+    }
+    const inputDisposable = terminal.onData(queueInput);
+    const binaryDisposable = terminal.onBinary((data) => {
+      queueInput(Uint8Array.from(Array.from(data, (character) => character.charCodeAt(0))));
+    });
+    const resizeDisposable = terminal.onResize(({ cols, rows }) => {
+      if (resizeTimer) window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        const session = sessionsRef.current.find((item) => item.id === activeId);
+        if (session?.status !== "running") return;
+        resizeTerminal(activeId, cols, rows).catch((commandError) => {
+          if (!(commandError instanceof TerminalCommandError && commandError.code === "terminal_not_running")) {
+            setError(errorMessage(commandError));
+          }
+        });
+      }, 60);
+    });
+    const observer = new ResizeObserver(() => {
+      try {
+        fit.fit();
+      } catch {
+        // The host can disappear while ResizeObserver is delivering a final notification.
+      }
+    });
+    observer.observe(host);
+
+    requestAnimationFrame(() => {
+      if (!disposed) {
+        fit.fit();
+        terminal.focus();
+      }
+    });
+
+    getTerminalSnapshot(activeId)
+      .then((snapshot) => {
+        if (disposed || activeIdRef.current !== activeId) return;
+        setSessions((current) => current.map((session) => (
+          session.id === activeId ? snapshot.session : session
+        )));
+        setHistoryTruncated(snapshot.truncated);
+        nextOffsetRef.current = snapshot.outputStart;
+        if (snapshot.output.length > 0) {
+          terminal.write(Uint8Array.from(snapshot.output));
+        }
+        nextOffsetRef.current = snapshot.outputEnd;
+
+        const queued = hydrationRef.current?.sessionId === activeId
+          ? hydrationRef.current.events.slice().sort((left, right) => left.offset - right.offset)
+          : [];
+        hydrationRef.current = null;
+        queued.forEach(applyOutputEvent);
+      })
+      .catch((commandError) => {
+        if (!disposed) {
+          hydrationRef.current = null;
+          setError(errorMessage(commandError));
+        }
+      });
+
+    return () => {
+      disposed = true;
+      if (resizeTimer) window.clearTimeout(resizeTimer);
+      observer.disconnect();
+      inputDisposable.dispose();
+      binaryDisposable.dispose();
+      resizeDisposable.dispose();
+      if (hydrationRef.current?.sessionId === activeId) hydrationRef.current = null;
+      terminal.dispose();
+      if (terminalRef.current === terminal) terminalRef.current = null;
+      if (fitRef.current === fit) fitRef.current = null;
+    };
+  }, [activeId, rehydrateVersion, settings.fontSize]);
+
+  function applyOutputEvent(event: TerminalOutputEvent) {
+    const terminal = terminalRef.current;
+    if (!terminal || event.sessionId !== activeIdRef.current) return;
+
+    const eventEnd = event.offset + event.data.length;
+    if (eventEnd <= nextOffsetRef.current) return;
+    if (event.offset > nextOffsetRef.current) {
+      setNotice("Terminal output continuity was interrupted; restoring the bounded native history.");
+      setRehydrateVersion((version) => version + 1);
+      return;
+    }
+
+    const overlap = Math.max(0, nextOffsetRef.current - event.offset);
+    terminal.write(Uint8Array.from(event.data.slice(overlap)));
+    nextOffsetRef.current = eventEnd;
   }
 
-  function run(raw: string) {
-    const cmd = raw.trim();
-    push(`${cwd} $ ${cmd}`, "in");
-    if (!cmd) return;
-    setHistory((h) => [...h, cmd]);
-    setHIdx(-1);
+  async function startSession() {
+    if (creatingRef.current) return;
+    creatingRef.current = true;
+    setCreating(true);
+    setError("");
+    setNotice("");
+    try {
+      const session = await createTerminal(100, 30);
+      setSessions((current) => [...current, session]);
+      setActiveId(session.id);
+    } catch (commandError) {
+      setError(errorMessage(commandError));
+    } finally {
+      creatingRef.current = false;
+      setCreating(false);
+    }
+  }
 
-    const [base, ...args] = cmd.split(/\s+/);
-    const git = loadGit();
+  async function stopSession() {
+    if (!activeSession || activeSession.status !== "running") return;
+    if (!confirm(`Terminate ${shellName(activeSession.shell)} (PID ${activeSession.pid ?? "unknown"})?`)) return;
+    setError("");
+    try {
+      await killTerminal(activeSession.id);
+      setNotice("Termination requested. Waiting for the real process exit status…");
+    } catch (commandError) {
+      setError(errorMessage(commandError));
+    }
+  }
 
-    switch (base) {
-      case "help":
-        push("DevLab built-in commands", "ok");
-        push("  help                    show this list");
-        push("  clear                   clear the terminal");
-        push("  new <template>          scaffold a project");
-        push("  templates [stack]       list project templates");
-        push("  runtimes [category]     list installable runtimes");
-        push("  install <runtime>       show install commands");
-        push("  deploy [provider]       show deployment commands");
-        push("  git <subcommand>        git operations");
-        push("  gh <subcommand>         GitHub CLI");
-        push("  docker <subcommand>     container operations");
-        push("  kubectl <subcommand>    kubernetes operations");
-        push("  npm|pnpm|yarn|bun ...   package managers");
-        push("  cargo|go|uv|pip ...     language toolchains");
-        push("  aider / ollama          AI agents");
-        push("  ls | pwd | cd | cat     filesystem");
-        push("  env | which | neofetch  environment");
-        break;
+  async function removeSession(session: TerminalSessionInfo) {
+    if (
+      session.status === "running"
+      && !confirm(`Close this tab and terminate ${shellName(session.shell)} (PID ${session.pid ?? "unknown"})?`)
+    ) return;
+    setError("");
+    try {
+      await closeTerminal(session.id);
+      const remaining = sessions.filter((item) => item.id !== session.id);
+      setSessions(remaining);
+      if (activeId === session.id) setActiveId(remaining[0]?.id ?? "");
+    } catch (commandError) {
+      setError(errorMessage(commandError));
+    }
+  }
 
-      case "clear": setLines([]); break;
-
-      case "templates": {
-        const filter = args[0]?.toLowerCase();
-        const list = filter
-          ? projectTemplates.filter((t) => t.stack.toLowerCase() === filter || t.tags.includes(filter))
-          : projectTemplates;
-        push(`${list.length} template(s)${filter ? ` in "${filter}"` : ""}:`, "ok");
-        list.forEach((t) => push(`  ${t.id.padEnd(18)} ${t.stack.padEnd(10)} ${t.name}`));
-        push("Use: new <id>");
-        break;
-      }
-
-      case "new": {
-        if (!args[0]) { push("Usage: new <template-id>   (run `templates` to list)", "err"); break; }
-        const t = projectTemplates.find((p) => p.id === args[0] || p.tags.includes(args[0]));
-        if (!t) { push(`Unknown template "${args[0]}". Run \`templates\`.`, "err"); break; }
-        push(`Scaffolding ${t.name} (${t.lang})…`, "ok");
-        t.commands.forEach((c) => push(`  $ ${c}`));
-        push(`✓ ${t.name} ready — open the Project Builder for an AI-generated version.`, "ok");
-        break;
-      }
-
-      case "runtimes": {
-        const cat = args[0]?.toLowerCase();
-        const list = cat ? runtimes.filter((r) => r.category.toLowerCase() === cat) : runtimes;
-        push(`${list.length} runtime(s):`, "ok");
-        list.forEach((r) => push(`  ${r.id.padEnd(14)} ${r.version.padEnd(9)} ${r.category.padEnd(10)} ${r.name}`));
-        push("Use: install <id>");
-        break;
-      }
-
-      case "install": {
-        const r = runtimes.find((x) => x.id === args[0]);
-        if (!r) { push(`Unknown runtime "${args[0] ?? ""}". Run \`runtimes\`.`, "err"); break; }
-        push(`# Install ${r.name} ${r.version}`, "ok");
-        r.install.split("\n").forEach((l) => push("  " + l));
-        push(`# Verify`, "ok");
-        push("  " + r.verify);
-        break;
-      }
-
-      case "deploy": {
-        if (!args[0]) {
-          push("Deployment providers:", "ok");
-          deployProviders.forEach((p) => push(`  ${p.id.padEnd(12)} ${p.freeTier}`));
-          push("Use: deploy <provider>");
-          break;
-        }
-        const p = deployProviders.find((x) => x.id === args[0]);
-        if (!p) { push(`Unknown provider "${args[0]}".`, "err"); break; }
-        push(`# ${p.name} — ${p.tagline}`, "ok");
-        push(`$ ${p.cliInstall.split("\n")[0]}`);
-        push(`$ ${p.deployCmd}`);
-        break;
-      }
-
-      case "git": {
-        const sub = args[0];
-        const remote = git.owner && git.repo ? `${git.owner}/${git.repo}` : "origin";
-        if (sub === "status")
-          push(`On branch ${git.branch}\nYour branch is up to date with 'origin/${git.branch}'.\n\nnothing to commit, working tree clean`, "ok");
-        else if (sub === "init") push(`Initialized empty Git repository in .git/`, "ok");
-        else if (sub === "log")
-          push("commit a1b2c3d (HEAD -> main, origin/main)\nAuthor: " + (git.authorName || "you") + "\n\n    feat: add agentic project builder", "out");
-        else if (sub === "remote") push(`origin  git@github.com:${remote}.git (fetch)\norigin  git@github.com:${remote}.git (push)`, "out");
-        else if (sub === "branch") push(`* ${git.branch}\n  develop\n  feature/agent`, "out");
-        else if (sub === "push") push(`Pushing to git@github.com:${remote}.git\n   a1b2c3d..d4e5f6g  ${git.branch} -> ${git.branch}`, "ok");
-        else if (sub === "pull") push(`Already up to date.`, "ok");
-        else if (sub === "diff") push("diff --git a/src/App.tsx b/src/App.tsx\n@@ -1,4 +1,6 @@\n+import { BuilderPanel } from './panels/BuilderPanel';", "out");
-        else push(`git ${args.join(" ")} — ok`, "ok");
-        break;
-      }
-
-      case "gh": {
-        if (args[0] === "auth") push("✓ Logged in to github.com as " + (git.owner || "you"), "ok");
-        else if (args[0] === "repo" && args[1] === "list") push(`${git.owner || "you"}/devlab      public   Unified developer control plane\n${git.owner || "you"}/api-server  private  Backend services`, "out");
-        else if (args[0] === "pr") push("#42  feat: agentic builder   OPEN   2 hours ago", "out");
-        else if (args[0] === "run" && args[1] === "list") push("completed  success  Node CI       main     42s\nin_progress  —      Deploy Pages  main      —", "out");
-        else push(`gh ${args.join(" ")} — ok`, "ok");
-        break;
-      }
-
-      case "docker": {
-        if (args[0] === "ps")
-          push("CONTAINER ID   IMAGE              STATUS        PORTS\nab12cd34       devlab/app:latest  Up 2 hours    0.0.0.0:3000->3000\nef56gh78       postgres:16        Up 2 hours    0.0.0.0:5432->5432\nij90kl12       redis:7-alpine     Up 2 hours    0.0.0.0:6379->6379", "out");
-        else if (args[0] === "images")
-          push("REPOSITORY          TAG       SIZE\ndevlab/app          latest    142MB\npostgres            16        243MB\nredis               7-alpine   41MB", "out");
-        else if (args[0] === "compose") push(`docker compose ${args.slice(1).join(" ")} — services started`, "ok");
-        else push(`docker ${args.join(" ")} — ok`, "ok");
-        break;
-      }
-
-      case "kubectl": {
-        if (args[0] === "get" && args[1]?.startsWith("pod"))
-          push("NAME                    READY   STATUS    RESTARTS   AGE\napp-7d9f8b6c4-xk2mp     1/1     Running   0          2h\npostgres-0              1/1     Running   0          2h", "out");
-        else if (args[0] === "get" && args[1]?.startsWith("svc"))
-          push("NAME       TYPE           CLUSTER-IP     PORT(S)\napp        LoadBalancer   10.96.14.22    80:30080/TCP", "out");
-        else push(`kubectl ${args.join(" ")} — ok`, "ok");
-        break;
-      }
-
-      case "npm": case "pnpm": case "yarn": case "bun": {
-        if (args[0] === "run" || args[0] === "dev") push(`> ${args[1] || "dev"}\n\n  VITE ready in 312 ms\n  ➜  Local:   http://localhost:5173/`, "ok");
-        else if (args[0] === "install" || args[0] === "i") push(`added ${Math.floor(Math.random() * 300) + 50} packages in ${(Math.random() * 4 + 1).toFixed(1)}s`, "ok");
-        else if (args[0] === "test") push("Test Suites: 12 passed, 12 total\nTests:       84 passed, 84 total", "ok");
-        else if (args[0] === "build") push("✓ built in 1.84s\ndist/index.html   312.4 kB │ gzip: 92.1 kB", "ok");
-        else push(`${base} ${args.join(" ")} — ok`, "ok");
-        break;
-      }
-
-      case "cargo":
-        if (args[0] === "build" || args[0] === "run") push("   Compiling my-app v0.1.0\n    Finished dev [unoptimized] target(s) in 2.41s", "ok");
-        else if (args[0] === "test") push("running 14 tests\ntest result: ok. 14 passed; 0 failed", "ok");
-        else push(`cargo ${args.join(" ")} — ok`, "ok");
-        break;
-
-      case "go":
-        if (args[0] === "run") push("Server listening on :8080", "ok");
-        else if (args[0] === "test") push("ok  	example.com/my-svc	0.412s", "ok");
-        else if (args[0] === "build") push("", "ok");
-        else push(`go ${args.join(" ")} — ok`, "ok");
-        break;
-
-      case "uv": case "pip": case "python": case "python3":
-        if (args.includes("install") || args.includes("add")) push(`Installed ${Math.floor(Math.random() * 20) + 3} packages in ${(Math.random() * 500).toFixed(0)}ms`, "ok");
-        else if (args[0] === "run") push("INFO:     Uvicorn running on http://127.0.0.1:8000", "ok");
-        else push(`${base} ${args.join(" ")} — ok`, "ok");
-        break;
-
-      case "aider":
-        push("Aider v0.60 — AI pair programmer", "ok");
-        push("Model: gemini/gemini-3.6-flash");
-        push("Git repo: . with 42 files");
-        push("Use /help for commands, /add to include files.");
-        push("(In the native build this attaches to your real repository.)");
-        break;
-
-      case "ollama":
-        if (args[0] === "list") push("NAME                 SIZE     MODIFIED\nqwen2.5-coder:7b     4.7 GB   2 days ago\ndeepseek-r1:8b       5.2 GB   1 week ago", "out");
-        else if (args[0] === "serve") push("Ollama listening on http://127.0.0.1:11434", "ok");
-        else push(`ollama ${args.join(" ")} — ok`, "ok");
-        break;
-
-      case "ls":
-        push("src/          package.json      tsconfig.json\npublic/       vite.config.ts    README.md\n.github/      Dockerfile        docker-compose.yml", "out");
-        break;
-      case "pwd":  push("/home/dev/devlab", "out"); break;
-      case "cd":   push(`cd ${args[0] || "~"}`, "ok"); break;
-      case "cat":  push(args[0] ? `# contents of ${args[0]}\n(simulated — open the Code Editor to read real files)` : "cat: missing operand", args[0] ? "out" : "err"); break;
-      case "which": push(args[0] ? `/usr/local/bin/${args[0]}` : "which: missing operand", args[0] ? "out" : "err"); break;
-      case "env":
-        push(`GEMINI_API_KEY=${"*".repeat(20)}\nDEVLAB_HOME=/home/dev/.devlab\nGIT_AUTHOR_NAME=${git.authorName || "you"}\nGIT_BRANCH=${git.branch}\nPATH=/home/dev/.devlab/bin:/usr/local/bin:/usr/bin`, "out");
-        break;
-      case "neofetch":
-        push(`devlab@control-plane
-────────────────────────────────
-OS      DevLab Unified Environment
-Shell   devlab-sh 1.0
-Editor  Monaco (VS Code engine)
-Agent   Gemini · BYOK
-Tools   ${runtimes.length} runtimes · ${deployProviders.length} deploy targets
-Repo    ${git.owner && git.repo ? `${git.owner}/${git.repo}` : "not connected"}
-Uptime  ${Math.floor(performance.now() / 1000)}s`, "out");
-        break;
-      case "echo": push(args.join(" ")); break;
-      case "exit": push("Use the sidebar to switch panels.", "ok"); break;
-
-      default:
-        push(`devlab-sh: command not found: ${base}`, "err");
-        push(`This browser terminal simulates common tooling. The packaged DevLab desktop app`, "out");
-        push(`runs your real shell with full PTY access — see the Local Setup panel.`, "out");
+  async function clearActiveTerminal() {
+    if (!activeSession) return;
+    setError("");
+    try {
+      const offset = await clearTerminal(activeSession.id);
+      terminalRef.current?.clear();
+      terminalRef.current?.write("\x1b[2J\x1b[H");
+      nextOffsetRef.current = offset;
+      setHistoryTruncated(false);
+    } catch (commandError) {
+      setError(errorMessage(commandError));
     }
   }
 
   return (
-    <div className="flex h-full flex-col bg-[#0a0c11]">
-      <div className="flex items-center gap-2 border-b border-white/5 px-4 py-2.5">
-        <TerminalIcon className="h-3.5 w-3.5 text-zinc-500" />
-        <span className="text-xs font-medium text-zinc-400">devlab-sh — {cwd}</span>
-      </div>
-      <div className="flex-1 overflow-y-auto p-4 font-mono text-[13px] leading-relaxed">
-        {lines.map((l) => (
-          <div
-            key={l.id}
-            className={`whitespace-pre-wrap ${
-              l.type === "in"
-                ? "text-cyan-300"
-                : l.type === "err"
-                  ? "text-rose-400"
-                  : l.type === "ok"
-                    ? "text-emerald-300"
-                    : "text-zinc-300"
-            }`}
-          >
-            {l.text}
+    <div className="flex h-full flex-col bg-[#090b10]">
+      <div className="flex min-h-12 shrink-0 items-center gap-3 border-b border-white/5 bg-[#0e1117]/80 px-4">
+        <div className="flex items-center gap-2">
+          <TerminalIcon className="h-4 w-4 text-cyan-400" />
+          <div>
+            <h2 className="text-[13px] font-semibold text-white">Native Terminal</h2>
+            <p className="text-[10px] text-zinc-600">Real PTY · selected workspace</p>
           </div>
-        ))}
-        <div ref={endRef} />
+        </div>
+        <div className="ml-3 flex min-w-0 flex-1 self-stretch overflow-x-auto">
+          {sessions.map((session) => (
+            <div
+              key={session.id}
+              className={`group flex shrink-0 items-center gap-2 border-b-2 px-3 text-[11.5px] transition ${
+                activeId === session.id
+                  ? "border-cyan-400 bg-white/[0.035] text-zinc-100"
+                  : "border-transparent text-zinc-500 hover:bg-white/[0.02] hover:text-zinc-300"
+              }`}
+            >
+              <button onClick={() => setActiveId(session.id)} className="flex items-center gap-2 py-3">
+                <span className={`h-1.5 w-1.5 rounded-full ${
+                  session.status === "running"
+                    ? "bg-emerald-400"
+                    : session.status === "exited"
+                      ? "bg-zinc-600"
+                      : "bg-rose-400"
+                }`} />
+                {shellName(session.shell)}
+                {session.pid && <span className="font-mono text-[9px] text-zinc-700">{session.pid}</span>}
+              </button>
+              <button
+                onClick={() => void removeSession(session)}
+                className="rounded p-0.5 opacity-0 hover:bg-white/10 hover:text-rose-300 group-hover:opacity-100"
+                aria-label={`Close ${shellName(session.shell)} terminal`}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
+          {sessions.length > 0 && (
+            <button
+              onClick={() => void startSession()}
+              disabled={creating || sessions.length >= 8}
+              className="my-auto ml-1 rounded-md p-1.5 text-zinc-600 hover:bg-white/5 hover:text-cyan-300 disabled:opacity-30"
+              title="Start another real shell"
+            >
+              {creating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+            </button>
+          )}
+        </div>
+        {activeSession && (
+          <div className="flex shrink-0 items-center gap-1">
+            <button
+              onClick={() => void clearActiveTerminal()}
+              className="rounded-md p-2 text-zinc-600 hover:bg-white/5 hover:text-zinc-200"
+              title="Clear this terminal's native history buffer"
+            >
+              <Eraser className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => void stopSession()}
+              disabled={activeSession.status !== "running"}
+              className="rounded-md p-2 text-zinc-600 hover:bg-rose-500/10 hover:text-rose-300 disabled:opacity-25"
+              title="Terminate the real shell process"
+            >
+              <CircleStop className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
       </div>
-      <div className="flex items-center gap-2 border-t border-white/5 px-4 py-3 font-mono text-[13px]">
-        <span className="text-emerald-400">{cwd} $</span>
-        <input
-          autoFocus
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") { run(input); setInput(""); }
-            else if (e.key === "ArrowUp") {
-              e.preventDefault();
-              const idx = hIdx < 0 ? history.length - 1 : Math.max(0, hIdx - 1);
-              if (history[idx] !== undefined) { setHIdx(idx); setInput(history[idx]); }
-            } else if (e.key === "ArrowDown") {
-              e.preventDefault();
-              const idx = hIdx + 1;
-              if (idx >= history.length) { setHIdx(-1); setInput(""); }
-              else { setHIdx(idx); setInput(history[idx]); }
-            }
-          }}
-          className="flex-1 bg-transparent text-zinc-100 caret-cyan-400 outline-none"
-          placeholder="type a command…"
-        />
+
+      {(error || notice || historyTruncated) && (
+        <div className={`flex shrink-0 items-center gap-2 border-b px-4 py-2 text-[11.5px] ${
+          error
+            ? "border-rose-500/20 bg-rose-500/10 text-rose-200"
+            : historyTruncated
+              ? "border-amber-500/20 bg-amber-500/[0.08] text-amber-100"
+              : "border-cyan-500/20 bg-cyan-500/[0.07] text-cyan-100"
+        }`}>
+          {error ? <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> : historyTruncated ? <Ban className="h-3.5 w-3.5 shrink-0" /> : <TerminalIcon className="h-3.5 w-3.5 shrink-0" />}
+          <span className="min-w-0 flex-1 truncate">
+            {error || (historyTruncated
+              ? "Earlier terminal output was discarded after the native 2 MiB history limit."
+              : notice)}
+          </span>
+          <button onClick={() => { setError(""); setNotice(""); setHistoryTruncated(false); }} className="rounded p-0.5 hover:bg-white/10" aria-label="Dismiss message">
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
+      <div className="relative min-h-0 flex-1">
+        <div ref={hostRef} className={`absolute inset-0 p-3 ${activeSession ? "block" : "hidden"}`} />
+
+        {!activeSession && !loading && (
+          <div className="flex h-full items-center justify-center p-8">
+            <div className="max-w-xl rounded-2xl border border-amber-500/20 bg-amber-500/[0.05] p-8 text-center ring-soft">
+              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-500/10 ring-1 ring-amber-500/20">
+                <ShieldAlert className="h-7 w-7 text-amber-300" />
+              </div>
+              <h3 className="mt-5 text-lg font-semibold text-white">Start a real shell</h3>
+              <p className="mt-2 text-[13px] leading-relaxed text-zinc-400">
+                This is not a command simulator. The shell can read, modify, execute and delete
+                anything your operating-system account can access. It starts in the workspace you
+                explicitly selected, but shell commands are not confined to that folder.
+              </p>
+              <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+                <button
+                  onClick={() => void startSession()}
+                  disabled={creating}
+                  className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:from-cyan-400 hover:to-blue-500 disabled:opacity-50"
+                >
+                  {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <TerminalIcon className="h-4 w-4" />}
+                  Start native terminal
+                </button>
+                <button
+                  onClick={onOpenWorkspace}
+                  className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-4 py-2.5 text-sm text-zinc-300 hover:bg-white/5"
+                >
+                  <FolderOpen className="h-4 w-4" /> Select workspace
+                </button>
+              </div>
+              <p className="mt-4 text-[11px] text-zinc-600">
+                A selected workspace is required. Up to eight sessions remain alive when switching panels.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {loading && (
+          <div className="flex h-full items-center justify-center gap-2 text-[12px] text-zinc-500">
+            <Loader2 className="h-4 w-4 animate-spin text-cyan-400" /> Restoring native terminal sessions…
+          </div>
+        )}
       </div>
+
+      {activeSession && (
+        <div className="flex h-7 shrink-0 items-center justify-between border-t border-white/5 bg-[#0e1117]/80 px-3 font-mono text-[10.5px] text-zinc-600">
+          <span className="min-w-0 truncate">{activeSession.cwd}</span>
+          <div className="ml-4 flex shrink-0 items-center gap-3">
+            <span>{shellName(activeSession.shell)}</span>
+            <span className={activeSession.status === "running" ? "text-emerald-400" : activeSession.status === "failed" ? "text-rose-400" : "text-zinc-500"}>
+              {sessionStatus(activeSession)}
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+function shellName(shell: string): string {
+  return shell.split(/[\\/]/).filter(Boolean).pop() || shell;
+}
+
+function sessionStatus(session: TerminalSessionInfo): string {
+  if (session.status === "running") return "running";
+  if (session.status === "failed") return "failed";
+  if (session.signal) return `signal ${session.signal}`;
+  return `exit ${session.exitCode ?? "?"}`;
+}
+
+function exitDescription(event: TerminalExitEvent): string {
+  if (event.error) return event.error;
+  if (event.signal) return `Shell exited after signal ${event.signal}.`;
+  return `Shell exited with code ${event.exitCode ?? "unknown"}.`;
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof TerminalCommandError) return `${error.message} (${error.code})`;
+  if (error instanceof Error) return error.message;
+  return "The native terminal operation failed.";
 }

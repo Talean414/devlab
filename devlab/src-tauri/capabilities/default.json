@@ -16,6 +16,14 @@
     "allow-workspace-create-file",
     "allow-workspace-create-directory",
     "allow-workspace-rename",
-    "allow-workspace-delete"
+    "allow-workspace-delete",
+    "allow-terminal-create",
+    "allow-terminal-list",
+    "allow-terminal-snapshot",
+    "allow-terminal-write",
+    "allow-terminal-resize",
+    "allow-terminal-clear",
+    "allow-terminal-kill",
+    "allow-terminal-close"
   ]
 }

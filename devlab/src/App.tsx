@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import type { VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import { loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
@@ -25,6 +25,10 @@ import { ExplorerPanel } from "./panels/ExplorerPanel";
 import { PreviewPanel } from "./panels/PreviewPanel";
 import { SetupPanel } from "./panels/SetupPanel";
 import { SettingsPanel } from "./panels/SettingsPanel";
+
+const TerminalPanel = lazy(() => import("./panels/TerminalPanel").then((module) => ({
+  default: module.TerminalPanel,
+})));
 
 interface NavItem { id: ViewId; icon: typeof Sparkles; label: string; shortcut?: string }
 
@@ -169,9 +173,13 @@ export default function App() {
       case "vision":   return <VisionPanel key={keyVersion} onOpenFiles={openGeneratedSource} />;
       case "live":     return <LiveSharePanel />;
       case "explorer": return <ExplorerPanel onAgentMode={() => navigate("builder")} />;
-      case "terminal": return nativeFeature(
-        "Integrated Terminal", "pty", "Phase 3 · native PTY sessions",
-      );
+      case "terminal": return hasNativeCapability(runtime, "pty")
+        ? <Suspense fallback={<NativePanelLoading label="Loading native terminal…" />}>
+          <TerminalPanel onOpenWorkspace={() => navigate("editor")} />
+        </Suspense>
+        : nativeFeature(
+          "Integrated Terminal", "pty", "Phase 3 · native PTY sessions",
+        );
       case "git":      return nativeFeature(
         "Source Control", "git", "Phase 4 · real repository operations",
       );
@@ -293,7 +301,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 2 workspaces</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 3 terminal</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}
@@ -301,7 +309,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-4">
             <span className="hidden font-mono md:inline">{model}</span>
-            <span className="font-mono">DevLab v1.2</span>
+            <span className="font-mono">DevLab v1.3</span>
           </div>
         </footer>
       )}
@@ -312,6 +320,14 @@ export default function App() {
           onSaved={() => { refreshKey(); setShowModal(false); navigate("agent"); }}
         />
       )}
+    </div>
+  );
+}
+
+function NativePanelLoading({ label }: { label: string }) {
+  return (
+    <div className="flex h-full items-center justify-center gap-2 text-[12px] text-zinc-500">
+      <TerminalIcon className="h-4 w-4 animate-pulse text-cyan-400" /> {label}
     </div>
   );
 }

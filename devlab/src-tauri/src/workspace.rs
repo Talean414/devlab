@@ -18,8 +18,8 @@ const MAX_RELATIVE_PATH_BYTES: usize = 4_096;
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandError {
-    code: &'static str,
-    message: String,
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
 }
 
 impl CommandError {
@@ -123,6 +123,10 @@ pub struct WorkspaceService {
 }
 
 impl WorkspaceService {
+    pub(crate) fn root_path(&self) -> Result<PathBuf, CommandError> {
+        Ok(self.root()?.path().to_path_buf())
+    }
+
     fn root(&self) -> Result<WorkspaceRoot, CommandError> {
         self.inner
             .lock()

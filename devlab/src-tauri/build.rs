@@ -10,6 +10,14 @@ const APP_COMMANDS: &[&str] = &[
     "workspace_create_directory",
     "workspace_rename",
     "workspace_delete",
+    "terminal_create",
+    "terminal_list",
+    "terminal_snapshot",
+    "terminal_write",
+    "terminal_resize",
+    "terminal_clear",
+    "terminal_kill",
+    "terminal_close",
 ];
 
 fn main() {

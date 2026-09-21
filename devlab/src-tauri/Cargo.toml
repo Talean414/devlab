@@ -1,6 +1,6 @@
 [package]
 name = "devlab"
-version = "1.2.0"
+version = "1.3.0"
 description = "Native, AI-assisted developer control plane"
 authors = ["Talean414"]
 license = "MIT"
@@ -16,8 +16,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6.3" }
 
 [dependencies]
+libc = "0.2"
 log = "0.4"
 notify = "8"
+portable-pty = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
 tauri = { version = "2.11.3" }
