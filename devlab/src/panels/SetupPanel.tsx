@@ -97,7 +97,7 @@ const PHASES: readonly MigrationPhase[] = [
     n: 5,
     title: "Docker, databases and native HTTP",
     status: "active",
-    detail: "Docker CLI/daemon detection, real containers, statistics, images, logs and confirmed lifecycle actions are complete. Database connections and native HTTP are next.",
+    detail: "Docker detection, live state, logs, lifecycle actions, validated image pulls and constrained stopped-container creation are complete. Database connections and native HTTP are next.",
   },
   {
     n: 6,
@@ -234,7 +234,7 @@ export function SetupPanel() {
                   "PTY shells start in that workspace but retain the user account's full authority.",
                   "Destructive agent commands require explicit approval unless a narrow policy permits them.",
                   "Saved Git tokens never return to the renderer; it receives only presence and backend metadata.",
-                  "Docker commands accept validated full container IDs; arbitrary CLI arguments are not exposed.",
+                  "Docker commands accept validated IDs and typed creation fields; pulls have fixed arguments, and arbitrary CLI flags are not exposed.",
                   "Remote pages are never loaded into a privileged application context.",
                   "Every agent tool action will have timeout, cancellation and audit metadata.",
                 ].map((rule) => (

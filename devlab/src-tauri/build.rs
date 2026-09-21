@@ -32,6 +32,8 @@ const APP_COMMANDS: &[&str] = &[
     "git_credential_store",
     "git_credential_delete",
     "docker_snapshot",
+    "docker_pull",
+    "docker_create",
     "docker_start",
     "docker_stop",
     "docker_restart",

@@ -219,7 +219,7 @@ export default function App() {
           <DockerPanel />
         </Suspense>
         : nativeFeature(
-          "Docker & Containers", "docker", "Phase 5A · Docker engine integration",
+          "Docker & Containers", "docker", "Phase 5A.1 · Docker engine and safe creation",
         );
       case "preview":  return <PreviewPanel />;
       case "tools":    return nativeFeature(
@@ -324,7 +324,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 5A native Docker</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 5A.1 native Docker</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}

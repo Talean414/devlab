@@ -1,15 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PanelHeader } from "./AgentPanel";
 import {
+  createDockerContainer,
   getDockerLogs,
   getDockerSnapshot,
+  pullDockerImage,
   removeDockerContainer,
   restartDockerContainer,
   startDockerContainer,
   stopDockerContainer,
+  DockerCommandError,
   type DockerContainer,
+  type DockerCreateRequest,
   type DockerLogs,
   type DockerOperationResult,
+  type DockerPortProtocol,
   type DockerSnapshot,
 } from "../lib/docker";
 import {
@@ -17,6 +22,7 @@ import {
   Box,
   CheckCircle2,
   Container,
+  Download,
   FileText,
   Gauge,
   HardDrive,
@@ -24,6 +30,7 @@ import {
   Loader2,
   Network,
   Play,
+  Plus,
   RefreshCw,
   RotateCw,
   Server,
@@ -35,6 +42,13 @@ import {
 
 type Tab = "containers" | "images" | "engine";
 
+interface PortDraft {
+  id: number;
+  hostPort: string;
+  containerPort: string;
+  protocol: DockerPortProtocol;
+}
+
 export function DockerPanel() {
   const [snapshot, setSnapshot] = useState<DockerSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
@@ -44,10 +58,18 @@ export function DockerPanel() {
   const [tab, setTab] = useState<Tab>("containers");
   const [logs, setLogs] = useState<DockerLogs | null>(null);
   const [logsLoading, setLogsLoading] = useState("");
+  const [pullOpen, setPullOpen] = useState(false);
+  const [pullReference, setPullReference] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
+  const [containerName, setContainerName] = useState("");
+  const [containerImage, setContainerImage] = useState("");
+  const [portDrafts, setPortDrafts] = useState<PortDraft[]>([]);
   const refreshInFlight = useRef(false);
+  const operationInFlight = useRef(false);
+  const nextPortId = useRef(1);
 
   const refresh = useCallback(async (quiet = false) => {
-    if (refreshInFlight.current) return;
+    if (refreshInFlight.current || operationInFlight.current) return;
     refreshInFlight.current = true;
     if (!quiet) setLoading(true);
     setError("");
@@ -72,10 +94,29 @@ export function DockerPanel() {
     [snapshot],
   );
 
+  const localImageOptions = useMemo(() => {
+    const values = new Set<string>();
+    for (const image of snapshot?.images ?? []) {
+      if (image.repository && image.repository !== "<none>") {
+        values.add(image.tag && image.tag !== "<none>" ? `${image.repository}:${image.tag}` : image.repository);
+      } else if (image.id) {
+        values.add(image.id);
+      }
+    }
+    return [...values].sort();
+  }, [snapshot]);
+
   async function runOperation(
     key: string,
     operation: () => Promise<DockerOperationResult>,
-  ) {
+  ): Promise<boolean> {
+    if (operationInFlight.current) return false;
+    if (refreshInFlight.current) {
+      setError("Docker state is refreshing. Try the operation again in a moment.");
+      return false;
+    }
+    operationInFlight.current = true;
+    let refreshAfter = false;
     setBusy(key);
     setError("");
     setNotice("");
@@ -86,10 +127,19 @@ export function DockerPanel() {
       if (logs && !result.snapshot.containers.some((container) => container.id === logs.containerId)) {
         setLogs(null);
       }
+      return true;
     } catch (caught) {
+      if (caught instanceof DockerCommandError && caught.code === "docker_refresh_failed_after_action") {
+        setNotice(caught.message);
+        refreshAfter = true;
+        return true;
+      }
       setError(errorMessage(caught));
+      return false;
     } finally {
+      operationInFlight.current = false;
       setBusy("");
+      if (refreshAfter) void refresh();
     }
   }
 
@@ -103,6 +153,82 @@ export function DockerPanel() {
     } finally {
       setLogsLoading("");
     }
+  }
+
+  async function submitPull(event: React.FormEvent) {
+    event.preventDefault();
+    const reference = pullReference.trim();
+    if (!reference) {
+      setError("Enter an image reference to pull.");
+      return;
+    }
+    const succeeded = await runOperation("pull", () => pullDockerImage(reference));
+    if (succeeded) {
+      setPullReference("");
+      setPullOpen(false);
+      setTab("images");
+    }
+  }
+
+  async function submitCreate(event: React.FormEvent) {
+    event.preventDefault();
+    const name = containerName.trim();
+    const image = containerImage.trim();
+    if (!name || !image) {
+      setError("Enter a container name and select a local image.");
+      return;
+    }
+    const ports = portDrafts.map((mapping) => ({
+      hostPort: Number(mapping.hostPort),
+      containerPort: Number(mapping.containerPort),
+      protocol: mapping.protocol,
+    }));
+    if (ports.some((mapping) => (
+      !Number.isInteger(mapping.hostPort)
+      || !Number.isInteger(mapping.containerPort)
+      || mapping.hostPort < 1
+      || mapping.hostPort > 65_535
+      || mapping.containerPort < 1
+      || mapping.containerPort > 65_535
+    ))) {
+      setError("Every host and container port must be a whole number from 1 to 65535.");
+      return;
+    }
+    const request: DockerCreateRequest = { name, image, ports };
+    const succeeded = await runOperation("create", () => createDockerContainer(request));
+    if (succeeded) {
+      setContainerName("");
+      setContainerImage("");
+      setPortDrafts([]);
+      setCreateOpen(false);
+      setTab("containers");
+    }
+  }
+
+  function openCreate() {
+    setError("");
+    setContainerImage((current) => current || localImageOptions[0] || "");
+    setCreateOpen(true);
+  }
+
+  function addPortMapping() {
+    if (portDrafts.length >= 16) return;
+    const id = nextPortId.current;
+    nextPortId.current += 1;
+    setPortDrafts((current) => [
+      ...current,
+      { id, hostPort: "", containerPort: "", protocol: "tcp" },
+    ]);
+  }
+
+  function updatePortMapping(
+    id: number,
+    field: "hostPort" | "containerPort" | "protocol",
+    value: string,
+  ) {
+    setPortDrafts((current) => current.map((mapping) => (
+      mapping.id === id ? { ...mapping, [field]: value } as PortDraft : mapping
+    )));
   }
 
   function start(container: DockerContainer) {
@@ -138,7 +264,7 @@ export function DockerPanel() {
         badgeOk={ready}
       />
 
-      <div className="flex items-center justify-between border-b border-white/5 bg-[#0d1017]/40 px-6">
+      <div className="flex items-center justify-between gap-4 overflow-x-auto border-b border-white/5 bg-[#0d1017]/40 px-6">
         <div className="flex gap-5 text-xs">
           {([
             { id: "containers", Icon: Container, label: `Containers${ready ? ` (${snapshot.containers.length})` : ""}` },
@@ -158,14 +284,31 @@ export function DockerPanel() {
             </button>
           ))}
         </div>
-        <button
-          onClick={() => void refresh()}
-          disabled={loading || !!busy}
-          title="Refresh from Docker"
-          className="rounded-lg p-2 text-zinc-500 hover:bg-white/5 hover:text-zinc-200 disabled:opacity-40"
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => { setError(""); setPullOpen(true); }}
+            disabled={!ready || loading || !!busy}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-[11px] text-zinc-400 hover:bg-white/5 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Download className="h-3 w-3" /> Pull image
+          </button>
+          <button
+            onClick={openCreate}
+            disabled={!ready || loading || !!busy || localImageOptions.length === 0}
+            title={localImageOptions.length === 0 ? "Pull an image before creating a container" : "Create a stopped container"}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-500/15 px-2.5 py-1.5 text-[11px] font-medium text-cyan-200 hover:bg-cyan-500/25 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Plus className="h-3 w-3" /> Create container
+          </button>
+          <button
+            onClick={() => void refresh()}
+            disabled={loading || !!busy}
+            title="Refresh from Docker"
+            className="rounded-lg p-2 text-zinc-500 hover:bg-white/5 hover:text-zinc-200 disabled:opacity-40"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+          </button>
+        </div>
       </div>
 
       {error && <Banner tone="error" text={error} onClose={() => setError("")} />}
@@ -200,6 +343,209 @@ export function DockerPanel() {
         const container = snapshot?.containers.find((candidate) => candidate.id === logs.containerId);
         if (container) void openLogs(container);
       }} />}
+
+      {pullOpen && (
+        <PullImageDialog
+          reference={pullReference}
+          error={error}
+          busy={busy === "pull"}
+          onChange={setPullReference}
+          onClose={() => { if (!busy) { setPullOpen(false); setError(""); } }}
+          onSubmit={(event) => void submitPull(event)}
+        />
+      )}
+
+      {createOpen && (
+        <CreateContainerDialog
+          name={containerName}
+          image={containerImage}
+          imageOptions={localImageOptions}
+          ports={portDrafts}
+          error={error}
+          busy={busy === "create"}
+          onNameChange={setContainerName}
+          onImageChange={setContainerImage}
+          onAddPort={addPortMapping}
+          onUpdatePort={updatePortMapping}
+          onRemovePort={(id) => setPortDrafts((current) => current.filter((mapping) => mapping.id !== id))}
+          onClose={() => { if (!busy) { setCreateOpen(false); setError(""); } }}
+          onSubmit={(event) => void submitCreate(event)}
+        />
+      )}
+    </div>
+  );
+}
+
+function PullImageDialog({
+  reference,
+  error,
+  busy,
+  onChange,
+  onClose,
+  onSubmit,
+}: {
+  reference: string;
+  error: string;
+  busy: boolean;
+  onChange: (value: string) => void;
+  onClose: () => void;
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/70 p-5 backdrop-blur-sm">
+      <form onSubmit={onSubmit} className="w-full max-w-lg rounded-2xl border border-white/10 bg-[#10141c] p-5 shadow-2xl ring-soft">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="flex items-center gap-2 text-base font-semibold text-white"><Download className="h-4 w-4 text-cyan-300" /> Pull an image</h3>
+            <p className="mt-1 text-[12px] leading-relaxed text-zinc-500">Docker downloads this exact image reference using the current daemon and registry configuration.</p>
+          </div>
+          <button type="button" onClick={onClose} disabled={busy} className="rounded p-1.5 text-zinc-500 hover:bg-white/5 hover:text-white disabled:opacity-40"><X className="h-4 w-4" /></button>
+        </div>
+
+        <label className="mt-5 block text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+          Image reference
+          <input
+            autoFocus
+            value={reference}
+            onChange={(event) => onChange(event.target.value)}
+            disabled={busy}
+            maxLength={255}
+            placeholder="nginx:latest or ghcr.io/owner/image:tag"
+            className="mt-2 w-full rounded-lg border border-white/10 bg-black/25 px-3 py-2.5 font-mono text-[12px] normal-case tracking-normal text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-cyan-500/50 disabled:opacity-50"
+          />
+        </label>
+
+        <div className="mt-4 rounded-lg border border-amber-500/15 bg-amber-500/[0.05] p-3 text-[11.5px] leading-relaxed text-amber-100/70">
+          Pulling contacts the image registry and can download substantial data. DevLab accepts no extra Docker flags and stops the operation after 10 minutes.
+        </div>
+
+        {error && <div className="mt-3 rounded-lg border border-rose-500/20 bg-rose-500/[0.07] p-3 text-[11.5px] leading-relaxed text-rose-200">{error}</div>}
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} disabled={busy} className="rounded-lg border border-white/10 px-3.5 py-2 text-xs text-zinc-400 hover:bg-white/5 hover:text-white disabled:opacity-40">Cancel</button>
+          <button type="submit" disabled={busy || !reference.trim()} className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-500 px-4 py-2 text-xs font-semibold text-white hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-40">
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+            {busy ? "Pulling…" : "Pull image"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function CreateContainerDialog({
+  name,
+  image,
+  imageOptions,
+  ports,
+  error,
+  busy,
+  onNameChange,
+  onImageChange,
+  onAddPort,
+  onUpdatePort,
+  onRemovePort,
+  onClose,
+  onSubmit,
+}: {
+  name: string;
+  image: string;
+  imageOptions: string[];
+  ports: PortDraft[];
+  error: string;
+  busy: boolean;
+  onNameChange: (value: string) => void;
+  onImageChange: (value: string) => void;
+  onAddPort: () => void;
+  onUpdatePort: (id: number, field: "hostPort" | "containerPort" | "protocol", value: string) => void;
+  onRemovePort: (id: number) => void;
+  onClose: () => void;
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/70 p-5 backdrop-blur-sm">
+      <form onSubmit={onSubmit} className="max-h-[90%] w-full max-w-2xl overflow-y-auto rounded-2xl border border-white/10 bg-[#10141c] p-5 shadow-2xl ring-soft">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="flex items-center gap-2 text-base font-semibold text-white"><Plus className="h-4 w-4 text-cyan-300" /> Create a container</h3>
+            <p className="mt-1 text-[12px] leading-relaxed text-zinc-500">Create from a local image using its default entrypoint and command. The new container remains stopped.</p>
+          </div>
+          <button type="button" onClick={onClose} disabled={busy} className="rounded p-1.5 text-zinc-500 hover:bg-white/5 hover:text-white disabled:opacity-40"><X className="h-4 w-4" /></button>
+        </div>
+
+        <div className="mt-5 grid gap-4 sm:grid-cols-2">
+          <label className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+            Container name
+            <input
+              autoFocus
+              value={name}
+              onChange={(event) => onNameChange(event.target.value)}
+              disabled={busy}
+              maxLength={128}
+              placeholder="my-service"
+              className="mt-2 w-full rounded-lg border border-white/10 bg-black/25 px-3 py-2.5 font-mono text-[12px] normal-case tracking-normal text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-cyan-500/50 disabled:opacity-50"
+            />
+          </label>
+          <label className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+            Local image
+            <input
+              list="devlab-local-images"
+              value={image}
+              onChange={(event) => onImageChange(event.target.value)}
+              disabled={busy}
+              maxLength={255}
+              placeholder="Select a local image"
+              className="mt-2 w-full rounded-lg border border-white/10 bg-black/25 px-3 py-2.5 font-mono text-[12px] normal-case tracking-normal text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-cyan-500/50 disabled:opacity-50"
+            />
+            <datalist id="devlab-local-images">
+              {imageOptions.map((option) => <option key={option} value={option} />)}
+            </datalist>
+          </label>
+        </div>
+
+        <div className="mt-5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h4 className="text-[12px] font-semibold text-zinc-200">Port mappings</h4>
+              <p className="mt-0.5 text-[10.5px] text-zinc-600">Optional · host ports bind only to 127.0.0.1</p>
+            </div>
+            <button type="button" onClick={onAddPort} disabled={busy || ports.length >= 16} className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-[11px] text-zinc-400 hover:bg-white/5 hover:text-white disabled:opacity-40"><Plus className="h-3 w-3" /> Add mapping</button>
+          </div>
+
+          {ports.length === 0 ? (
+            <div className="mt-3 rounded-lg border border-dashed border-white/10 p-4 text-center text-[11px] text-zinc-600">No host ports will be published.</div>
+          ) : (
+            <div className="mt-3 space-y-2">
+              {ports.map((mapping) => (
+                <div key={mapping.id} className="grid grid-cols-[1fr_auto_1fr_86px_auto] items-center gap-2 rounded-lg bg-black/20 p-2">
+                  <input aria-label="Host port" inputMode="numeric" value={mapping.hostPort} onChange={(event) => onUpdatePort(mapping.id, "hostPort", event.target.value)} disabled={busy} placeholder="Host" className="min-w-0 rounded border border-white/10 bg-black/20 px-2.5 py-2 font-mono text-[11px] text-zinc-200 outline-none focus:border-cyan-500/50" />
+                  <span className="text-zinc-700">→</span>
+                  <input aria-label="Container port" inputMode="numeric" value={mapping.containerPort} onChange={(event) => onUpdatePort(mapping.id, "containerPort", event.target.value)} disabled={busy} placeholder="Container" className="min-w-0 rounded border border-white/10 bg-black/20 px-2.5 py-2 font-mono text-[11px] text-zinc-200 outline-none focus:border-cyan-500/50" />
+                  <select aria-label="Protocol" value={mapping.protocol} onChange={(event) => onUpdatePort(mapping.id, "protocol", event.target.value)} disabled={busy} className="rounded border border-white/10 bg-[#0c0f15] px-2 py-2 text-[11px] text-zinc-300 outline-none focus:border-cyan-500/50">
+                    <option value="tcp">TCP</option>
+                    <option value="udp">UDP</option>
+                  </select>
+                  <button type="button" onClick={() => onRemovePort(mapping.id)} disabled={busy} title="Remove mapping" className="rounded p-2 text-zinc-600 hover:bg-rose-500/10 hover:text-rose-300 disabled:opacity-40"><Trash2 className="h-3.5 w-3.5" /></button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-5 rounded-lg border border-cyan-500/15 bg-cyan-500/[0.04] p-3 text-[11.5px] leading-relaxed text-zinc-400">
+          DevLab does not pass a shell, custom command, environment values, host mounts, privileged mode, or arbitrary Docker flags. Start the stopped container explicitly after reviewing it in the list.
+        </div>
+
+        {error && <div className="mt-3 rounded-lg border border-rose-500/20 bg-rose-500/[0.07] p-3 text-[11.5px] leading-relaxed text-rose-200">{error}</div>}
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} disabled={busy} className="rounded-lg border border-white/10 px-3.5 py-2 text-xs text-zinc-400 hover:bg-white/5 hover:text-white disabled:opacity-40">Cancel</button>
+          <button type="submit" disabled={busy || !name.trim() || !image.trim()} className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-500 px-4 py-2 text-xs font-semibold text-white hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-40">
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+            {busy ? "Creating…" : "Create stopped container"}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
@@ -304,7 +650,7 @@ function ImagesView({ snapshot }: { snapshot: DockerSnapshot }) {
       <section className="overflow-hidden rounded-xl border border-white/10 bg-white/[0.02] ring-soft">
         <div className="border-b border-white/5 px-5 py-4">
           <h3 className="text-sm font-semibold text-white">Local images</h3>
-          <p className="mt-0.5 text-[11px] text-zinc-600">Read directly from Docker Engine · image mutation is not exposed in this step</p>
+          <p className="mt-0.5 text-[11px] text-zinc-600">Read directly from Docker Engine · pull adds an exact registry reference; build and deletion remain unavailable</p>
         </div>
         {snapshot.images.length === 0 ? (
           <div className="p-8 text-center text-sm text-zinc-600">Docker returned no local images.</div>
@@ -356,12 +702,12 @@ function EngineView({ snapshot, running }: { snapshot: DockerSnapshot; running: 
       <section className="flex gap-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] p-5 text-[12.5px] leading-relaxed text-amber-100/80">
         <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-300" />
         <div>
-          <strong className="text-amber-200">Docker access is privileged.</strong> Anyone who can control a Docker daemon can usually obtain the same authority as the account or service running that daemon. DevLab uses fixed CLI commands, validates full container IDs, bounds output, and requires confirmation for stop, restart, and removal. It does not claim to sandbox Docker workloads.
+          <strong className="text-amber-200">Docker access is privileged.</strong> Anyone who can control a Docker daemon can usually obtain the same authority as the account or service running that daemon. DevLab uses fixed CLI commands, validates identifiers and creation fields, binds new host ports to loopback, bounds output, and requires confirmation for stop, restart, and removal. It does not claim to sandbox Docker workloads.
         </div>
       </section>
 
       <section className="rounded-xl border border-white/10 bg-white/[0.02] p-5 text-[12px] leading-relaxed text-zinc-500 ring-soft">
-        This step intentionally exposes no arbitrary Docker arguments, shell execution, image deletion, volume deletion, builds, pulls, or Compose deployment. Use the real terminal for operations not yet represented by a typed command.
+        Image pull and stopped-container creation are exposed through narrow typed forms. This step intentionally exposes no arbitrary Docker arguments, shell execution, custom container commands, environment values, host mounts, privileged mode, image or volume deletion, builds, or Compose deployment. Use the real terminal for operations not represented by a typed command.
       </section>
     </div>
   );

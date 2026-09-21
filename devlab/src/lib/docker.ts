@@ -61,6 +61,20 @@ export interface DockerLogs {
   content: string;
 }
 
+export type DockerPortProtocol = "tcp" | "udp";
+
+export interface DockerPortMapping {
+  hostPort: number;
+  containerPort: number;
+  protocol: DockerPortProtocol;
+}
+
+export interface DockerCreateRequest {
+  name: string;
+  image: string;
+  ports: DockerPortMapping[];
+}
+
 export class DockerCommandError extends Error {
   readonly code: string;
 
@@ -92,6 +106,14 @@ function command<T>(name: string, args?: Record<string, unknown>): Promise<T> {
 
 export function getDockerSnapshot(): Promise<DockerSnapshot> {
   return command("docker_snapshot");
+}
+
+export function pullDockerImage(reference: string): Promise<DockerOperationResult> {
+  return command("docker_pull", { reference });
+}
+
+export function createDockerContainer(request: DockerCreateRequest): Promise<DockerOperationResult> {
+  return command("docker_create", { request });
 }
 
 export function startDockerContainer(id: string): Promise<DockerOperationResult> {

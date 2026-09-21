@@ -39,6 +39,8 @@
     "allow-git-credential-store",
     "allow-git-credential-delete",
     "allow-docker-snapshot",
+    "allow-docker-pull",
+    "allow-docker-create",
     "allow-docker-start",
     "allow-docker-stop",
     "allow-docker-restart",

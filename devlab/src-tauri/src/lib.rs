@@ -6,7 +6,8 @@ mod workspace;
 
 use credentials::{git_credential_delete, git_credential_status, git_credential_store};
 use docker::{
-    docker_logs, docker_remove, docker_restart, docker_snapshot, docker_start, docker_stop,
+    docker_create, docker_logs, docker_pull, docker_remove, docker_restart, docker_snapshot,
+    docker_start, docker_stop,
 };
 use git::{
     git_commit, git_diff, git_fetch, git_pull, git_push, git_repository_snapshot,
@@ -104,6 +105,8 @@ pub fn run() {
             git_credential_store,
             git_credential_delete,
             docker_snapshot,
+            docker_pull,
+            docker_create,
             docker_start,
             docker_stop,
             docker_restart,

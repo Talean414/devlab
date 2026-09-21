@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     io::{self, Read},
     process::{Child, Command, ExitStatus, Stdio},
     thread,
@@ -11,6 +12,7 @@ use crate::workspace::CommandError;
 
 const DOCKER_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const DOCKER_ACTION_TIMEOUT: Duration = Duration::from_secs(120);
+const DOCKER_PULL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MAX_DOCKER_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ERROR_CHARS: usize = 16 * 1024;
 const MAX_OPERATION_OUTPUT_CHARS: usize = 32 * 1024;
@@ -96,6 +98,38 @@ pub struct DockerLogs {
     container_id: String,
     container_name: String,
     content: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DockerPortProtocol {
+    Tcp,
+    Udp,
+}
+
+impl DockerPortProtocol {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DockerPortMapping {
+    host_port: u16,
+    container_port: u16,
+    protocol: DockerPortProtocol,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DockerCreateRequest {
+    name: String,
+    image: String,
+    ports: Vec<DockerPortMapping>,
 }
 
 #[derive(Default, Deserialize)]
@@ -578,12 +612,101 @@ fn snapshot() -> Result<DockerSnapshot, CommandError> {
     }
 }
 
+fn snapshot_after_operation() -> Result<DockerSnapshot, CommandError> {
+    snapshot().map_err(|error| {
+        CommandError::new(
+            "docker_refresh_failed_after_action",
+            format!(
+                "Docker completed the requested action, but DevLab could not refresh engine state: {}",
+                error.message
+            ),
+        )
+    })
+}
+
 fn validate_container_id(id: &str) -> Result<(), CommandError> {
     if !(12..=64).contains(&id.len()) || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(CommandError::new(
             "invalid_container_id",
             "Container IDs must be 12 to 64 hexadecimal characters.",
         ));
+    }
+    Ok(())
+}
+
+fn validate_image_reference(reference: &str) -> Result<(), CommandError> {
+    if reference.is_empty() || reference.len() > 255 || reference.trim() != reference {
+        return Err(CommandError::new(
+            "invalid_image_reference",
+            "Enter an image reference between 1 and 255 characters without surrounding whitespace.",
+        ));
+    }
+    if reference.starts_with('-')
+        || reference.ends_with('/')
+        || reference.ends_with(':')
+        || reference.ends_with('@')
+        || reference.contains("//")
+        || reference.contains("..")
+        || reference.contains("://")
+        || !reference.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'.' | b'_' | b'-' | b'/' | b':' | b'@')
+        })
+    {
+        return Err(CommandError::new(
+            "invalid_image_reference",
+            "Image references may contain only ASCII letters, numbers, dots, underscores, hyphens, slashes, colons and one digest separator.",
+        ));
+    }
+    if reference.matches('@').count() > 1 {
+        return Err(CommandError::new(
+            "invalid_image_reference",
+            "An image reference can contain at most one digest separator (@).",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_container_name(name: &str) -> Result<(), CommandError> {
+    let mut bytes = name.bytes();
+    let valid_first = bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric());
+    if name.len() > 128
+        || !valid_first
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+    {
+        return Err(CommandError::new(
+            "invalid_container_name",
+            "Container names must be 1 to 128 characters, start with a letter or number, and contain only letters, numbers, dots, underscores and hyphens.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_create_request(request: &DockerCreateRequest) -> Result<(), CommandError> {
+    validate_container_name(&request.name)?;
+    validate_image_reference(&request.image)?;
+    if request.ports.len() > 16 {
+        return Err(CommandError::new(
+            "too_many_port_mappings",
+            "A container can have at most 16 port mappings in DevLab.",
+        ));
+    }
+    let mut host_ports = HashSet::new();
+    for mapping in &request.ports {
+        if mapping.host_port == 0 || mapping.container_port == 0 {
+            return Err(CommandError::new(
+                "invalid_port_mapping",
+                "Host and container ports must be between 1 and 65535.",
+            ));
+        }
+        if !host_ports.insert((mapping.host_port, mapping.protocol.as_str())) {
+            return Err(CommandError::new(
+                "duplicate_host_port",
+                "Each host port and protocol pair can appear only once.",
+            ));
+        }
     }
     Ok(())
 }
@@ -613,7 +736,7 @@ fn operation(
     Ok(DockerOperationResult {
         message: success_message.to_string(),
         output: concise_output(output),
-        snapshot: snapshot()?,
+        snapshot: snapshot_after_operation()?,
     })
 }
 
@@ -635,6 +758,99 @@ where
 #[tauri::command]
 pub async fn docker_snapshot() -> Result<DockerSnapshot, CommandError> {
     blocking(snapshot).await
+}
+
+#[tauri::command]
+pub async fn docker_pull(reference: String) -> Result<DockerOperationResult, CommandError> {
+    blocking(move || {
+        validate_image_reference(&reference)?;
+        let output = run_docker(
+            &["image", "pull", "--", &reference],
+            DOCKER_PULL_TIMEOUT,
+        )?;
+        if !output.status.success() {
+            let detail = output_detail(&output);
+            return Err(CommandError::new(
+                "docker_pull_failed",
+                if detail.is_empty() {
+                    "Docker could not pull the image and returned no error message.".to_string()
+                } else {
+                    format!("Docker could not pull the image: {detail}")
+                },
+            ));
+        }
+        let progress = if output.output_truncated {
+            "Docker pull completed; progress output exceeded DevLab's display limit.".to_string()
+        } else {
+            text(&output.stdout, "image pull output")?
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .map(|line| line.trim().chars().take(2_000).collect())
+                .unwrap_or_default()
+        };
+        Ok(DockerOperationResult {
+            message: format!("Pulled image {reference}."),
+            output: progress,
+            snapshot: snapshot_after_operation()?,
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn docker_create(
+    request: DockerCreateRequest,
+) -> Result<DockerOperationResult, CommandError> {
+    blocking(move || {
+        validate_create_request(&request)?;
+
+        checked_output(
+            run_docker(
+                &[
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{.Id}}",
+                    "--",
+                    &request.image,
+                ],
+                DOCKER_COMMAND_TIMEOUT,
+            )?,
+            "find the requested image locally",
+        )?;
+
+        let mut arguments = vec![
+            "container".to_string(),
+            "create".to_string(),
+            "--name".to_string(),
+            request.name.clone(),
+            "--pull=never".to_string(),
+        ];
+        for mapping in &request.ports {
+            arguments.push("--publish".to_string());
+            arguments.push(format!(
+                "127.0.0.1:{}:{}/{}",
+                mapping.host_port,
+                mapping.container_port,
+                mapping.protocol.as_str()
+            ));
+        }
+        arguments.push("--".to_string());
+        arguments.push(request.image.clone());
+        let argument_refs: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        let output = checked_output(
+            run_docker(&argument_refs, DOCKER_ACTION_TIMEOUT)?,
+            "create the container",
+        )?;
+
+        Ok(DockerOperationResult {
+            message: format!("Created stopped container {}.", request.name),
+            output: concise_output(output),
+            snapshot: snapshot_after_operation()?,
+        })
+    })
+    .await
 }
 
 #[tauri::command]
@@ -773,5 +989,52 @@ mod tests {
         assert!(validate_container_id("ABCDEF1234567890").is_ok());
         assert!(validate_container_id("short").is_err());
         assert!(validate_container_id("abcdef12345-").is_err());
+    }
+
+    #[test]
+    fn validates_image_references_without_accepting_options_or_urls() {
+        assert!(validate_image_reference("nginx:latest").is_ok());
+        assert!(validate_image_reference("ghcr.io/example/app:v1.2.3").is_ok());
+        assert!(validate_image_reference(
+            "alpine@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        )
+        .is_ok());
+        assert!(validate_image_reference("--quiet").is_err());
+        assert!(validate_image_reference("https://example.com/image").is_err());
+        assert!(validate_image_reference(" nginx:latest").is_err());
+        assert!(validate_image_reference("example.com//image").is_err());
+    }
+
+    #[test]
+    fn validates_typed_container_creation() {
+        let valid = DockerCreateRequest {
+            name: "devlab-web".to_string(),
+            image: "nginx:latest".to_string(),
+            ports: vec![DockerPortMapping {
+                host_port: 8080,
+                container_port: 80,
+                protocol: DockerPortProtocol::Tcp,
+            }],
+        };
+        assert!(validate_create_request(&valid).is_ok());
+
+        let duplicate = DockerCreateRequest {
+            name: "devlab-web".to_string(),
+            image: "nginx:latest".to_string(),
+            ports: vec![
+                DockerPortMapping {
+                    host_port: 8080,
+                    container_port: 80,
+                    protocol: DockerPortProtocol::Tcp,
+                },
+                DockerPortMapping {
+                    host_port: 8080,
+                    container_port: 8080,
+                    protocol: DockerPortProtocol::Tcp,
+                },
+            ],
+        };
+        assert!(validate_create_request(&duplicate).is_err());
+        assert!(validate_container_name("-invalid").is_err());
     }
 }

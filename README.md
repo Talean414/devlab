@@ -14,7 +14,7 @@ A terminal starts only after an explicit click and launches the operating system
 
 Source Control discovers only a repository whose canonical root exactly matches the selected workspace. Fixed Rust commands read real porcelain status, diffs, history, branches and remotes; stage and unstage paths; create commits; and run confirmed fetch, fast-forward pull and non-force push operations with time and output limits. Git hooks and fsmonitor helpers are disabled for DevLab-owned commands. GitHub, GitLab and Bitbucket tokens are stored by the operating system credential store and are never returned to the renderer.
 
-Containers detects the real Docker CLI and daemon, then reads actual containers, one-shot resource statistics, images and bounded logs. Start, stop, restart and non-force removal use validated full container IDs; disruptive actions require confirmation. Arbitrary Docker arguments, builds, pulls, image/volume deletion and Compose deployment are not exposed by this step.
+Containers detects the real Docker CLI and daemon, then reads actual containers, one-shot resource statistics, images and bounded logs. It can pull a validated image reference and create a stopped container with a validated name and optional loopback-only port mappings. Start, stop, restart and non-force removal use validated full container IDs; disruptive actions require confirmation. Arbitrary Docker arguments, custom container commands, environment values, host mounts, privileged mode, builds, image/volume deletion and Compose deployment are not exposed by this step.
 
 Simulated database, deployment, CI, toolchain, API-client and test-runner results remain disabled. Those panels are re-enabled only after their real native backend is completed. The normal Vite server remains available strictly as a UI preview.
 
@@ -34,6 +34,7 @@ Simulated database, deployment, CI, toolchain, API-client and test-runner result
 - Confirmed fetch, fast-forward pull and non-force push operations with bounded native processes
 - OS-protected GitHub, GitLab and Bitbucket credentials with presence-only renderer metadata
 - Real Docker CLI/daemon detection, container state, one-shot statistics, local images and bounded logs
+- Validated image pulls and constrained stopped-container creation with loopback-only port publishing
 - Confirmed container stop/restart/removal with validated IDs; explicit start and no force removal
 - Project template and command references
 - BroadcastChannel/WebRTC collaboration primitives
@@ -163,11 +164,12 @@ DevLab never initializes a repository, adds a remote, changes Git identity, chec
 1. Install and start Docker Engine or Docker Desktop.
 2. Confirm `docker version` succeeds for the same operating-system account that launches DevLab.
 3. Open **Containers**. DevLab reports the real CLI/engine versions, all containers, local images and one-shot resource statistics.
-4. Open **Logs** on a container to read at most the latest 500 timestamped lines.
-5. Start a stopped container explicitly. Stop and restart require confirmation and use Docker's 10-second grace period.
-6. Removal is available only for stopped containers, requires confirmation and never uses force.
+4. Choose **Pull image**, enter an exact registry reference such as `nginx:latest`, and wait for Docker's genuine result. Pulls have a ten-minute limit and expose no additional CLI flags.
+5. Choose **Create container**, select a local image, enter a validated name, and optionally add TCP or UDP port mappings. Host ports bind to `127.0.0.1`; the new container remains stopped and uses the image's default entrypoint and command.
+6. Start the new container explicitly, then open **Logs** to read at most the latest 500 timestamped lines. Stop and restart require confirmation and use Docker's 10-second grace period.
+7. Removal is available only for stopped containers, requires confirmation and never uses force.
 
-DevLab refreshes Docker state every 15 seconds while the panel is open. This step intentionally does not expose arbitrary Docker arguments, builds, pulls, image or volume deletion, or Compose deployment.
+DevLab refreshes Docker state every 15 seconds while the panel is open. This step intentionally does not expose arbitrary Docker arguments, custom commands, environment values, host mounts, privileged mode, builds, image or volume deletion, or Compose deployment.
 
 ## 9. Verify the complete build
 
@@ -179,7 +181,7 @@ npm run native:check
 npm run native:test
 ```
 
-The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary, revision, terminal-dimension, bounded-output, Git parser/path validation, and Docker record/ID validation tests.
+The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary, revision, terminal-dimension, bounded-output, Git parser/path validation, and Docker record, ID, image-reference and typed-creation validation tests.
 
 Build the native application and this operating system's installer formats:
 
@@ -271,6 +273,8 @@ Use this list before calling an installation complete:
 - [ ] Fetch, fast-forward Pull and Push require confirmation and report actual network/authentication failures
 - [ ] Saving a Git token exposes only configured metadata, survives restart in the OS credential store, and can be deleted
 - [ ] Containers reports the actual Docker CLI/engine versions, containers, images and current one-shot statistics
+- [ ] Pulling an exact disposable image reference adds the real local image or reports the registry's genuine error
+- [ ] Creating a named container leaves it stopped, publishes requested ports only on `127.0.0.1`, and rejects invalid or duplicate fields
 - [ ] Container logs contain real output, and starting a stopped test container updates its actual Docker state
 - [ ] Stop/restart/removal require confirmation, removal refuses running containers, and daemon permission failures are reported honestly
 - [ ] Gemini key test says **Key valid**
@@ -327,6 +331,10 @@ This is intentional—not an installation failure. The previous fabricated resul
 
 Run `docker version` in a normal terminal. If the CLI is missing, install Docker Engine or Docker Desktop. If only the server section fails, start the daemon or Docker Desktop and make sure your account can access the active Docker context. On Linux, adding a user to the `docker` group grants powerful daemon access and should be treated as a security decision—not an automatic DevLab setup step.
 
+### Pull image reports access denied or manifest unknown
+
+DevLab uses the current Docker CLI context and registry credentials without collecting registry passwords itself. Confirm the reference and tag with `docker image pull IMAGE`, and use `docker login` in a trusted terminal when a private registry requires authentication. DevLab returns the registry or daemon error rather than creating a placeholder image.
+
 ### Source Control says the repository root does not match
 
 DevLab will not let Git escape the selected workspace. If you selected a folder inside a larger repository, reopen **Code Editor** and select the repository's top-level folder—the path printed by `git rev-parse --show-toplevel`.
@@ -375,7 +383,7 @@ devlab/
     │   ├── native.ts       # typed native runtime bridge
     │   ├── terminal.ts     # typed PTY lifecycle and event IPC client
     │   ├── git.ts          # typed repository, operation and credential IPC client
-    │   ├── docker.ts       # typed Docker detection, state, logs and lifecycle IPC client
+    │   ├── docker.ts       # typed Docker state, pull, creation, logs and lifecycle IPC client
     │   ├── workspace.ts    # typed scoped-filesystem IPC client
     │   ├── settings.ts     # application settings
     │   └── sync.ts         # collaboration helpers
@@ -397,6 +405,6 @@ devlab/
 - Keep Git provider tokens in the OS credential store; expose only presence/backend metadata to the renderer and redact command failures.
 - Scope Git operations to a canonical repository root that exactly matches the selected workspace; use fixed argument arrays, output limits and timeouts instead of a shell.
 - Require explicit confirmation for every Git network operation; do not expose force push, merge or rebase through this panel.
-- Treat Docker daemon access as privileged: validate full IDs, use fixed commands and timeouts, confirm disruptive actions, and never imply workload sandboxing.
+- Treat Docker daemon access as privileged: validate full IDs, image references, names and ports; use fixed commands and timeouts; bind created ports to loopback; confirm disruptive actions; and never imply workload sandboxing.
 - Remember that the current Gemini key is still renderer-managed and separate from Rust-owned Git credentials.
 - Review generated commands and code before executing or deploying them.
