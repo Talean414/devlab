@@ -1,3 +1,4 @@
+mod agent_tools;
 mod audit;
 mod credentials;
 mod database;
@@ -9,6 +10,7 @@ mod terminal;
 mod test_runner;
 mod workspace;
 
+use agent_tools::agent_tools_record_draft;
 use audit::{agent_audit_list, AgentAuditService};
 use credentials::{git_credential_delete, git_credential_status, git_credential_store};
 use database::{
@@ -72,6 +74,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
             "native-http",
             "test-runner",
             "agent-audit",
+            "agent-tools",
         ],
     }
 }
@@ -98,6 +101,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_runtime_info,
             agent_audit_list,
+            agent_tools_record_draft,
             workspace_select,
             workspace_current,
             workspace_close,

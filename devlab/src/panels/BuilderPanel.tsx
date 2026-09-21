@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { PanelHeader } from "./AgentPanel";
 import { Markdown } from "../components/CodeBlock";
 import { getApiKey, streamChat, type GenTurn } from "../lib/gemini";
+import { recordAgentDraft } from "../lib/agentTools";
 import { loadSettings } from "../lib/settings";
 import { projectTemplates } from "../data/templates";
 import type { VFile } from "../types";
@@ -11,6 +12,10 @@ import {
 } from "lucide-react";
 
 type Phase = "brief" | "planning" | "review" | "done";
+
+const MAX_PLAN_FILES = 12;
+const MAX_DRAFT_BYTES = 512 * 1024;
+const MAX_FILE_OUTPUT_CHARS = 96 * 1024;
 
 interface Plan {
   summary: string;
@@ -27,6 +32,39 @@ const IDEAS = [
   "A CLI tool that scans a codebase and reports dependency risks",
 ];
 
+function formatError(error: unknown) {
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
+  return String(error);
+}
+
+function validDraftPath(path: string) {
+  const clean = path.trim();
+  return !!clean
+    && clean.length <= 512
+    && !clean.startsWith("/")
+    && !clean.startsWith("~")
+    && !clean.includes("\\")
+    && !clean.includes("//")
+    && !clean.endsWith("/")
+    && !clean.split("/").some((part) => !part || part === "." || part === "..");
+}
+
+function languageForPath(path: string) {
+  const ext = path.split(".").pop()?.toLowerCase() || "txt";
+  const langMap: Record<string, string> = {
+    ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript",
+    py: "python", rs: "rust", go: "go", java: "java", cs: "csharp",
+    rb: "ruby", php: "php", ex: "elixir", json: "json", yml: "yaml",
+    yaml: "yaml", md: "markdown", html: "html", css: "css", sql: "sql",
+    sh: "shell", toml: "toml", dockerfile: "dockerfile",
+  };
+  return langMap[ext] || "plaintext";
+}
+
+function textBytes(value: string) {
+  return new TextEncoder().encode(value).length;
+}
+
 export function BuilderPanel({
   onNeedKey, onOpenFiles,
 }: {
@@ -41,6 +79,8 @@ export function BuilderPanel({
   const [error, setError] = useState("");
   const [generating, setGenerating] = useState<string | null>(null);
   const [builtFiles, setBuiltFiles] = useState<VFile[]>([]);
+  const [staging, setStaging] = useState(false);
+  const [stageNotice, setStageNotice] = useState("");
   const outRef = useRef<HTMLDivElement>(null);
   const settings = loadSettings();
 
@@ -64,10 +104,10 @@ Respond with ONLY a valid JSON object (no markdown fences, no prose) matching th
 }
 
 Rules:
-- 4-7 steps, 4-10 commands, 4-10 files.
+- 4-7 steps, 4-10 commands, 4-10 files. Never list more than 10 files.
 - Prefer these known scaffolds when relevant: ${templateList}
 - Commands must be real, runnable shell commands.
-- File paths must be realistic for the chosen stack.`;
+- File paths must be realistic workspace-relative paths. Do not use absolute paths, parent traversal, empty segments, or backslashes.`;
 
     const history: GenTurn[] = [{ role: "user", text: prompt }];
     try {
@@ -82,6 +122,10 @@ Rules:
       const lastBrace = cleaned.lastIndexOf("}");
       const jsonStr = firstBrace > -1 ? cleaned.slice(firstBrace, lastBrace + 1) : cleaned;
       const parsed = JSON.parse(jsonStr) as Plan;
+      parsed.files = parsed.files
+        .filter((file) => validDraftPath(file.path))
+        .slice(0, MAX_PLAN_FILES);
+      if (parsed.files.length === 0) throw new Error("The model did not return any safe workspace-relative file paths.");
       setPlan(parsed);
       setPhase("review");
     } catch (e) {
@@ -108,17 +152,13 @@ This file's purpose: ${description}
 Output ONLY the raw file contents. No markdown fences, no explanation, no commentary.`;
     try {
       let acc = "";
-      for await (const chunk of streamChat([{ role: "user", text: prompt }])) acc += chunk;
+      for await (const chunk of streamChat([{ role: "user", text: prompt }], { maxOutputTokens: 12_000, temperature: 0.25 })) {
+        acc += chunk;
+        if (acc.length > MAX_FILE_OUTPUT_CHARS) throw new Error("Generated file exceeded DevLab's reviewed-draft staging limit.");
+      }
       const content = acc.replace(/^```[\w]*\s*/i, "").replace(/```\s*$/, "").trim();
-      const ext = path.split(".").pop() || "txt";
-      const langMap: Record<string, string> = {
-        ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript",
-        py: "python", rs: "rust", go: "go", java: "java", cs: "csharp",
-        rb: "ruby", php: "php", ex: "elixir", json: "json", yml: "yaml",
-        yaml: "yaml", md: "markdown", html: "html", css: "css", sql: "sql",
-        sh: "shell", toml: "toml", dockerfile: "dockerfile",
-      };
-      const vfile: VFile = { path, content, language: langMap[ext] || "plaintext" };
+      if (textBytes(content) > MAX_DRAFT_BYTES) throw new Error("Generated file exceeded DevLab's reviewed-draft staging limit.");
+      const vfile: VFile = { path, content, language: languageForPath(path) };
       setBuiltFiles((f) => [...f.filter((x) => x.path !== path), vfile]);
     } catch (e) {
       setError((e as Error).message);
@@ -133,16 +173,33 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setPhase("done");
   }
 
+  async function openInEditorReview() {
+    if (!plan || builtFiles.length === 0) return;
+    setStaging(true);
+    setError("");
+    setStageNotice("");
+    try {
+      const files = builtFiles.map((file) => ({ path: file.path, bytes: textBytes(file.content) }));
+      const session = await recordAgentDraft(plan.summary, files);
+      setStageNotice(`Native agent-tools staged ${session.fileCount} reviewed draft file(s). Nothing was written.`);
+      onOpenFiles(builtFiles);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setStaging(false);
+    }
+  }
+
   function reset() {
     setPhase("brief"); setBrief(""); setPlan(null); setRaw("");
-    setBuiltFiles([]); setError("");
+    setBuiltFiles([]); setError(""); setStageNotice("");
   }
 
   return (
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Agentic Project Builder"
-        subtitle="Describe what you want — the agent plans the stack, commands and files"
+        subtitle="Phase 6E · permission-gated multi-file draft staging"
         badge={settings.autonomy === "auto" ? "Autonomous" : settings.autonomy === "suggest" ? "Suggest mode" : "Ask first"}
         badgeOk={settings.autonomy !== "ask"}
       />
@@ -157,7 +214,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
             <h2 className="text-2xl font-semibold text-white">What are we building?</h2>
             <p className="mt-2 text-sm text-zinc-400">
               Describe your project in plain English. The agent will choose a stack, produce a
-              step-by-step plan, generate the shell commands and write the starter files.
+              step-by-step plan and generate reviewed in-memory starter files. Nothing is written automatically.
             </p>
 
             <div className="mt-6 rounded-2xl border border-white/10 bg-[#0d1017] p-2 transition focus-within:border-cyan-500/50">
@@ -288,14 +345,22 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                 </button>
                 {builtFiles.length > 0 && (
                   <button
-                    onClick={() => onOpenFiles(builtFiles)}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/20"
+                    onClick={openInEditorReview}
+                    disabled={staging}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-40"
                   >
-                    Open in Editor <ArrowRight className="h-3 w-3" />
+                    {staging ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArrowRight className="h-3 w-3" />}
+                    Open reviewed drafts
                   </button>
                 )}
               </div>
             </div>
+
+            {stageNotice && (
+              <div className="mb-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-[13px] text-emerald-100">
+                {stageNotice}
+              </div>
+            )}
 
             <div className="space-y-1.5">
               {plan.files.map((f) => {

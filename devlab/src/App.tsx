@@ -26,6 +26,11 @@ import { PreviewPanel } from "./panels/PreviewPanel";
 import { SetupPanel } from "./panels/SetupPanel";
 import { SettingsPanel } from "./panels/SettingsPanel";
 
+
+const BuilderPanel = lazy(() => import("./panels/BuilderPanel").then((module) => ({
+  default: module.BuilderPanel,
+})));
+
 const TerminalPanel = lazy(() => import("./panels/TerminalPanel").then((module) => ({
   default: module.TerminalPanel,
 })));
@@ -175,9 +180,13 @@ export default function App() {
     switch (view) {
       case "welcome":  return <WelcomePanel key={keyVersion} onNavigate={navigate} hasKey={hasKey} />;
       case "agent":    return <AgentPanel key={keyVersion} onNeedKey={() => setShowModal(true)} />;
-      case "builder":  return nativeFeature(
-        "Project Builder", "agent-tools", "Phase 6 · reviewed multi-file writes through typed agent tools",
-      );
+      case "builder":  return hasNativeCapability(runtime, "agent-tools")
+        ? <Suspense fallback={<NativePanelLoading label="Loading native agent tools…" />}>
+          <BuilderPanel key={keyVersion} onNeedKey={() => setShowModal(true)} onOpenFiles={openGeneratedSource} />
+        </Suspense>
+        : nativeFeature(
+          "Project Builder", "agent-tools", "Phase 6E · permission-gated multi-file draft staging",
+        );
       case "canvas":   return <CanvasPanel key={keyVersion} onOpenFiles={openGeneratedSource} />;
       case "editor": {
         if (hasNativeCapability(runtime, "filesystem")) {
@@ -348,7 +357,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 6D audited test repairs</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 6E staged agent drafts</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}

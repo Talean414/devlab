@@ -8,6 +8,7 @@
     "core:default",
     "allow-get-runtime-info",
     "allow-agent-audit-list",
+    "allow-agent-tools-record-draft",
     "allow-workspace-select",
     "allow-workspace-current",
     "allow-workspace-close",

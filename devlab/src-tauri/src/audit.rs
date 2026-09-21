@@ -48,13 +48,14 @@ impl AgentAuditService {
         target: impl Into<String>,
         outcome: &'static str,
         summary: impl Into<String>,
-    ) {
+    ) -> u64 {
         let Ok(mut inner) = self.inner.lock() else {
-            return;
+            return 0;
         };
         inner.next_id = inner.next_id.saturating_add(1);
+        let id = inner.next_id;
         let event = AgentAuditEvent {
-            id: inner.next_id,
+            id,
             timestamp_ms: now_ms(),
             workspace_name: workspace_root.and_then(|root| {
                 root.file_name()
@@ -71,6 +72,7 @@ impl AgentAuditService {
         while inner.events.len() > MAX_AUDIT_EVENTS {
             inner.events.pop_front();
         }
+        id
     }
 
     fn list(&self, limit: Option<usize>) -> Result<Vec<AgentAuditEvent>, CommandError> {
