@@ -1,5 +1,5 @@
 use portable_pty::{
-    native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize, PtySystem,
+    native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize,
 };
 use serde::Serialize;
 use std::{

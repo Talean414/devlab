@@ -9,7 +9,6 @@ use git::{
     git_stage_all, git_stage_paths, git_unstage_all, git_unstage_paths,
 };
 use serde::Serialize;
-use tauri::Manager;
 use terminal::{
     terminal_clear, terminal_close, terminal_create, terminal_kill, terminal_list,
     terminal_resize, terminal_snapshot, terminal_write, TerminalService,

@@ -224,8 +224,8 @@ fn run_git(
         CommandError::new("git_output_unavailable", "Git stderr could not be captured.")
     })?;
 
-    let stdout_reader = thread::spawn(move || read_bounded(stdout, MAX_GIT_OUTPUT_BYTES));
-    let stderr_reader = thread::spawn(move || read_bounded(stderr, MAX_GIT_OUTPUT_BYTES));
+    let stdout_reader = thread::spawn(move || read_bounded(stdout));
+    let stderr_reader = thread::spawn(move || read_bounded(stderr));
 
     let status = match child
         .wait_timeout(timeout)
