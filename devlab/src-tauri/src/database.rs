@@ -813,7 +813,7 @@ pub fn database_connections(
 }
 
 #[tauri::command]
-pub fn database_sqlite_select(
+pub async fn database_sqlite_select(
     app: AppHandle,
     allow_writes: bool,
 ) -> Result<Option<DatabaseConnectionInfo>, CommandError> {
