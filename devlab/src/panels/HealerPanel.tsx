@@ -96,12 +96,67 @@ function qualifyInferredRepairPath(path: string, evidence: string) {
   return clean;
 }
 
-function validateRepairContent(content: string) {
+function fileExtension(path: string) {
+  return path.toLowerCase().split(".").pop() ?? "";
+}
+
+function extractPublicSurface(path: string, source: string) {
+  const extension = fileExtension(path);
+  const symbols = new Set<string>();
+
+  if (extension === "rs") {
+    for (const match of source.matchAll(/\bpub(?:\s*\([^)]*\))?\s+(?:async\s+)?(struct|enum|trait|type|fn)\s+([A-Za-z_][A-Za-z0-9_]*)/g)) {
+      symbols.add(`${match[1]} ${match[2]}`);
+    }
+    for (const match of source.matchAll(/#\s*\[\s*tauri::command\s*\]\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)/g)) {
+      symbols.add(`tauri command ${match[1]}`);
+    }
+    return [...symbols].sort();
+  }
+
+  if (["ts", "tsx", "js", "jsx"].includes(extension)) {
+    for (const match of source.matchAll(/\bexport\s+(?:default\s+)?(?:async\s+)?(function|class|interface|type|enum|const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)/g)) {
+      symbols.add(`${match[1]} ${match[2]}`);
+    }
+    return [...symbols].sort();
+  }
+
+  return [];
+}
+
+function missingPublicSurface(path: string, original: string, patched: string) {
+  const originalSymbols = extractPublicSurface(path, original);
+  if (originalSymbols.length === 0) return [];
+  const patchedSymbols = new Set(extractPublicSurface(path, patched));
+  return originalSymbols.filter((symbol) => !patchedSymbols.has(symbol));
+}
+
+function validateRepairContent(content: string, originalContent: string, path: string) {
   const clean = content.replace(/^```[\w-]*\s*/i, "").replace(/```\s*$/i, "").trim();
+  const original = originalContent.trim();
   if (!clean) throw new Error("Model response did not include a non-empty patched file.");
   if (clean.length > MAX_REPAIR_OUTPUT_CHARS) {
     throw new Error(`Repair draft exceeded ${(MAX_REPAIR_OUTPUT_CHARS / 1024).toFixed(0)} KiB. Narrow the target file or failing test output.`);
   }
+  if (/^diff --git\s/m.test(clean) || /^@@\s/m.test(clean) || (/^---\s/m.test(clean) && /^\+\+\+\s/m.test(clean))) {
+    throw new Error("Repair draft returned a diff. DevLab requires the complete patched file before it can open an applyable draft.");
+  }
+
+  if (original.length >= 2_048 && clean.length < original.length * 0.35) {
+    throw new Error(
+      `Repair draft looked partial: model returned ${clean.length.toLocaleString()} characters for a ${original.length.toLocaleString()} character source file. DevLab refused to open a snippet as a whole-file patch.`,
+    );
+  }
+
+  const missing = missingPublicSurface(path, original, clean);
+  if (missing.length > 0) {
+    const sample = missing.slice(0, 8).join(", ");
+    const suffix = missing.length > 8 ? `, and ${missing.length - 8} more` : "";
+    throw new Error(
+      `Repair draft looked partial or changed the public API: it omitted existing public symbols (${sample}${suffix}). DevLab refused to open it as a whole-file patch.`,
+    );
+  }
+
   return clean;
 }
 
@@ -117,7 +172,7 @@ function extractTaggedRepair(raw: string) {
   return content ? { rationale, content } : null;
 }
 
-function parseRepairDraft(raw: string, path: string): RepairDraft {
+function parseRepairDraft(raw: string, path: string, originalContent: string): RepairDraft {
   const cleaned = stripJsonFence(raw);
   const first = cleaned.indexOf("{");
   const last = cleaned.lastIndexOf("}");
@@ -127,7 +182,7 @@ function parseRepairDraft(raw: string, path: string): RepairDraft {
       if (typeof parsed.patched === "string") {
         return {
           path,
-          content: validateRepairContent(parsed.patched),
+          content: validateRepairContent(parsed.patched, originalContent, path),
           rationale: typeof parsed.rationale === "string" ? parsed.rationale : "No rationale returned.",
         };
       }
@@ -140,7 +195,7 @@ function parseRepairDraft(raw: string, path: string): RepairDraft {
   if (tagged) {
     return {
       path,
-      content: validateRepairContent(tagged.content),
+      content: validateRepairContent(tagged.content, originalContent, path),
       rationale: tagged.rationale || "Repair draft generated from the failing native test output.",
     };
   }
@@ -150,7 +205,7 @@ function parseRepairDraft(raw: string, path: string): RepairDraft {
     const rationale = raw.slice(0, raw.indexOf("```")).replace(/^(rationale|reasoning)\s*:\s*/i, "").trim();
     return {
       path,
-      content: validateRepairContent(fenced),
+      content: validateRepairContent(fenced, originalContent, path),
       rationale: rationale || "Repair draft generated from the failing native test output.",
     };
   }
@@ -277,9 +332,10 @@ export function HealerPanel({
 
 Rules:
 - Patch exactly this one file: ${targetPath}
-- Return the ENTIRE patched file, not a diff.
+- Return the ENTIRE patched file, not a diff or snippet.
 - Do not invent test results.
 - Preserve public APIs unless the test output requires a change.
+- Do not return only the changed function; DevLab will reject drafts that omit existing imports, public structs, exported functions, or Tauri commands.
 - If the evidence is insufficient, make the smallest defensive fix and explain uncertainty in rationale.
 - Prefer this exact response format so DevLab can parse source code safely:
 <devlab-rationale>
@@ -315,7 +371,7 @@ ${document.content}
 
       let raw = "";
       for await (const chunk of streamChat([{ role: "user", text: prompt }])) raw += chunk;
-      const draft = parseRepairDraft(raw, targetPath);
+      const draft = parseRepairDraft(raw, targetPath, document.content);
       setRepairDraft(draft);
       setRepairNotice("Repair draft generated in memory. Review it before sending it to the editor draft flow.");
     } catch (err) {
