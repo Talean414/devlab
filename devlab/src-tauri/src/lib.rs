@@ -1,3 +1,4 @@
+mod audit;
 mod credentials;
 mod database;
 mod docker;
@@ -8,6 +9,7 @@ mod terminal;
 mod test_runner;
 mod workspace;
 
+use audit::{agent_audit_list, AgentAuditService};
 use credentials::{git_credential_delete, git_credential_status, git_credential_store};
 use database::{
     database_connections, database_disconnect, database_query, database_schema,
@@ -34,9 +36,9 @@ use terminal::{
 };
 use test_runner::{test_runner_run, test_runner_snapshot};
 use workspace::{
-    workspace_close, workspace_create_directory, workspace_create_file, workspace_current,
-    workspace_delete, workspace_list, workspace_read, workspace_rename, workspace_select,
-    workspace_write, WorkspaceService,
+    workspace_apply_reviewed_draft, workspace_close, workspace_create_directory, workspace_create_file,
+    workspace_current, workspace_delete, workspace_list, workspace_read, workspace_rename,
+    workspace_select, workspace_write, WorkspaceService,
 };
 
 #[derive(Serialize)]
@@ -69,6 +71,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
             "database",
             "native-http",
             "test-runner",
+            "agent-audit",
         ],
     }
 }
@@ -76,6 +79,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(AgentAuditService::default())
         .manage(WorkspaceService::default())
         .manage(TerminalService::default())
         .manage(DatabaseService::default())
@@ -93,12 +97,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_runtime_info,
+            agent_audit_list,
             workspace_select,
             workspace_current,
             workspace_close,
             workspace_list,
             workspace_read,
             workspace_write,
+            workspace_apply_reviewed_draft,
             workspace_create_file,
             workspace_create_directory,
             workspace_rename,

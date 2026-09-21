@@ -8,7 +8,9 @@ use std::{
     sync::Mutex,
     time::UNIX_EPOCH,
 };
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+use crate::audit::AgentAuditService;
 use tauri_plugin_dialog::DialogExt;
 
 const MAX_TEXT_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -390,6 +392,13 @@ pub fn workspace_read(
     relative_path: String,
     service: State<'_, WorkspaceService>,
 ) -> Result<WorkspaceDocument, CommandError> {
+    read_workspace_document(relative_path, &service)
+}
+
+fn read_workspace_document(
+    relative_path: String,
+    service: &WorkspaceService,
+) -> Result<WorkspaceDocument, CommandError> {
     let relative_path = normalize_relative_path(&relative_path, false)?;
     let root = service.root()?;
     let path = root.resolve_existing(&relative_path)?;
@@ -444,6 +453,40 @@ pub fn workspace_write(
     expected_revision: Option<String>,
     service: State<'_, WorkspaceService>,
 ) -> Result<WorkspaceDocument, CommandError> {
+    let (document, _) = write_workspace_document(relative_path, content, expected_revision, &service)?;
+    Ok(document)
+}
+
+#[tauri::command]
+pub fn workspace_apply_reviewed_draft(
+    app: AppHandle,
+    relative_path: String,
+    content: String,
+    expected_revision: Option<String>,
+    service: State<'_, WorkspaceService>,
+) -> Result<WorkspaceDocument, CommandError> {
+    let root = service.root_path()?;
+    let (document, action) = write_workspace_document(relative_path, content, expected_revision, &service)?;
+    app.state::<AgentAuditService>().record(
+        Some(&root),
+        "reviewed-draft",
+        action,
+        document.path.clone(),
+        "success",
+        format!(
+            "Reviewed draft {action} {} through scoped workspace write ({} bytes).",
+            document.path, document.size
+        ),
+    );
+    Ok(document)
+}
+
+fn write_workspace_document(
+    relative_path: String,
+    content: String,
+    expected_revision: Option<String>,
+    service: &WorkspaceService,
+) -> Result<(WorkspaceDocument, &'static str), CommandError> {
     let relative_path = normalize_relative_path(&relative_path, false)?;
     if content.len() as u64 > MAX_TEXT_FILE_BYTES {
         return Err(CommandError::new(
@@ -457,7 +500,9 @@ pub fn workspace_write(
 
     let root = service.root()?;
     let unresolved = root.resolve_new(&relative_path)?;
+    let action;
     if workspace_entry_exists(&unresolved)? {
+        action = "updated";
         let path = root.resolve_existing(&relative_path)?;
         let metadata = fs::metadata(&path)
             .map_err(|error| CommandError::io("inspect the file before saving", error))?;
@@ -495,6 +540,7 @@ pub fn workspace_write(
         }
         write_existing(&path, content.as_bytes())?;
     } else {
+        action = "created";
         if expected_revision.is_some() {
             return Err(CommandError::new(
                 "revision_conflict",
@@ -511,7 +557,8 @@ pub fn workspace_write(
             .map_err(|error| CommandError::io("write the new file", error))?;
     }
 
-    workspace_read(relative_path, service)
+    let document = read_workspace_document(relative_path, service)?;
+    Ok((document, action))
 }
 
 #[tauri::command]

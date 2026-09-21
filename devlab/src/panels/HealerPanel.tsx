@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { PanelHeader } from "./AgentPanel";
 import { getApiKey, streamChat } from "../lib/gemini";
+import { listAgentAudit, type AgentAuditEvent } from "../lib/agentAudit";
 import { readWorkspaceFile } from "../lib/workspace";
 import type { VFile } from "../types";
 import {
@@ -42,6 +43,17 @@ function errorTitle(error: string) {
 
 function visibleError(error: string) {
   return error.replace(/^Repair draft error:\s*/, "");
+}
+
+function auditTime(timestampMs: number) {
+  if (!timestampMs) return "unknown time";
+  return new Date(timestampMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function auditTone(outcome: string) {
+  if (["passed", "success"].includes(outcome)) return "text-emerald-300";
+  if (["timeout", "error", "failed"].includes(outcome)) return "text-rose-300";
+  return "text-zinc-400";
 }
 
 function excerpt(value: string, maxChars: number) {
@@ -286,11 +298,26 @@ export function HealerPanel({
   const [repairBusy, setRepairBusy] = useState(false);
   const [repairDraft, setRepairDraft] = useState<RepairDraft | null>(null);
   const [repairNotice, setRepairNotice] = useState("");
+  const [auditEvents, setAuditEvents] = useState<AgentAuditEvent[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState("");
 
   const selected = useMemo(
     () => snapshot?.profiles.find((profile) => profile.id === selectedId) ?? snapshot?.profiles[0],
     [snapshot, selectedId],
   );
+
+  async function refreshAudit() {
+    setAuditLoading(true);
+    setAuditError("");
+    try {
+      setAuditEvents(await listAgentAudit(8));
+    } catch (err) {
+      setAuditError(formatError(err));
+    } finally {
+      setAuditLoading(false);
+    }
+  }
 
   async function refresh() {
     setLoading(true);
@@ -318,6 +345,7 @@ export function HealerPanel({
     try {
       const next = await testRunnerRun(profile.id);
       setResult(next);
+      void refreshAudit();
       setRepairDraft(null);
       setRepairNotice("");
       const evidence = `${next.profile.command}\n${next.stdout}\n${next.stderr}`;
@@ -432,6 +460,7 @@ ${document.content}
 
   useEffect(() => {
     refresh();
+    void refreshAudit();
   }, []);
 
   const badge = runningId
@@ -450,7 +479,7 @@ ${document.content}
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Native Test Runner"
-        subtitle="Phase 6C · native tests plus reviewed draft application"
+        subtitle="Phase 6D · audited tests plus reviewed draft application"
         badge={badge}
         badgeOk={result?.status === "passed" || (!result && !error && !loading)}
       />
@@ -515,6 +544,40 @@ ${document.content}
                 </button>
               );
             })}
+
+            <div className="mt-4 rounded-xl border border-white/10 bg-black/15 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Agent audit</div>
+                <button
+                  onClick={() => void refreshAudit()}
+                  disabled={auditLoading}
+                  className="rounded-md border border-white/10 p-1 text-zinc-500 hover:bg-white/5 hover:text-zinc-300 disabled:opacity-40"
+                  title="Refresh audit log"
+                >
+                  {auditLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                </button>
+              </div>
+              <p className="mt-1 text-[10.5px] leading-relaxed text-zinc-600">
+                Native memory log for test runs and reviewed-draft writes. Outputs and file contents are not stored.
+              </p>
+              {auditError && <div className="mt-2 text-[10.5px] text-rose-300">{auditError}</div>}
+              {!auditError && auditEvents.length === 0 && (
+                <div className="mt-3 text-[11px] text-zinc-600">No audited actions yet.</div>
+              )}
+              <div className="mt-2 space-y-2">
+                {auditEvents.map((event) => (
+                  <div key={event.id} className="rounded-lg border border-white/5 bg-white/[0.02] p-2">
+                    <div className="flex items-center gap-2 text-[10.5px]">
+                      <Clock3 className="h-3 w-3 text-zinc-500" />
+                      <span className="font-mono text-zinc-500">{auditTime(event.timestampMs)}</span>
+                      <span className={`ml-auto font-semibold ${auditTone(event.outcome)}`}>{event.outcome}</span>
+                    </div>
+                    <div className="mt-1 truncate font-mono text-[10.5px] text-zinc-300">{event.target}</div>
+                    <div className="mt-0.5 line-clamp-2 text-[10.5px] leading-relaxed text-zinc-600">{event.summary}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
 
           {snapshot && (

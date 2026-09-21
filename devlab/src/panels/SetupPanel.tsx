@@ -97,13 +97,13 @@ const PHASES: readonly MigrationPhase[] = [
     n: 5,
     title: "Docker, databases and native HTTP",
     status: "complete",
-    detail: "Docker, SQLite, PostgreSQL and native HTTP are complete. Phase 6 now has bounded test execution, reviewed one-file repair drafts and explicit reviewed-draft application; broader agent patch tools are next.",
+    detail: "Docker, SQLite, PostgreSQL and native HTTP are complete. Phase 6 now has bounded test execution, reviewed one-file repair drafts, explicit reviewed-draft application and a native audit trail; broader agent patch tools are next.",
   },
   {
     n: 6,
     title: "Agent tool execution",
     status: "active",
-    detail: "Bounded native test execution, reviewed in-memory repair drafts and explicit draft application are implemented first. Broader permission-gated agent patch tools, audit logs and Ollama support follow.",
+    detail: "Bounded native test execution, reviewed in-memory repair drafts, explicit draft application and native audit metadata are implemented first. Broader permission-gated agent patch tools and Ollama support follow.",
   },
   {
     n: 7,
@@ -238,7 +238,7 @@ export function SetupPanel() {
                   "SQLite files must resolve inside the selected workspace; writes are disabled by default and confirmed one statement at a time.",
                   "PostgreSQL TLS is explicit; schema uses fixed SQL; every statement runs as one bounded parameter-free statement, classified by the server in a read-only transaction before any confirmed mutation.",
                   "Remote pages are never loaded into a privileged application context.",
-                  "Every agent tool action will have timeout, cancellation and audit metadata.",
+                  "Agent test runs and reviewed-draft writes now have native audit metadata; broader agent tools will add timeout and cancellation metadata before enablement.",
                 ].map((rule) => (
                   <li key={rule} className="flex gap-2.5">
                     <Shield className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" /> {rule}

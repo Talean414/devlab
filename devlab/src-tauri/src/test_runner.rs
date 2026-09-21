@@ -10,7 +10,10 @@ use std::{
 use tauri::{AppHandle, Manager};
 use wait_timeout::ChildExt;
 
-use crate::workspace::{CommandError, WorkspaceService};
+use crate::{
+    audit::AgentAuditService,
+    workspace::{CommandError, WorkspaceService},
+};
 
 const TEST_RUN_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_TEST_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
@@ -584,7 +587,35 @@ pub async fn test_runner_run(
 ) -> Result<TestRunResult, CommandError> {
     blocking(move || {
         let root = app.state::<WorkspaceService>().root_path()?;
-        run(&root, &profile_id)
+        let result = run(&root, &profile_id);
+        let audit = app.state::<AgentAuditService>();
+        match &result {
+            Ok(run) => audit.record(
+                Some(&root),
+                "test-run",
+                "run",
+                run.profile.id.clone(),
+                run.status,
+                format!(
+                    "{} completed with status {} in {} ms (exit code: {}).",
+                    run.profile.label,
+                    run.status,
+                    run.elapsed_ms,
+                    run.exit_code
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                ),
+            ),
+            Err(error) => audit.record(
+                Some(&root),
+                "test-run",
+                "run",
+                profile_id.clone(),
+                "error",
+                format!("Test profile failed before completion: {}", error.message),
+            ),
+        }
+        result
     })
     .await
 }

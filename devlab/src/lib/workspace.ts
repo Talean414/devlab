@@ -92,6 +92,14 @@ export function writeWorkspaceFile(
   return command("workspace_write", { relativePath, content, expectedRevision });
 }
 
+export function applyReviewedDraftToWorkspace(
+  relativePath: string,
+  content: string,
+  expectedRevision: string | null,
+): Promise<WorkspaceDocument> {
+  return command("workspace_apply_reviewed_draft", { relativePath, content, expectedRevision });
+}
+
 export function createWorkspaceFile(relativePath: string): Promise<WorkspaceDocument> {
   return command("workspace_create_file", { relativePath });
 }

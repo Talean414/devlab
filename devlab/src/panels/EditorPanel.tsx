@@ -4,6 +4,7 @@ import { PanelHeader } from "./AgentPanel";
 import { loadSettings, getTheme } from "../lib/settings";
 import type { VFile } from "../types";
 import {
+  applyReviewedDraftToWorkspace,
   closeWorkspace,
   createWorkspaceDirectory,
   createWorkspaceFile,
@@ -366,7 +367,7 @@ export function EditorPanel({
       let saved: WorkspaceDocument;
       let action = "Created";
       try {
-        saved = await writeWorkspaceFile(path, draft.content, null);
+        saved = await applyReviewedDraftToWorkspace(path, draft.content, null);
       } catch (commandError) {
         if (!(commandError instanceof WorkspaceCommandError) || commandError.code !== "revision_required") {
           throw commandError;
@@ -377,7 +378,7 @@ export function EditorPanel({
           return;
         }
         ignoredEvents.current.set(path, Date.now() + 2_000);
-        saved = await writeWorkspaceFile(path, draft.content, existing.revision);
+        saved = await applyReviewedDraftToWorkspace(path, draft.content, existing.revision);
         action = "Updated";
       }
 
@@ -390,7 +391,7 @@ export function EditorPanel({
       setCurrentDirectory(parentPath(path));
       setDraftReviewOpen(false);
       setRefreshVersion((version) => version + 1);
-      setNotice(`${action} ${path} from a reviewed draft.`);
+      setNotice(`${action} ${path} from a reviewed draft. This action was recorded in the native agent audit log.`);
     } catch (commandError) {
       ignoredEvents.current.delete(path);
       setError(errorMessage(commandError));
