@@ -168,8 +168,39 @@ function extractFencedFile(raw: string) {
 
 function extractTaggedRepair(raw: string) {
   const rationale = raw.match(/<devlab-rationale>([\s\S]*?)<\/devlab-rationale>/i)?.[1]?.trim() ?? "";
-  const content = raw.match(/<devlab-patched-file>([\s\S]*?)<\/devlab-patched-file>/i)?.[1] ?? "";
-  return content ? { rationale, content } : null;
+  const open = raw.match(/<devlab-patched-file>/i);
+  if (!open || open.index === undefined) return null;
+  const afterOpen = raw.slice(open.index + open[0].length);
+  const close = afterOpen.match(/<\/devlab-patched-file>/i);
+  const content = close?.index === undefined ? afterOpen : afterOpen.slice(0, close.index);
+  return content.trim() ? { rationale, content } : null;
+}
+
+function sourceStartPattern(path: string) {
+  const extension = fileExtension(path);
+  if (extension === "rs") return /(?:^|\n)(#!\[|\/\/|\/\*|use\s|mod\s|pub\s|fn\s|const\s|static\s|type\s|struct\s|enum\s|trait\s|impl\s)/;
+  if (["ts", "tsx", "js", "jsx"].includes(extension)) return /(?:^|\n)(import\s|export\s|const\s|let\s|var\s|async\s+function\s|function\s|class\s|interface\s|type\s|enum\s|\/\/|\/\*)/;
+  if (extension === "py") return /(?:^|\n)(from\s|import\s|def\s|class\s|#)/;
+  return null;
+}
+
+function extractRawFileCandidate(raw: string, path: string) {
+  const cleaned = stripJsonFence(raw)
+    .replace(/<\/?devlab-(?:rationale|patched-file)>/gi, "")
+    .trim();
+  if (!cleaned) return "";
+
+  const pattern = sourceStartPattern(path);
+  if (!pattern) return cleaned;
+  if (pattern.test(cleaned)) {
+    const firstLine = cleaned.split(/\r?\n/, 1)[0]?.trim() ?? "";
+    if (sourceStartPattern(path)?.test(firstLine)) return cleaned;
+  }
+
+  const match = pattern.exec(cleaned);
+  if (!match || match.index === undefined || match.index > 1_200) return "";
+  const start = cleaned[match.index] === "\n" ? match.index + 1 : match.index;
+  return cleaned.slice(start).trim();
 }
 
 function parseRepairDraft(raw: string, path: string, originalContent: string): RepairDraft {
@@ -210,7 +241,18 @@ function parseRepairDraft(raw: string, path: string, originalContent: string): R
     };
   }
 
-  throw new Error("Model response did not include valid JSON, DevLab repair tags, or a fenced patched file.");
+  const rawFile = extractRawFileCandidate(raw, path);
+  if (rawFile) {
+    return {
+      path,
+      content: validateRepairContent(rawFile, originalContent, path),
+      rationale: "Repair draft parsed from raw complete-file output.",
+    };
+  }
+
+  const preview = excerpt(raw.trim(), 600) || "(empty response)";
+  throw new Error(`Model response did not include valid JSON, DevLab repair tags, a fenced patched file, or raw complete-file source. Response preview:
+${preview}`);
 }
 
 function statusStyle(status?: TestRunResult["status"]) {
@@ -337,14 +379,12 @@ Rules:
 - Preserve public APIs unless the test output requires a change.
 - Do not return only the changed function; DevLab will reject drafts that omit existing imports, public structs, exported functions, or Tauri commands.
 - If the evidence is insufficient, make the smallest defensive fix and explain uncertainty in rationale.
-- Prefer this exact response format so DevLab can parse source code safely:
+- Return exactly these XML-like tags. Do not wrap the patched file in Markdown fences inside the tags:
 <devlab-rationale>
 short explanation of the root cause and fix
 </devlab-rationale>
 <devlab-patched-file>
-\`\`\`text
-complete patched file contents
-\`\`\`
+complete patched file contents only
 </devlab-patched-file>
 
 TEST PROFILE: ${result.profile.label}
@@ -370,7 +410,7 @@ ${document.content}
 \`\`\``;
 
       let raw = "";
-      for await (const chunk of streamChat([{ role: "user", text: prompt }])) raw += chunk;
+      for await (const chunk of streamChat([{ role: "user", text: prompt }], { maxOutputTokens: 16_384, temperature: 0.2 })) raw += chunk;
       const draft = parseRepairDraft(raw, targetPath, document.content);
       setRepairDraft(draft);
       setRepairNotice("Repair draft generated in memory. Review it before sending it to the editor draft flow.");

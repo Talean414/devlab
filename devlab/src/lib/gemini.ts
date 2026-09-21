@@ -216,8 +216,14 @@ function pacificOffsetAt(date: Date): number {
 const SYSTEM_PROMPT = `You are DevLab Agent, an expert senior software engineer embedded in a developer's control-plane IDE.
 Be concise, practical and code-first. When asked to scaffold or configure things, output copy-pasteable shell commands or file contents in fenced code blocks. Prefer modern, free, open-source tooling.`;
 
+interface StreamChatOptions {
+  maxOutputTokens?: number;
+  temperature?: number;
+}
+
 export async function* streamChat(
   history: GenTurn[],
+  options: StreamChatOptions = {},
 ): AsyncGenerator<string, void, unknown> {
   const settings = loadSettings();
   const customPrompt = settings.systemPrompt.trim();
@@ -230,8 +236,8 @@ export async function* streamChat(
       parts: [{ text: turn.text }],
     })),
     generationConfig: {
-      temperature: clamp(settings.temperature, 0, 2),
-      maxOutputTokens: Math.round(clamp(settings.maxTokens, 256, 16_384)),
+      temperature: clamp(options.temperature ?? settings.temperature, 0, 2),
+      maxOutputTokens: Math.round(clamp(options.maxOutputTokens ?? settings.maxTokens, 256, 16_384)),
     },
   };
 
