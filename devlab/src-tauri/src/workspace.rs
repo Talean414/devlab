@@ -453,7 +453,13 @@ pub fn workspace_write(
     expected_revision: Option<String>,
     service: State<'_, WorkspaceService>,
 ) -> Result<WorkspaceDocument, CommandError> {
-    let (document, _) = write_workspace_document(relative_path, content, expected_revision, &service)?;
+    let (document, _) = write_workspace_document(
+        relative_path,
+        content,
+        expected_revision,
+        &service,
+        false,
+    )?;
     Ok(document)
 }
 
@@ -466,7 +472,13 @@ pub fn workspace_apply_reviewed_draft(
     service: State<'_, WorkspaceService>,
 ) -> Result<WorkspaceDocument, CommandError> {
     let root = service.root_path()?;
-    let (document, action) = write_workspace_document(relative_path, content, expected_revision, &service)?;
+    let (document, action) = write_workspace_document(
+        relative_path,
+        content,
+        expected_revision,
+        &service,
+        true,
+    )?;
     app.state::<AgentAuditService>().record(
         Some(&root),
         "reviewed-draft",
@@ -486,6 +498,7 @@ fn write_workspace_document(
     content: String,
     expected_revision: Option<String>,
     service: &WorkspaceService,
+    create_missing_parents: bool,
 ) -> Result<(WorkspaceDocument, &'static str), CommandError> {
     let relative_path = normalize_relative_path(&relative_path, false)?;
     if content.len() as u64 > MAX_TEXT_FILE_BYTES {
@@ -499,7 +512,11 @@ fn write_workspace_document(
     }
 
     let root = service.root()?;
-    let unresolved = root.resolve_new(&relative_path)?;
+    let unresolved = if create_missing_parents {
+        resolve_new_with_missing_parents(&root, &relative_path)?
+    } else {
+        root.resolve_new(&relative_path)?
+    };
     let action;
     if workspace_entry_exists(&unresolved)? {
         action = "updated";
@@ -559,6 +576,68 @@ fn write_workspace_document(
 
     let document = read_workspace_document(relative_path, service)?;
     Ok((document, action))
+}
+
+
+fn resolve_new_with_missing_parents(
+    root: &WorkspaceRoot,
+    relative_path: &str,
+) -> Result<PathBuf, CommandError> {
+    let relative = validate_relative_path(relative_path, false)?;
+    let name = relative.file_name().ok_or_else(|| {
+        CommandError::new("invalid_path", "A file or directory name is required.")
+    })?;
+    let relative_parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let parent = ensure_workspace_directories(root, relative_parent)?;
+    let destination = parent.join(name);
+    root.ensure_scoped(&destination)?;
+    Ok(destination)
+}
+
+fn ensure_workspace_directories(
+    root: &WorkspaceRoot,
+    relative_parent: &Path,
+) -> Result<PathBuf, CommandError> {
+    let mut current = root.path().to_path_buf();
+    for component in relative_parent.components() {
+        let Component::Normal(part) = component else {
+            return Err(CommandError::new(
+                "invalid_path",
+                "Only relative workspace paths can be created by reviewed drafts.",
+            ));
+        };
+        let next = current.join(part);
+        match fs::symlink_metadata(&next) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(CommandError::new(
+                        "symlink_not_allowed",
+                        "Symbolic links cannot be used as reviewed-draft parent directories.",
+                    ));
+                }
+                if !metadata.is_dir() {
+                    return Err(CommandError::new(
+                        "not_a_directory",
+                        "A reviewed-draft parent path exists but is not a directory.",
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&next)
+                    .map_err(|error| CommandError::io("create reviewed-draft parent directory", error))?;
+            }
+            Err(error) => {
+                return Err(CommandError::io(
+                    "inspect reviewed-draft parent directory",
+                    error,
+                ));
+            }
+        }
+        current = fs::canonicalize(&next)
+            .map_err(|error| CommandError::io("resolve reviewed-draft parent directory", error))?;
+        root.ensure_scoped(&current)?;
+    }
+    Ok(current)
 }
 
 #[tauri::command]
@@ -954,6 +1033,47 @@ mod tests {
         fs::write(&outside_file, b"SQLite format 3\0").expect("outside file should exist");
         assert!(service.authorize_existing_file(&outside_file).is_err());
         assert!(service.authorize_existing_file(&workspace.0).is_err());
+    }
+
+    #[test]
+    fn reviewed_draft_write_creates_missing_parent_directories() {
+        let workspace = TestWorkspace::new();
+        let service = WorkspaceService {
+            inner: Mutex::new(WorkspaceInner {
+                root: Some(WorkspaceRoot::open(&workspace.0).expect("workspace should open")),
+                watcher: None,
+            }),
+        };
+        let (document, action) = write_workspace_document(
+            "src/components/App.tsx".to_string(),
+            "export function App() { return null; }".to_string(),
+            None,
+            &service,
+            true,
+        )
+        .expect("reviewed draft should create missing parents");
+        assert_eq!(action, "created");
+        assert_eq!(document.path, "src/components/App.tsx");
+        assert!(workspace.0.join("src/components/App.tsx").is_file());
+    }
+
+    #[test]
+    fn generic_workspace_write_still_requires_existing_parent() {
+        let workspace = TestWorkspace::new();
+        let service = WorkspaceService {
+            inner: Mutex::new(WorkspaceInner {
+                root: Some(WorkspaceRoot::open(&workspace.0).expect("workspace should open")),
+                watcher: None,
+            }),
+        };
+        assert!(write_workspace_document(
+            "src/main.ts".to_string(),
+            "console.log('hi');".to_string(),
+            None,
+            &service,
+            false,
+        )
+        .is_err());
     }
 
     #[test]
