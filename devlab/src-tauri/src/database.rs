@@ -335,7 +335,102 @@ fn validate_sql(sql: &str) -> Result<(), CommandError> {
             "SQL statements cannot contain null bytes.",
         ));
     }
+    if has_additional_sql_statement(sql) {
+        return Err(CommandError::new(
+            "database_multiple_statements",
+            "Enter only one SQL statement per query.",
+        ));
+    }
     Ok(())
+}
+
+fn has_additional_sql_statement(sql: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => index = skip_sql_quoted(bytes, index, b'\''),
+            b'"' => index = skip_sql_quoted(bytes, index, b'"'),
+            b'`' => index = skip_sql_quoted(bytes, index, b'`'),
+            b'[' => index = skip_sql_bracketed_identifier(bytes, index),
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index = skip_sql_line_comment(bytes, index + 2)
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index = skip_sql_block_comment(bytes, index + 2)
+            }
+            b';' => {
+                if trailing_sql_starts_statement(&sql[index + 1..]) {
+                    return true;
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    false
+}
+
+fn trailing_sql_starts_statement(sql: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b' ' | b'\n' | b'\r' | b'\t' | 0x0c | b';' => index += 1,
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index = skip_sql_line_comment(bytes, index + 2)
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index = skip_sql_block_comment(bytes, index + 2)
+            }
+            _ => return true,
+        }
+    }
+    false
+}
+
+fn skip_sql_quoted(bytes: &[u8], mut index: usize, quote: u8) -> usize {
+    index += 1;
+    while index < bytes.len() {
+        if bytes[index] == quote {
+            if bytes.get(index + 1) == Some(&quote) {
+                index += 2;
+            } else {
+                return index + 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    index
+}
+
+fn skip_sql_bracketed_identifier(bytes: &[u8], mut index: usize) -> usize {
+    index += 1;
+    while index < bytes.len() {
+        if bytes[index] == b']' {
+            return index + 1;
+        }
+        index += 1;
+    }
+    index
+}
+
+fn skip_sql_line_comment(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() && bytes[index] != b'\n' {
+        index += 1;
+    }
+    index
+}
+
+fn skip_sql_block_comment(bytes: &[u8], mut index: usize) -> usize {
+    while index + 1 < bytes.len() {
+        if bytes[index] == b'*' && bytes[index + 1] == b'/' {
+            return index + 2;
+        }
+        index += 1;
+    }
+    bytes.len()
 }
 
 fn open_sqlite(path: &Path, allow_writes: bool) -> Result<(Connection, String), CommandError> {
@@ -917,8 +1012,24 @@ mod tests {
         assert!(validate_connection_id("sqlite-one").is_err());
         assert!(validate_connection_id("git-1").is_err());
         assert!(validate_sql("SELECT 1").is_ok());
+        assert!(validate_sql("SELECT 1;").is_ok());
+        assert!(validate_sql("SELECT '; still one statement';").is_ok());
+        assert!(validate_sql("SELECT 1 /* ; comment */;").is_ok());
+        assert!(validate_sql("SELECT 1; -- trailing comment").is_ok());
         assert!(validate_sql("  ").is_err());
         assert!(validate_sql("SELECT '\0'").is_err());
+        assert_eq!(
+            validate_sql("SELECT 1; SELECT 2")
+                .expect_err("second statement must be rejected")
+                .code,
+            "database_multiple_statements",
+        );
+        assert_eq!(
+            validate_sql("SELECT 1; /* comment */ SELECT 2")
+                .expect_err("second statement after comment must be rejected")
+                .code,
+            "database_multiple_statements",
+        );
     }
 
     #[test]
