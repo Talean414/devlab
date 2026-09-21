@@ -9,6 +9,7 @@ import {
   getDatabaseConnections,
   getDatabaseSchema,
   getPostgresConnections,
+  getPostgresSchema,
   runDatabaseQuery,
   selectSqliteDatabase,
   setDatabaseWriteAccess,
@@ -19,6 +20,8 @@ import {
   type DatabaseSchema,
   type PostgresConnectionInfo,
   type PostgresConnectRequest,
+  type PostgresObject,
+  type PostgresSchema,
 } from "../lib/database";
 import {
   AlertCircle,
@@ -64,11 +67,14 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
   const [connections, setConnections] = useState<DatabaseConnectionInfo[]>([]);
   const [postgresConnections, setPostgresConnections] = useState<PostgresConnectionInfo[]>([]);
   const [activeId, setActiveId] = useState("");
+  const [activePostgresId, setActivePostgresId] = useState("");
   const [schema, setSchema] = useState<DatabaseSchema | null>(null);
+  const [postgresSchema, setPostgresSchema] = useState<PostgresSchema | null>(null);
   const [sql, setSql] = useState(DEFAULT_SQL);
   const [result, setResult] = useState<DatabaseQueryResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [schemaLoading, setSchemaLoading] = useState(false);
+  const [postgresSchemaLoading, setPostgresSchemaLoading] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -80,6 +86,7 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
   const [postgresRequest, setPostgresRequest] = useState<PostgresConnectRequest>(DEFAULT_POSTGRES_REQUEST);
 
   const active = connections.find((connection) => connection.id === activeId) ?? null;
+  const activePostgres = postgresConnections.find((connection) => connection.id === activePostgresId) ?? null;
 
   const refreshConnections = useCallback(async () => {
     setLoading(true);
@@ -95,13 +102,21 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
       setActiveId((current) => (
         next.some((connection) => connection.id === current)
           ? current
-          : next[0]?.id ?? ""
+          : nextPostgres.length > 0 ? "" : next[0]?.id ?? ""
+      ));
+      setActivePostgresId((current) => (
+        nextPostgres.some((connection) => connection.id === current)
+          ? current
+          : next.length > 0 ? "" : nextPostgres[0]?.id ?? ""
       ));
     } catch (caught) {
       if (caught instanceof DatabaseCommandError && caught.code === "workspace_not_selected") {
         setConnections([]);
         setPostgresConnections([]);
         setActiveId("");
+        setActivePostgresId("");
+        setSchema(null);
+        setPostgresSchema(null);
         setNeedsWorkspace(true);
       } else {
         setError(errorMessage(caught));
@@ -132,6 +147,27 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
     }
   }, []);
 
+  const loadPostgresSchema = useCallback(async (id: string) => {
+    if (!id) {
+      setPostgresSchema(null);
+      return;
+    }
+    setPostgresSchemaLoading(true);
+    setError("");
+    try {
+      const next = await getPostgresSchema(id);
+      setPostgresSchema(next);
+      setPostgresConnections((current) => current.map((connection) => (
+        connection.id === next.connection.id ? next.connection : connection
+      )));
+    } catch (caught) {
+      setPostgresSchema(null);
+      setError(errorMessage(caught));
+    } finally {
+      setPostgresSchemaLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void refreshConnections();
   }, [refreshConnections]);
@@ -140,6 +176,10 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
     setResult(null);
     void loadSchema(activeId);
   }, [activeId, loadSchema]);
+
+  useEffect(() => {
+    void loadPostgresSchema(activePostgresId);
+  }, [activePostgresId, loadPostgresSchema]);
 
   const filteredObjects = useMemo(() => {
     const query = filter.trim().toLowerCase();
@@ -150,6 +190,16 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
     ));
   }, [filter, schema]);
 
+  const filteredPostgresObjects = useMemo(() => {
+    const query = filter.trim().toLowerCase();
+    if (!query) return postgresSchema?.objects ?? [];
+    return (postgresSchema?.objects ?? []).filter((object) => (
+      object.schema.toLowerCase().includes(query)
+      || object.name.toLowerCase().includes(query)
+      || object.columns.some((column) => column.name.toLowerCase().includes(query))
+    ));
+  }, [filter, postgresSchema]);
+
   async function chooseSqlite() {
     setBusy("connect");
     setError("");
@@ -158,6 +208,7 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
       const connection = await selectSqliteDatabase(newAllowWrites);
       if (!connection) return;
       setConnections((current) => [...current, connection]);
+      setActivePostgresId("");
       setActiveId(connection.id);
       setNeedsWorkspace(false);
       setConnectOpen(false);
@@ -181,6 +232,8 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
     try {
       const connection = await connectPostgres(postgresRequest);
       setPostgresConnections((current) => [...current, connection]);
+      setActiveId("");
+      setActivePostgresId(connection.id);
       setPostgresRequest((current) => ({ ...current, password: "" }));
       setPostgresConnectOpen(false);
       setNeedsWorkspace(false);
@@ -204,7 +257,13 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
     setError("");
     try {
       await disconnectPostgres(connection.id);
-      setPostgresConnections((current) => current.filter((item) => item.id !== connection.id));
+      const remaining = postgresConnections.filter((item) => item.id !== connection.id);
+      setPostgresConnections(remaining);
+      if (activePostgresId === connection.id) {
+        setActivePostgresId(remaining[0]?.id ?? "");
+        if (remaining.length === 0) setActiveId(connections[0]?.id ?? "");
+        setPostgresSchema(null);
+      }
       setNotice(`${connection.name} disconnected. Any securely stored password was retained.`);
     } catch (caught) {
       setError(errorMessage(caught));
@@ -304,6 +363,7 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
       const remaining = connections.filter((connection) => connection.id !== active.id);
       setConnections(remaining);
       setActiveId(remaining[0]?.id ?? "");
+      if (remaining.length === 0) setActivePostgresId(postgresConnections[0]?.id ?? "");
       setSchema(null);
       setResult(null);
       setNotice(`${active.name} disconnected.`);
@@ -321,15 +381,19 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
 
   const subtitle = active
     ? `SQLite ${active.sqliteVersion} · ${active.path} · ${active.allowWrites ? "writes enabled" : "read-only"}`
-    : "Workspace-scoped SQLite · native PostgreSQL connectivity";
+    : activePostgres
+      ? `PostgreSQL ${activePostgres.serverVersion} · ${activePostgres.username}@${activePostgres.host}:${activePostgres.port}/${activePostgres.database}`
+      : "Workspace-scoped SQLite · bounded PostgreSQL schema inspection";
 
   return (
     <div className="relative flex h-full flex-col">
       <PanelHeader
         title="Native Database Client"
         subtitle={subtitle}
-        badge={active ? (active.allowWrites ? "Writes enabled" : "Read only") : "SQLite + PostgreSQL"}
-        badgeOk={!!active && !active.allowWrites}
+        badge={active
+          ? (active.allowWrites ? "Writes enabled" : "Read only")
+          : activePostgres ? `TLS ${activePostgres.tlsMode}` : "SQLite + PostgreSQL"}
+        badgeOk={active ? !active.allowWrites : activePostgres?.tlsMode === "verify-full"}
       />
 
       {error && <Banner tone="error" text={error} onClose={() => setError("")} />}
@@ -340,14 +404,14 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
           <div className="grid grid-cols-2 gap-2 border-b border-white/5 p-3">
             <button
               onClick={() => { setError(""); setConnectOpen(true); }}
-              disabled={!!busy || schemaLoading}
+              disabled={!!busy || schemaLoading || postgresSchemaLoading}
               className="flex items-center justify-center gap-1.5 rounded-lg bg-cyan-500/15 px-2 py-2 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/25 disabled:opacity-40"
             >
               <HardDrive className="h-3.5 w-3.5" /> SQLite
             </button>
             <button
               onClick={() => { setError(""); setPostgresConnectOpen(true); }}
-              disabled={!!busy || schemaLoading}
+              disabled={!!busy || schemaLoading || postgresSchemaLoading}
               className="flex items-center justify-center gap-1.5 rounded-lg bg-blue-500/15 px-2 py-2 text-[11px] font-semibold text-blue-200 hover:bg-blue-500/25 disabled:opacity-40"
             >
               <Server className="h-3.5 w-3.5" /> PostgreSQL
@@ -368,7 +432,8 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
             ) : connections.map((connection) => (
               <button
                 key={connection.id}
-                onClick={() => setActiveId(connection.id)}
+                onClick={() => { setActivePostgresId(""); setActiveId(connection.id); }}
+                disabled={schemaLoading || postgresSchemaLoading}
                 className={`mb-1 flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition ${
                   activeId === connection.id
                     ? "border-violet-500/30 bg-violet-500/10"
@@ -390,20 +455,24 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
               <div className="mt-3 border-t border-white/5 pt-3">
                 <div className="mb-2 px-1 text-[9.5px] font-semibold uppercase tracking-wider text-blue-400/60">PostgreSQL connectivity</div>
                 {postgresConnections.map((connection) => (
-                  <div key={connection.id} className="mb-2 rounded-lg border border-blue-500/15 bg-blue-500/[0.04] p-2.5">
-                    <div className="flex items-start gap-2">
+                  <div key={connection.id} className={`mb-2 rounded-lg border p-2.5 ${activePostgresId === connection.id ? "border-blue-500/35 bg-blue-500/10" : "border-blue-500/15 bg-blue-500/[0.04]"}`}>
+                    <button
+                      onClick={() => { setActiveId(""); setActivePostgresId(connection.id); }}
+                      disabled={schemaLoading || postgresSchemaLoading}
+                      className="flex w-full items-start gap-2 text-left disabled:opacity-40"
+                    >
                       <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-blue-500/10 text-blue-300"><Server className="h-3.5 w-3.5" /></span>
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-[11.5px] font-medium text-zinc-200">{connection.name}</span>
                         <span className="block truncate font-mono text-[9.5px] text-zinc-600">{connection.username}@{connection.host}:{connection.port}</span>
                         <span className="mt-1 block text-[9px] text-zinc-700">PostgreSQL {connection.serverVersion} · TLS {connection.tlsMode}</span>
                       </span>
-                    </div>
+                    </button>
                     <div className="mt-2 flex items-center justify-end gap-1.5">
                       {connection.credentialStored && (
                         <button
                           onClick={() => void forgetPostgresServerPassword(connection)}
-                          disabled={!!busy}
+                          disabled={!!busy || postgresSchemaLoading}
                           title="Forget stored password"
                           className="rounded border border-white/10 px-2 py-1 text-[9.5px] text-zinc-500 hover:border-amber-500/20 hover:text-amber-300 disabled:opacity-40"
                         >
@@ -412,7 +481,7 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
                       )}
                       <button
                         onClick={() => void disconnectPostgresServer(connection)}
-                        disabled={!!busy}
+                        disabled={!!busy || postgresSchemaLoading}
                         className="rounded border border-white/10 px-2 py-1 text-[9.5px] text-zinc-500 hover:border-rose-500/20 hover:text-rose-300 disabled:opacity-40"
                       >
                         {busy === `postgres-disconnect-${connection.id}` ? "Disconnecting…" : "Disconnect"}
@@ -420,7 +489,7 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
                     </div>
                   </div>
                 ))}
-                <div className="px-1 text-[9px] leading-relaxed text-zinc-700">Schema and query execution remain disabled until the next bounded PostgreSQL increment.</div>
+                <div className="px-1 text-[9px] leading-relaxed text-zinc-700">Schema inspection is bounded and read-only. SQL execution remains disabled until its separate checkpoint.</div>
               </div>
             )}
           </div>
@@ -438,10 +507,14 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
               </div>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
-              {schemaLoading ? (
-                <div className="flex items-center gap-2 px-3 py-4 text-[11px] text-zinc-600"><Loader2 className="h-3 w-3 animate-spin" /> Reading real schema…</div>
-              ) : !active ? (
+              {schemaLoading || postgresSchemaLoading ? (
+                <div className="flex items-center gap-2 px-3 py-4 text-[11px] text-zinc-600"><Loader2 className="h-3 w-3 animate-spin" /> Reading bounded native schema…</div>
+              ) : !active && !activePostgres ? (
                 <div className="px-3 py-5 text-center text-[11px] text-zinc-700">Open a connection to inspect schema.</div>
+              ) : activePostgres ? (
+                filteredPostgresObjects.length === 0
+                  ? <div className="px-3 py-5 text-center text-[11px] text-zinc-700">No matching user tables or views.</div>
+                  : filteredPostgresObjects.map((object) => <PostgresSchemaObjectView key={`${object.schema}-${object.kind}-${object.name}`} object={object} />)
               ) : filteredObjects.length === 0 ? (
                 <div className="px-3 py-5 text-center text-[11px] text-zinc-700">No matching user tables or views.</div>
               ) : filteredObjects.map((object) => (
@@ -469,7 +542,14 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
         </aside>
 
         <main className="flex min-w-0 flex-1 flex-col">
-          {!active ? (
+          {activePostgres ? (
+            <PostgresSchemaSummary
+              connection={activePostgres}
+              schema={postgresSchema}
+              loading={postgresSchemaLoading}
+              onRefresh={() => void loadPostgresSchema(activePostgres.id)}
+            />
+          ) : !active ? (
             <EmptyDatabaseState needsWorkspace={needsWorkspace} onOpenWorkspace={onOpenWorkspace} onConnect={() => setConnectOpen(true)} />
           ) : (
             <>
@@ -561,6 +641,93 @@ export function DatabasePanel({ onOpenWorkspace }: { onOpenWorkspace: () => void
           }}
         />
       )}
+    </div>
+  );
+}
+
+function PostgresSchemaObjectView({ object }: { object: PostgresObject }) {
+  return (
+    <details className="group mb-1 rounded-lg open:bg-white/[0.025]">
+      <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-2.5 py-2 text-[11.5px] text-zinc-300 hover:bg-white/5">
+        <ChevronRight className="h-3 w-3 text-zinc-600 transition group-open:rotate-90" />
+        <Table2 className={`h-3.5 w-3.5 ${object.kind === "view" ? "text-cyan-400" : "text-blue-400"}`} />
+        <span className="min-w-0 flex-1 truncate font-mono"><span className="text-zinc-600">{object.schema}.</span>{object.name}</span>
+        <span className="text-[9px] uppercase text-zinc-700">{object.kind}</span>
+      </summary>
+      <div className="pb-2 pl-8 pr-2">
+        {object.columns.length === 0 && <div className="py-1 text-[10px] text-zinc-700">No user columns.</div>}
+        {object.columns.map((column) => (
+          <div key={`${object.schema}-${object.name}-${column.position}-${column.name}`} className="flex items-center gap-2 py-1 text-[10.5px]">
+            <span className="min-w-0 flex-1 truncate font-mono text-zinc-500">{column.name}</span>
+            <span className="max-w-28 shrink-0 truncate font-mono text-[9.5px] text-zinc-700" title={column.dataType}>{column.dataType || "unknown"}</span>
+            {column.primaryKey && <KeyRound className="h-2.5 w-2.5 shrink-0 text-amber-400" />}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function PostgresSchemaSummary({
+  connection,
+  schema,
+  loading,
+  onRefresh,
+}: {
+  connection: PostgresConnectionInfo;
+  schema: PostgresSchema | null;
+  loading: boolean;
+  onRefresh: () => void;
+}) {
+  const objects = schema?.objects ?? [];
+  const tables = objects.filter((object) => object.kind === "table").length;
+  const views = objects.filter((object) => object.kind === "view").length;
+  const columns = objects.reduce((total, object) => total + object.columns.length, 0);
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto p-6">
+      <div className="mx-auto max-w-4xl">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2 text-lg font-semibold text-white"><Server className="h-5 w-5 text-blue-300" /> {connection.database}</div>
+            <div className="mt-1 font-mono text-[11px] text-zinc-600">{connection.username}@{connection.host}:{connection.port} · PostgreSQL {connection.serverVersion}</div>
+          </div>
+          <button onClick={onRefresh} disabled={loading} className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-[11px] text-zinc-400 hover:bg-white/5 hover:text-white disabled:opacity-40">
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh schema
+          </button>
+        </div>
+
+        <div className="mt-6 grid gap-3 sm:grid-cols-4">
+          {[["Objects", objects.length], ["Tables", tables], ["Views", views], ["Columns", columns]].map(([label, value]) => (
+            <div key={label} className="rounded-xl border border-white/10 bg-white/[0.025] p-4">
+              <div className="text-2xl font-semibold text-zinc-100">{value}</div>
+              <div className="mt-1 text-[10px] uppercase tracking-wider text-zinc-600">{label}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-5 grid gap-4 md:grid-cols-2">
+          <div className="rounded-xl border border-blue-500/15 bg-blue-500/[0.04] p-4">
+            <div className="flex items-center gap-2 text-[12px] font-semibold text-blue-200"><Database className="h-4 w-4" /> Fixed native schema inspection</div>
+            <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">DevLab reads user tables, materialized/regular views, foreign tables, columns, types, defaults and primary-key flags through one fixed Rust-owned catalog query. Renderer SQL is not accepted by this command.</p>
+          </div>
+          <div className={`rounded-xl border p-4 ${connection.tlsMode === "verify-full" ? "border-emerald-500/15 bg-emerald-500/[0.04]" : "border-amber-500/20 bg-amber-500/[0.05]"}`}>
+            <div className={`flex items-center gap-2 text-[12px] font-semibold ${connection.tlsMode === "verify-full" ? "text-emerald-200" : "text-amber-200"}`}><ShieldCheck className="h-4 w-4" /> TLS {connection.tlsMode}</div>
+            <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">{connection.tlsMode === "verify-full" ? "The operating-system trust store verified the server certificate and hostname without plaintext fallback." : "This session is plaintext by explicit choice. Use it only for a local server or separately protected trusted network."}</p>
+          </div>
+        </div>
+
+        <div className="mt-4 rounded-xl border border-white/10 bg-[#0d1017] p-4 text-[11px] leading-relaxed text-zinc-500">
+          <div className="font-semibold text-zinc-300">Current checkpoint boundaries</div>
+          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+            <span>5 second server statement timeout</span><span>2 second lock timeout</span>
+            <span>2,000 schema objects maximum</span><span>20,000 columns maximum</span>
+            <span>2 MiB encoded schema response</span><span>SQL execution remains unavailable</span>
+          </div>
+        </div>
+        {!loading && schema && objects.length === 0 && (
+          <div className="mt-4 rounded-xl border border-dashed border-white/10 p-6 text-center text-[12px] text-zinc-600">The server returned no visible user tables or views for this account.</div>
+        )}
+      </div>
     </div>
   );
 }
@@ -691,7 +858,7 @@ function ConnectPostgresDialog({
         <div className="flex items-start justify-between gap-4">
           <div>
             <h3 className="flex items-center gap-2 text-base font-semibold text-white"><Server className="h-4 w-4 text-blue-300" /> Connect PostgreSQL</h3>
-            <p className="mt-1 text-[12px] leading-relaxed text-zinc-500">This connectivity checkpoint opens a real native session. Schema browsing and SQL execution remain disabled until the next bounded increment.</p>
+            <p className="mt-1 text-[12px] leading-relaxed text-zinc-500">This opens a real native session with bounded catalog inspection. User-supplied PostgreSQL statements remain disabled until the next checkpoint.</p>
           </div>
           <button type="button" onClick={onClose} disabled={busy} className="rounded p-1.5 text-zinc-500 hover:bg-white/5 hover:text-white disabled:opacity-40"><X className="h-4 w-4" /></button>
         </div>

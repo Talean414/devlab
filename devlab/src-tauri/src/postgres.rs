@@ -1,6 +1,7 @@
 use keyring::{error::Error as KeyringError, Entry};
 use native_tls::TlsConnector;
 use ::postgres::{config::SslMode, Client, Config, NoTls};
+use fallible_iterator::FallibleIterator;
 use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,6 +24,11 @@ const MAX_HOST_BYTES: usize = 253;
 const MAX_NAME_BYTES: usize = 128;
 const MAX_PASSWORD_BYTES: usize = 8 * 1024;
 const MAX_ERROR_BYTES: usize = 2 * 1024;
+const MAX_SCHEMA_OBJECTS: usize = 2_000;
+const MAX_SCHEMA_COLUMNS: usize = 20_000;
+const MAX_SCHEMA_JSON_BYTES: usize = 2 * 1024 * 1024;
+const MAX_IDENTIFIER_BYTES: usize = 1_024;
+const MAX_DEFAULT_BYTES: usize = 64 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 static KEYRING_LOCK: Mutex<()> = Mutex::new(());
 
@@ -61,8 +67,36 @@ pub struct PostgresConnectionInfo {
     credential_stored: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresSchema {
+    connection: PostgresConnectionInfo,
+    objects: Vec<PostgresObject>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresObject {
+    schema: String,
+    name: String,
+    kind: &'static str,
+    columns: Vec<PostgresColumn>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresColumn {
+    position: i64,
+    name: String,
+    data_type: String,
+    not_null: bool,
+    default_value: Option<String>,
+    default_value_truncated: bool,
+    primary_key: bool,
+}
+
 struct PostgresSession {
-    _client: Client,
+    client: Client,
     workspace_root: PathBuf,
     host: String,
     port: u16,
@@ -111,6 +145,22 @@ impl PostgresService {
             .collect::<Vec<_>>();
         connections.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
         Ok(connections)
+    }
+
+    fn schema(
+        &self,
+        workspace_root: &Path,
+        id: &str,
+    ) -> Result<PostgresSchema, CommandError> {
+        validate_connection_id(id)?;
+        let mut inner = self.lock()?;
+        let session = require_session(&mut inner, workspace_root, id)?;
+        let connection = connection_info(id, session);
+        let objects = read_schema(&mut session.client)?;
+        Ok(PostgresSchema {
+            connection,
+            objects,
+        })
     }
 
     fn connect(
@@ -231,7 +281,7 @@ impl PostgresService {
         inner.sessions.insert(
             id.clone(),
             PostgresSession {
-                _client: client,
+                client,
                 workspace_root,
                 host: request.host,
                 port,
@@ -328,6 +378,252 @@ fn connection_info(id: &str, session: &PostgresSession) -> PostgresConnectionInf
         server_version: session.server_version.clone(),
         credential_stored: session.credential_stored,
     }
+}
+
+fn require_session<'a>(
+    inner: &'a mut PostgresInner,
+    workspace_root: &Path,
+    id: &str,
+) -> Result<&'a mut PostgresSession, CommandError> {
+    let session = inner.sessions.get_mut(id).ok_or_else(|| {
+        CommandError::new(
+            "postgres_connection_not_found",
+            "The PostgreSQL connection is not open.",
+        )
+    })?;
+    if session.workspace_root != workspace_root {
+        return Err(CommandError::new(
+            "postgres_connection_not_found",
+            "The PostgreSQL connection is not open in the active workspace.",
+        ));
+    }
+    Ok(session)
+}
+
+const POSTGRES_SCHEMA_QUERY: &str = r#"
+SELECT
+    n.nspname::text AS schema_name,
+    c.relname::text AS object_name,
+    CASE WHEN c.relkind IN ('v', 'm') THEN 'view' ELSE 'table' END::text AS object_kind,
+    a.attnum::bigint AS position,
+    a.attname::text AS column_name,
+    pg_catalog.format_type(a.atttypid, a.atttypmod)::text AS data_type,
+    a.attnotnull AS not_null,
+    pg_catalog.left(pg_catalog.pg_get_expr(ad.adbin, ad.adrelid), 16385)::text AS default_value,
+    COALESCE(
+        pg_catalog.length(pg_catalog.pg_get_expr(ad.adbin, ad.adrelid)) > 16385
+        OR pg_catalog.octet_length(pg_catalog.pg_get_expr(ad.adbin, ad.adrelid)) > 65536,
+        false
+    ) AS default_value_truncated,
+    EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_index i
+        WHERE i.indrelid = c.oid
+          AND i.indisprimary
+          AND a.attnum = ANY(i.indkey)
+    ) AS primary_key
+FROM pg_catalog.pg_class c
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_catalog.pg_attribute a
+  ON a.attrelid = c.oid
+ AND a.attnum > 0
+ AND NOT a.attisdropped
+LEFT JOIN pg_catalog.pg_attrdef ad
+  ON ad.adrelid = c.oid
+ AND ad.adnum = a.attnum
+WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+  AND n.nspname NOT LIKE 'pg_temp_%'
+ORDER BY n.nspname, c.relname, a.attnum NULLS LAST
+LIMIT 22001
+"#;
+
+fn read_schema(client: &mut Client) -> Result<Vec<PostgresObject>, CommandError> {
+    let mut rows = client
+        .query_raw(POSTGRES_SCHEMA_QUERY, std::iter::empty::<i32>())
+        .map_err(|error| postgres_error("read the PostgreSQL schema", error))?;
+    let mut objects = Vec::new();
+    let mut current: Option<PostgresObject> = None;
+    let mut column_count = 0_usize;
+    let mut schema_bytes = 0_usize;
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| postgres_error("read a PostgreSQL schema row", error))?
+    {
+        let schema_name = row
+            .try_get::<_, String>(0)
+            .map_err(|error| postgres_error("read a PostgreSQL schema name", error))?;
+        let object_name = row
+            .try_get::<_, String>(1)
+            .map_err(|error| postgres_error("read a PostgreSQL object name", error))?;
+        let object_kind = row
+            .try_get::<_, String>(2)
+            .map_err(|error| postgres_error("read a PostgreSQL object kind", error))?;
+        validate_schema_text("schema name", &schema_name)?;
+        validate_schema_text("object name", &object_name)?;
+        let kind = match object_kind.as_str() {
+            "table" => "table",
+            "view" => "view",
+            _ => {
+                return Err(CommandError::new(
+                    "postgres_schema_failed",
+                    "PostgreSQL returned an unsupported schema object kind.",
+                ))
+            }
+        };
+
+        let changed_object = current
+            .as_ref()
+            .map(|object| {
+                object.schema != schema_name
+                    || object.name != object_name
+                    || object.kind != kind
+            })
+            .unwrap_or(true);
+        if changed_object {
+            if let Some(object) = current.take() {
+                objects.push(object);
+            }
+            if objects.len() >= MAX_SCHEMA_OBJECTS {
+                return Err(schema_limit_error(format!(
+                    "The PostgreSQL schema exceeds the {MAX_SCHEMA_OBJECTS}-object display limit."
+                )));
+            }
+            schema_bytes = schema_bytes
+                .saturating_add(schema_name.len().saturating_mul(6))
+                .saturating_add(object_name.len().saturating_mul(6))
+                .saturating_add(64);
+            ensure_schema_size(schema_bytes)?;
+            current = Some(PostgresObject {
+                schema: schema_name,
+                name: object_name,
+                kind,
+                columns: Vec::new(),
+            });
+        }
+
+        let position = row
+            .try_get::<_, Option<i64>>(3)
+            .map_err(|error| postgres_error("read a PostgreSQL column position", error))?;
+        let Some(position) = position else {
+            continue;
+        };
+        column_count = column_count.saturating_add(1);
+        if column_count > MAX_SCHEMA_COLUMNS {
+            return Err(schema_limit_error(format!(
+                "The PostgreSQL schema exceeds the {MAX_SCHEMA_COLUMNS}-column display limit."
+            )));
+        }
+        let column_name = row
+            .try_get::<_, Option<String>>(4)
+            .map_err(|error| postgres_error("read a PostgreSQL column name", error))?
+            .ok_or_else(|| {
+                CommandError::new(
+                    "postgres_schema_failed",
+                    "PostgreSQL returned a column without a name.",
+                )
+            })?;
+        let data_type = row
+            .try_get::<_, Option<String>>(5)
+            .map_err(|error| postgres_error("read a PostgreSQL column type", error))?
+            .unwrap_or_default();
+        validate_schema_text("column name", &column_name)?;
+        validate_schema_text("column type", &data_type)?;
+        let server_default_truncated = row
+            .try_get::<_, bool>(8)
+            .map_err(|error| postgres_error("read a PostgreSQL default-value bound", error))?;
+        let (default_value, default_value_truncated) = match row
+            .try_get::<_, Option<String>>(7)
+            .map_err(|error| postgres_error("read a PostgreSQL column default", error))?
+        {
+            Some(value) => {
+                let (value, truncated) = truncate_text(&value, MAX_DEFAULT_BYTES);
+                (Some(value), truncated || server_default_truncated)
+            }
+            None => (None, server_default_truncated),
+        };
+        let column = PostgresColumn {
+            position,
+            name: column_name,
+            data_type,
+            not_null: row
+                .try_get::<_, Option<bool>>(6)
+                .map_err(|error| postgres_error("read a PostgreSQL column constraint", error))?
+                .unwrap_or(false),
+            default_value,
+            default_value_truncated,
+            primary_key: row
+                .try_get::<_, bool>(9)
+                .map_err(|error| postgres_error("read a PostgreSQL primary-key flag", error))?,
+        };
+        schema_bytes = schema_bytes.saturating_add(
+            serde_json::to_vec(&column)
+                .map_err(|_| {
+                    CommandError::new(
+                        "postgres_schema_failed",
+                        "Could not encode a PostgreSQL schema column.",
+                    )
+                })?
+                .len(),
+        );
+        ensure_schema_size(schema_bytes)?;
+        current
+            .as_mut()
+            .ok_or_else(|| {
+                CommandError::new(
+                    "postgres_schema_failed",
+                    "PostgreSQL schema grouping failed.",
+                )
+            })?
+            .columns
+            .push(column);
+    }
+    drop(rows);
+    if let Some(object) = current {
+        objects.push(object);
+    }
+    Ok(objects)
+}
+
+fn validate_schema_text(label: &str, value: &str) -> Result<(), CommandError> {
+    if value.len() > MAX_IDENTIFIER_BYTES || value.contains('\0') {
+        return Err(CommandError::new(
+            "postgres_schema_value_too_large",
+            format!(
+                "A PostgreSQL {label} exceeded the {MAX_IDENTIFIER_BYTES}-byte display limit."
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn truncate_text(value: &str, max_bytes: usize) -> (String, bool) {
+    if value.len() <= max_bytes {
+        return (value.to_string(), false);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut output = value[..end].to_string();
+    output.push('…');
+    (output, true)
+}
+
+fn ensure_schema_size(bytes: usize) -> Result<(), CommandError> {
+    if bytes > MAX_SCHEMA_JSON_BYTES {
+        Err(schema_limit_error(
+            "The encoded PostgreSQL schema exceeds DevLab's 2 MiB response limit.",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn schema_limit_error(message: impl Into<String>) -> CommandError {
+    CommandError::new("postgres_schema_too_large", message)
 }
 
 fn validate_request(request: &PostgresConnectRequest) -> Result<(), CommandError> {
@@ -532,6 +828,19 @@ pub async fn database_postgres_connections(
 }
 
 #[tauri::command]
+pub async fn database_postgres_schema(
+    app: AppHandle,
+    id: String,
+) -> Result<PostgresSchema, CommandError> {
+    blocking(move || {
+        let workspace_root = app.state::<WorkspaceService>().root_path()?;
+        app.state::<PostgresService>()
+            .schema(&workspace_root, &id)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn database_postgres_connect(
     app: AppHandle,
     request: PostgresConnectRequest,
@@ -623,6 +932,26 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PostgresTlsMode::Disable).unwrap(),
             "\"disable\""
+        );
+    }
+
+    #[test]
+    fn schema_text_truncation_preserves_utf8_boundaries() {
+        let value = "é".repeat(MAX_DEFAULT_BYTES);
+        let (truncated, was_truncated) = truncate_text(&value, MAX_DEFAULT_BYTES);
+        assert!(was_truncated);
+        assert!(truncated.ends_with('…'));
+        assert!(truncated.is_char_boundary(truncated.len()));
+    }
+
+    #[test]
+    fn schema_response_limit_is_enforced() {
+        assert!(ensure_schema_size(MAX_SCHEMA_JSON_BYTES).is_ok());
+        assert_eq!(
+            ensure_schema_size(MAX_SCHEMA_JSON_BYTES + 1)
+                .expect_err("oversized schema must fail")
+                .code,
+            "postgres_schema_too_large"
         );
     }
 }

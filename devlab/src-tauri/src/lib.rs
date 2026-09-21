@@ -21,7 +21,7 @@ use git::{
 };
 use postgres::{
     database_postgres_connect, database_postgres_connections, database_postgres_disconnect,
-    database_postgres_forget_password, PostgresService,
+    database_postgres_forget_password, database_postgres_schema, PostgresService,
 };
 use serde::Serialize;
 use terminal::{
@@ -133,6 +133,7 @@ pub fn run() {
             database_disconnect,
             database_postgres_connections,
             database_postgres_connect,
+            database_postgres_schema,
             database_postgres_disconnect,
             database_postgres_forget_password,
         ])

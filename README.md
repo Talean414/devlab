@@ -6,7 +6,7 @@ DevLab is a native developer control plane built with **Tauri 2, Rust, React, Ty
 
 ## Native migration status
 
-Phases 1 through 4, Docker, SQLite, and the PostgreSQL connectivity checkpoint of Phase 5 are implemented: DevLab has a Tauri desktop shell, typed Rust-to-React IPC, restricted capabilities, a real scoped workspace service connected to Monaco, a cross-platform PTY terminal connected to xterm.js, native source control, bounded access to a real Docker CLI and engine, workspace-scoped SQLite connections, and real PostgreSQL sessions with explicit TLS policy.
+Phases 1 through 4, Docker, SQLite, and the PostgreSQL connectivity/schema checkpoints of Phase 5 are implemented: DevLab has a Tauri desktop shell, typed Rust-to-React IPC, restricted capabilities, a real scoped workspace service connected to Monaco, a cross-platform PTY terminal connected to xterm.js, native source control, bounded access to a real Docker CLI and engine, workspace-scoped SQLite connections, and real PostgreSQL sessions with explicit TLS policy.
 
 A workspace can be granted only through the native folder picker. The Rust backend holds its canonical root in memory, rejects absolute paths and parent traversal, blocks symlink access, limits text I/O, watches native filesystem changes, and uses content revisions to prevent silent overwrites.
 
@@ -18,7 +18,7 @@ Containers detects the real Docker CLI and daemon, then reads actual containers,
 
 Database opens an existing SQLite file only through the native picker and only when its canonical path remains inside the selected workspace. The bundled Rust-owned SQLite engine exposes the real user schema and one statement at a time with a five-second timeout, 1,000 displayed rows, 200 columns, bounded cells and a 2 MiB encoded-result budget. Connections default to operating-system-enforced read-only mode. Users can explicitly enable writes per in-memory connection, but every mutating statement still requires separate confirmation. Database attachment, configuration PRAGMAs, explicit transactions, temporary/virtual-table DDL and filesystem-capable SQL functions are blocked.
 
-PostgreSQL connectivity is now native: DevLab opens a real process-memory session with a five-second per-address connection timeout, an explicit `verify-full` or `disable` TLS policy, server-enforced session timeouts, read-only-by-default configuration, and optional password storage in the operating-system credential store. PostgreSQL schema browsing and SQL execution remain explicitly disabled until their bounded backend increment is complete; no sample server or result is substituted. Deployment, CI, toolchain, API-client and test-runner results also remain disabled. The normal Vite server remains available strictly as a UI preview.
+PostgreSQL connectivity and schema inspection are now native: DevLab opens a real process-memory session with a five-second per-address connection timeout, an explicit `verify-full` or `disable` TLS policy, server-enforced session timeouts, read-only-by-default configuration, and optional password storage in the operating-system credential store. A fixed Rust-owned catalog query returns genuine schemas, tables, views, columns, types, defaults and primary-key flags with object, column and encoded-response bounds. User-supplied PostgreSQL statements remain explicitly disabled until their separate backend increment is complete; no sample server, schema or result is substituted. Deployment, CI, toolchain, API-client and test-runner results also remain disabled. The normal Vite server remains available strictly as a UI preview.
 
 ## Current working features
 
@@ -40,13 +40,13 @@ PostgreSQL connectivity is now native: DevLab opens a real process-memory sessio
 - Confirmed container stop/restart/removal with validated IDs; explicit start and no force removal
 - Workspace-scoped native SQLite connections with real schema inspection and bounded query results
 - User-configurable SQLite read-only/write access with backend-enforced confirmation for every mutating statement
-- Real PostgreSQL connectivity with verified TLS by default, explicit plaintext opt-in and optional OS-protected passwords
+- Real PostgreSQL connectivity and bounded schema inspection with verified TLS by default, explicit plaintext opt-in and optional OS-protected passwords
 - Project template and command references
 - BroadcastChannel/WebRTC collaboration primitives
 - Embedded web preview
 - WebView-local non-secret preferences; the Gemini BYOK key remains in its existing renderer flow
 
-The remaining Phase 5 backends are bounded PostgreSQL schema/query execution and native HTTP. Agent tool execution and signed distribution follow afterward. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
+The remaining Phase 5 backends are bounded PostgreSQL statement execution and native HTTP. Agent tool execution and signed distribution follow afterward. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
 
 ## Requirements
 
@@ -58,7 +58,7 @@ Install these before starting:
 4. The current stable [Rust toolchain](https://www.rust-lang.org/tools/install)
 5. Your operating system's [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
 6. [Docker Engine or Docker Desktop](https://docs.docker.com/get-docker/) for the optional Containers panel
-7. Access to a PostgreSQL server for the optional server-database connectivity checkpoint
+7. Access to a PostgreSQL server for the optional native server-database checkpoints
 8. A [Google AI Studio API key](https://aistudio.google.com/app/apikey) for cloud AI features
 
 Node.js 22 is recommended. If you use [nvm](https://github.com/nvm-sh/nvm), the included `.nvmrc` selects the correct major version.
@@ -197,9 +197,10 @@ DevLab does not create a database file in this checkpoint. It blocks `ATTACH`, `
 3. Keep **Verify certificate and hostname** selected for normal remote connections. This uses the operating-system trust store and does not silently downgrade. Choose **Disable TLS** only for a local server or a separately protected trusted network after reading the plaintext warning.
 4. Enter a password. It remains transient unless **Store or reuse this password** is selected; stored passwords go to the operating-system credential store and are never returned to React. Leaving the field blank with storage selected reuses an existing entry.
 5. Connect. DevLab reports the actual server version or the genuine DNS, network, authentication, TLS or server error. Each socket address has a five-second connection timeout.
-6. Use **Forget password** to remove a saved credential while keeping the live session open, and **Disconnect** to close the native session. Disconnecting does not silently delete a credential the user chose to store.
+6. Select the live connection. DevLab runs one fixed catalog query and displays the real non-system schemas, tables, views, columns, data types and primary keys. The response is limited to 2,000 objects, 20,000 columns and approximately 2 MiB of encoded schema data.
+7. Use **Refresh schema** after an external change. Use **Forget password** to remove a saved credential while keeping the live session open, and **Disconnect** to close the session. Disconnecting does not silently delete a credential the user chose to store.
 
-This is deliberately a connectivity checkpoint. The connection is real and already configures server-side statement, lock and idle-transaction timeouts, but PostgreSQL schema browsing and SQL execution remain disabled until the next increment adds bounded streaming output, per-operation read-only transactions and separate confirmation for every write. DevLab does not fabricate tables or query results while those operations are unavailable.
+This schema checkpoint accepts no renderer-provided SQL. The live connection configures server-side statement, lock and idle-transaction timeouts, and the catalog response is streamed and bounded before IPC serialization. User-supplied PostgreSQL statements remain disabled until the next increment adds bounded result values, per-operation read-only transactions and separate confirmation for every write. DevLab does not fabricate tables or query results while those operations are unavailable.
 
 ## 11. Verify the complete build
 
@@ -211,7 +212,7 @@ npm run native:check
 npm run native:test
 ```
 
-The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary, revision, terminal-dimension, bounded-output, Git parser/path validation, Docker validation, SQLite access-mode/confirmation rules, SQL restrictions and result truncation, plus PostgreSQL connection-field and credential-identity validation.
+The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary, revision, terminal-dimension, bounded-output, Git parser/path validation, Docker validation, SQLite access-mode/confirmation rules, SQL restrictions and result truncation, plus PostgreSQL connection-field, credential-identity, schema-size and UTF-8 truncation validation.
 
 Build the native application and this operating system's installer formats:
 
@@ -312,11 +313,12 @@ Use this list before calling an installation complete:
 - [ ] A write fails in read-only mode; after enabling writes it requires confirmation and changes the real database
 - [ ] `ATTACH`, configuration PRAGMAs, explicit transactions and virtual-table creation are rejected at the native boundary
 - [ ] PostgreSQL connects to a real server and reports its actual version or the genuine DNS, network, authentication or TLS error
+- [ ] PostgreSQL schema inspection shows genuine user schemas, tables/views, columns, types and primary keys; refresh reflects an external DDL change
 - [ ] Verified TLS rejects an untrusted or hostname-mismatched certificate; disabling TLS shows an explicit plaintext warning
 - [ ] A PostgreSQL password is transient by default, can be stored only by explicit choice, can be reused after restart and can be removed with **Forget password**
 - [ ] Gemini key test says **Key valid**
 - [ ] AI Agent streams a response
-- [ ] API-client, deployment and test-runner panels explicitly say **Simulation removed**; Database clearly marks PostgreSQL schema/query execution as unavailable after establishing a real session
+- [ ] API-client, deployment and test-runner panels explicitly say **Simulation removed**; Database clearly marks PostgreSQL statement execution as unavailable while real schema inspection remains active
 - [ ] `npm run desktop:build` creates the platform bundle
 
 ## Common problems
@@ -364,13 +366,17 @@ Canvas, migration and vision tools produce source previews but do not automatica
 
 Verify the host, port, database, username and server reachability with a trusted PostgreSQL client. **Verify certificate and hostname** requires a certificate chain trusted by the operating system and a hostname match; local development servers commonly need a trusted development certificate or an explicit **Disable TLS** choice. DevLab never retries verified TLS as plaintext. If password storage fails on Linux, unlock the desktop Secret Service or turn off storage and use a transient password.
 
-### PostgreSQL schema or query execution is unavailable
+### PostgreSQL schema inspection fails
 
-This is intentional during the connectivity checkpoint—not an installation failure. The live session and reported server version are real, but schema and SQL controls stay disabled until bounded output, transactional read-only enforcement and per-write confirmation are implemented. DevLab never substitutes sample tables or successful query results.
+The connected role must be able to read PostgreSQL's normal catalog metadata. DevLab's fixed query has a five-second server timeout and hard limits of 2,000 objects, 20,000 columns and approximately 2 MiB encoded output. A timeout, permission denial or limit error is returned honestly instead of showing a partial fabricated schema.
+
+### PostgreSQL query execution is unavailable
+
+This is intentional during the schema checkpoint—not an installation failure. The live session, server version and displayed catalog are real, but user-supplied SQL stays disabled until bounded values, transactional read-only enforcement and per-write confirmation are implemented. DevLab never substitutes successful query results.
 
 ### API client or test runner says “Simulation removed”
 
-This is intentional—not an installation failure. The previous fabricated results remain disabled until each real backend is implemented and tested. Native HTTP is the remaining Phase 5 backend after PostgreSQL schema/query execution.
+This is intentional—not an installation failure. The previous fabricated results remain disabled until each real backend is implemented and tested. Native HTTP is the remaining Phase 5 backend after PostgreSQL statement execution.
 
 ### Containers says Docker is unavailable
 
@@ -437,7 +443,7 @@ devlab/
     │   ├── terminal.ts     # typed PTY lifecycle and event IPC client
     │   ├── git.ts          # typed repository, operation and credential IPC client
     │   ├── docker.ts       # typed Docker state, pull, creation, logs and lifecycle IPC client
-    │   ├── database.ts     # typed SQLite operations and PostgreSQL connectivity IPC client
+    │   ├── database.ts     # typed SQLite operations and PostgreSQL connectivity/schema IPC client
     │   ├── workspace.ts    # typed scoped-filesystem IPC client
     │   ├── settings.ts     # application settings
     │   └── sync.ts         # collaboration helpers
@@ -463,6 +469,7 @@ devlab/
 - Open SQLite files only through the native picker after canonical workspace authorization; default to read-only, classify statements in SQLite itself, confirm every write, and bound query time and output.
 - Deny SQLite database attachment, connection-changing PRAGMAs, explicit transactions, temporary/virtual-table DDL and filesystem-capable functions so SQL cannot escape the selected database policy.
 - Require structured PostgreSQL connection fields, explicit TLS policy and bounded connection attempts; verify certificates and hostnames by default and never silently downgrade to plaintext.
+- Inspect PostgreSQL metadata only through a fixed Rust-owned catalog query with server timeouts and object, column, value and encoded-response bounds; do not accept renderer SQL through the schema command.
 - Keep PostgreSQL passwords transient unless the user explicitly chooses the OS credential store; never return stored passwords to the renderer, and provide an explicit removal action.
 - Remember that the current Gemini key is still renderer-managed and separate from Rust-owned Git credentials.
 - Review generated commands and code before executing or deploying them.

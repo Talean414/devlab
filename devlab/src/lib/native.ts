@@ -30,7 +30,7 @@ export const WEB_RUNTIME: RuntimeInfo = {
   runtime: "web",
   os: "browser",
   arch: "unknown",
-  appVersion: "1.7.0",
+  appVersion: "1.8.0",
   debug: import.meta.env.DEV,
   capabilities: [],
 };

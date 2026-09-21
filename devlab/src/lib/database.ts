@@ -27,6 +27,28 @@ export interface PostgresConnectionInfo {
   credentialStored: boolean;
 }
 
+export interface PostgresColumn {
+  position: number;
+  name: string;
+  dataType: string;
+  notNull: boolean;
+  defaultValue: string | null;
+  defaultValueTruncated: boolean;
+  primaryKey: boolean;
+}
+
+export interface PostgresObject {
+  schema: string;
+  name: string;
+  kind: "table" | "view";
+  columns: PostgresColumn[];
+}
+
+export interface PostgresSchema {
+  connection: PostgresConnectionInfo;
+  objects: PostgresObject[];
+}
+
 export interface DatabaseConnectionInfo {
   id: string;
   name: string;
@@ -147,6 +169,10 @@ export function connectPostgres(
   request: PostgresConnectRequest,
 ): Promise<PostgresConnectionInfo> {
   return command("database_postgres_connect", { request });
+}
+
+export function getPostgresSchema(id: string): Promise<PostgresSchema> {
+  return command("database_postgres_schema", { id });
 }
 
 export function disconnectPostgres(id: string): Promise<void> {

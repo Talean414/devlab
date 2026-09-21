@@ -1,6 +1,6 @@
 [package]
 name = "devlab"
-version = "1.7.0"
+version = "1.8.0"
 description = "Native, AI-assisted developer control plane"
 authors = ["Talean414"]
 license = "MIT"
@@ -17,6 +17,7 @@ tauri-build = { version = "2.6.3" }
 
 [dependencies]
 base64 = "0.22"
+fallible-iterator = "0.2"
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "crypto-rust", "linux-native-sync-persistent", "windows-native"] }
 libc = "0.2"
 log = "0.4"
