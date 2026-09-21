@@ -1,6 +1,6 @@
 [package]
 name = "devlab"
-version = "1.3.0"
+version = "1.4.0"
 description = "Native, AI-assisted developer control plane"
 authors = ["Talean414"]
 license = "MIT"
@@ -16,6 +16,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6.3" }
 
 [dependencies]
+base64 = "0.22"
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "crypto-rust", "linux-native-sync-persistent", "windows-native"] }
 libc = "0.2"
 log = "0.4"
 notify = "8"
@@ -25,3 +27,5 @@ sha2 = "0.10"
 tauri = { version = "2.11.3" }
 tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"
+wait-timeout = "0.2"
+zeroize = "1.8"

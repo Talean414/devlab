@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import type { VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
-import { loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
+import { loadDeploy, loadGit, loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
 import {
   detectRuntime, hasNativeCapability, WEB_RUNTIME,
   type NativeCapability, type RuntimeInfo,
@@ -28,6 +28,10 @@ import { SettingsPanel } from "./panels/SettingsPanel";
 
 const TerminalPanel = lazy(() => import("./panels/TerminalPanel").then((module) => ({
   default: module.TerminalPanel,
+})));
+
+const GitPanel = lazy(() => import("./panels/GitPanel").then((module) => ({
+  default: module.GitPanel,
 })));
 
 interface NavItem { id: ViewId; icon: typeof Sparkles; label: string; shortcut?: string }
@@ -83,6 +87,13 @@ export default function App() {
   }
 
   useEffect(() => { applyTheme(settings); }, [settings]);
+
+  // Rewrite the retired Git settings shape on startup so legacy plaintext
+  // tokens are removed even before the Source Control panel is opened.
+  useEffect(() => {
+    loadGit();
+    loadDeploy();
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -180,9 +191,13 @@ export default function App() {
         : nativeFeature(
           "Integrated Terminal", "pty", "Phase 3 · native PTY sessions",
         );
-      case "git":      return nativeFeature(
-        "Source Control", "git", "Phase 4 · real repository operations",
-      );
+      case "git":      return hasNativeCapability(runtime, "git")
+        ? <Suspense fallback={<NativePanelLoading label="Loading native source control…" />}>
+          <GitPanel onOpenWorkspace={() => navigate("editor")} />
+        </Suspense>
+        : nativeFeature(
+          "Source Control", "git", "Phase 4 · real repository operations and OS-protected credentials",
+        );
       case "cicd":     return nativeFeature(
         "CI / CD Pipelines", "ci", "Phase 6 · real workflow provider and run status integration",
       );
@@ -301,7 +316,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 3 terminal</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 4 native Git</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}
@@ -309,7 +324,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-4">
             <span className="hidden font-mono md:inline">{model}</span>
-            <span className="font-mono">DevLab v1.3</span>
+            <span className="font-mono">DevLab v1.4</span>
           </div>
         </footer>
       )}

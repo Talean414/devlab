@@ -1,6 +1,13 @@
+mod credentials;
+mod git;
 mod terminal;
 mod workspace;
 
+use credentials::{git_credential_delete, git_credential_status, git_credential_store};
+use git::{
+    git_commit, git_diff, git_fetch, git_pull, git_push, git_repository_snapshot,
+    git_stage_all, git_stage_paths, git_unstage_all, git_unstage_paths,
+};
 use serde::Serialize;
 use tauri::Manager;
 use terminal::{
@@ -33,7 +40,13 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
         app_version: app.package_info().version.to_string(),
         debug: cfg!(debug_assertions),
         // A capability is advertised only after its real backend is registered.
-        capabilities: vec!["native-runtime", "filesystem", "pty"],
+        capabilities: vec![
+            "native-runtime",
+            "filesystem",
+            "pty",
+            "git",
+            "secure-storage",
+        ],
     }
 }
 
@@ -73,6 +86,19 @@ pub fn run() {
             terminal_clear,
             terminal_kill,
             terminal_close,
+            git_repository_snapshot,
+            git_stage_paths,
+            git_unstage_paths,
+            git_stage_all,
+            git_unstage_all,
+            git_commit,
+            git_diff,
+            git_fetch,
+            git_pull,
+            git_push,
+            git_credential_status,
+            git_credential_store,
+            git_credential_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevLab");

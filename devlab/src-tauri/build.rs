@@ -18,6 +18,19 @@ const APP_COMMANDS: &[&str] = &[
     "terminal_clear",
     "terminal_kill",
     "terminal_close",
+    "git_repository_snapshot",
+    "git_stage_paths",
+    "git_unstage_paths",
+    "git_stage_all",
+    "git_unstage_all",
+    "git_commit",
+    "git_diff",
+    "git_fetch",
+    "git_pull",
+    "git_push",
+    "git_credential_status",
+    "git_credential_store",
+    "git_credential_delete",
 ];
 
 fn main() {

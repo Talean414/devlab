@@ -131,30 +131,14 @@ export function applyTheme(s: DevLabSettings) {
   r.style.setProperty("--dl-gap", s.density === "compact" ? "0.5rem" : "0.875rem");
 }
 
-// ── Git / provider connection config (tokens stay in localStorage) ──
+// ── Source-control presentation preferences ──
+// Secrets never belong in this browser-readable settings record. loadGit also
+// sanitizes the retired v1 shape so an old plaintext token is removed on use.
 export interface GitConfig {
-  provider: "github" | "gitlab" | "bitbucket";
-  token: string;
-  owner: string;
-  repo: string;
-  branch: string;
-  authorName: string;
-  authorEmail: string;
-  autoCommit: boolean;
-  autoPush: boolean;
   commitStyle: "conventional" | "plain";
 }
 
 export const DEFAULT_GIT: GitConfig = {
-  provider: "github",
-  token: "",
-  owner: "",
-  repo: "",
-  branch: "main",
-  authorName: "",
-  authorEmail: "",
-  autoCommit: false,
-  autoPush: false,
   commitStyle: "conventional",
 };
 
@@ -163,16 +147,25 @@ const GKEY = "devlab.git.v1";
 export function loadGit(): GitConfig {
   try {
     const raw = localStorage.getItem(GKEY);
-    return raw ? { ...DEFAULT_GIT, ...JSON.parse(raw) } : { ...DEFAULT_GIT };
+    if (!raw) return { ...DEFAULT_GIT };
+    const legacy = JSON.parse(raw) as Record<string, unknown>;
+    const config: GitConfig = {
+      commitStyle: legacy.commitStyle === "plain" ? "plain" : "conventional",
+    };
+    // Rewrite the allowlisted shape, dropping legacy token/owner/repository data.
+    localStorage.setItem(GKEY, JSON.stringify(config));
+    return config;
   } catch {
     return { ...DEFAULT_GIT };
   }
 }
 export function saveGit(g: GitConfig) {
-  localStorage.setItem(GKEY, JSON.stringify(g));
+  localStorage.setItem(GKEY, JSON.stringify({ commitStyle: g.commitStyle }));
 }
 
-// ── Deployment provider tokens ──
+// ── Retired deployment preferences ──
+// Native deployment is disabled. Legacy browser tokens are intentionally
+// discarded until a protected native credential path is implemented.
 export interface DeployConfig {
   vercelToken: string;
   netlifyToken: string;
@@ -194,9 +187,17 @@ const DKEY = "devlab.deploy.v1";
 export function loadDeploy(): DeployConfig {
   try {
     const raw = localStorage.getItem(DKEY);
-    return raw ? { ...DEFAULT_DEPLOY, ...JSON.parse(raw) } : { ...DEFAULT_DEPLOY };
+    const legacy = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+    const config = {
+      ...DEFAULT_DEPLOY,
+      defaultProvider: typeof legacy.defaultProvider === "string"
+        ? legacy.defaultProvider
+        : DEFAULT_DEPLOY.defaultProvider,
+    };
+    localStorage.setItem(DKEY, JSON.stringify({ defaultProvider: config.defaultProvider }));
+    return config;
   } catch { return { ...DEFAULT_DEPLOY }; }
 }
 export function saveDeploy(d: DeployConfig) {
-  localStorage.setItem(DKEY, JSON.stringify(d));
+  localStorage.setItem(DKEY, JSON.stringify({ defaultProvider: d.defaultProvider }));
 }

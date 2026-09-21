@@ -7,8 +7,8 @@ import {
 } from "lucide-react";
 
 const stats = [
-  { label: "Migration phase", value: "3 / 7" },
-  { label: "Native capabilities", value: "3" },
+  { label: "Migration phase", value: "4 / 7" },
+  { label: "Native capabilities", value: "5" },
   { label: "Simulations enabled", value: "0" },
   { label: "License", value: "MIT" },
 ];
@@ -20,6 +20,7 @@ const quickCards: { view: ViewId; Icon: typeof Bot; title: string; desc: string;
   { view: "vision",   Icon: ScanLine,     title: "Screenshot → Source",  desc: "Use Gemini vision to generate a reviewable React preview" },
   { view: "editor",   Icon: Code2,        title: "Native Workspace",     desc: "Select a real folder and safely edit its files with Monaco" },
   { view: "terminal", Icon: TerminalIcon, title: "Native Terminal",      desc: "Run your real shell through a cross-platform PTY" },
+  { view: "git",      Icon: GitBranch,    title: "Native Source Control", desc: "Inspect and operate on the selected real Git repository" },
 ];
 
 const features = [
@@ -27,8 +28,8 @@ const features = [
   { Icon: TerminalIcon,title: "Real PTY terminal",          desc: "Start your operating system’s default shell in the selected workspace with real streaming output, resize handling, termination and exit codes." },
   { Icon: ScanLine,   title: "Reverse-engineer interfaces", desc: "Paste a screenshot or URL. Gemini vision extracts visual details and generates source for you to review without pretending it has been built or run." },
   { Icon: Radio,      title: "Zero-server live sharing",    desc: "BroadcastChannel and WebRTC provide real peer-to-peer sharing for the current in-app scratch data without a collaboration server." },
-  { Icon: GitBranch,  title: "Real native Git roadmap",     desc: "The fake change list and commits are disabled. The Git milestone will read and modify only the selected repository with explicit permission." },
-  { Icon: KeyRound,   title: "Bring Your Own Key",          desc: "Your Google AI Studio key powers cloud AI. It remains WebView-local until encrypted native secret storage is implemented." },
+  { Icon: GitBranch,  title: "Real native Git",             desc: "Read real status, diffs, commits, branches and remotes, then stage, commit or run a confirmed remote operation through fixed Rust commands." },
+  { Icon: KeyRound,   title: "Protected Git credentials",   desc: "Saved Git provider tokens live in the operating system credential store and are never returned to the renderer. Gemini retains its separate BYOK renderer flow." },
 ];
 
 export function WelcomePanel({
@@ -48,7 +49,7 @@ export function WelcomePanel({
         <div className="relative mx-auto max-w-5xl px-8 py-16">
           <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-300">
             <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-pulse" />
-            Phase 3 · real native terminal
+            Phase 4 · real native Git
           </div>
           <h1 className="mt-5 max-w-3xl text-5xl font-bold tracking-tight text-white sm:text-6xl text-balance">
             Native shell.{" "}
@@ -56,9 +57,9 @@ export function WelcomePanel({
             <br />No simulated success.
           </h1>
           <p className="mt-5 max-w-2xl text-lg text-zinc-400 text-pretty">
-            DevLab now connects Monaco to real files and xterm.js to your operating system’s
-            default shell through a trusted Rust PTY service. Unavailable tools stay visibly
-            disabled until their own native backends are implemented and verified.
+            DevLab now connects Monaco to real files, xterm.js to your operating system shell,
+            and Source Control to the selected repository through fixed Rust Git commands.
+            Unavailable tools stay disabled until their own native backends are implemented.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <button

@@ -35,6 +35,7 @@ sudo apt install -y \\
   build-essential \\
   curl wget file \\
   libxdo-dev libssl-dev \\
+  libdbus-1-dev pkg-config \\
   libayatana-appindicator3-dev \\
   librsvg2-dev
 
@@ -89,13 +90,13 @@ const PHASES: readonly MigrationPhase[] = [
   {
     n: 4,
     title: "Git and secure secrets",
-    status: "next",
-    detail: "Real repository status and operations plus encrypted credentials outside browser localStorage.",
+    status: "complete",
+    detail: "Workspace-root-scoped status, diffs, staging, commits, branches, remotes and confirmed network operations, with Git tokens protected by the OS credential store.",
   },
   {
     n: 5,
     title: "Docker, databases and native HTTP",
-    status: "planned",
+    status: "next",
     detail: "Detect real services and display only live data returned by their native integrations.",
   },
   {
@@ -176,7 +177,7 @@ export function SetupPanel() {
               </details>
 
               <Head icon={KeyRound} title="3 · Connect AI" className="mt-8"
-                sub="During the native migration Gemini still uses the BYOK flow; secure native storage arrives in Phase 4." />
+                sub="Gemini continues to use its BYOK renderer flow. Phase 4 OS-protected storage is used for Git provider tokens." />
               <ol className="list-decimal space-y-2 rounded-xl border border-white/10 bg-white/[0.02] py-4 pl-10 pr-5 text-[13px] leading-relaxed text-zinc-300">
                 <li>Create a key at <a className="text-cyan-400 hover:underline" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">Google AI Studio</a>.</li>
                 <li>Paste it into the first-run key window.</li>
@@ -190,9 +191,9 @@ export function SetupPanel() {
 
               <Note>
                 <strong>No fake native results:</strong> opening the app with <code>npm run dev</code>
-                creates only a browser UI preview. The real Workspace Editor and PTY Terminal are
-                available through <code>npm run desktop:dev</code>; Git, Docker, database and test
-                execution stay disabled until their own native capability is implemented.
+                creates only a browser UI preview. The real Workspace Editor, PTY Terminal and
+                Source Control are available through <code>npm run desktop:dev</code>; Docker,
+                database and test execution stay disabled until their own native capability is implemented.
               </Note>
             </>
           )}
@@ -210,7 +211,7 @@ export function SetupPanel() {
                 <ArchitectureCard
                   icon={Cpu}
                   title="Rust core · phased"
-                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Git, secrets and audit log later"]}
+                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Scoped Git commands and OS credential storage"]}
                 />
               </div>
 
@@ -232,7 +233,7 @@ export function SetupPanel() {
                   "Filesystem API paths must resolve inside a user-selected workspace.",
                   "PTY shells start in that workspace but retain the user account's full authority.",
                   "Destructive agent commands require explicit approval unless a narrow policy permits them.",
-                  "The renderer never receives raw long-lived secrets after secure storage is enabled.",
+                  "Saved Git tokens never return to the renderer; it receives only presence and backend metadata.",
                   "Remote pages are never loaded into a privileged application context.",
                   "Every agent tool action will have timeout, cancellation and audit metadata.",
                 ].map((rule) => (

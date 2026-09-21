@@ -218,8 +218,9 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
               <div className="flex gap-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] p-4 text-[13px] text-amber-200/90">
                 <Shield className="mt-0.5 h-4 w-4 shrink-0" />
                 <div>
-                  <strong>Security:</strong> keys are stored in this browser's localStorage and sent
-                  only to the provider's official endpoint. Rotate any key you have pasted publicly.
+                  <strong>Security:</strong> the Gemini key is currently held in WebView localStorage and sent
+                  only to Google's official endpoint. Git tokens are never stored here; Source Control saves them
+                  through the operating system's protected credential store.
                 </div>
               </div>
 
@@ -361,18 +362,18 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                 </button>
               </Card>
 
-              <Card title="Local data" desc="Everything DevLab stores lives in this browser.">
+              <Card title="Local data" desc="Non-secret preferences remain WebView-local; Git credentials are separate.">
                 <ul className="space-y-1.5 text-[12.5px] text-zinc-400">
                   <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.settings.v1</code> — preferences</li>
-                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.gemini.key</code> — AI key</li>
-                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.git.v1</code> — repo config + token</li>
-                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.deploy.v1</code> — deploy tokens</li>
-                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.files.v1</code> — editor workspace</li>
+                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.gemini.key</code> — Gemini key used by the renderer</li>
+                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.git.v1</code> — commit-message preference only; no token</li>
+                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.deploy.v1</code> — disabled deployment preference only; legacy tokens are purged</li>
+                  <li><span className="font-medium text-emerald-300">OS credential store</span> — GitHub, GitLab and Bitbucket token presence; values are not readable by the renderer</li>
                 </ul>
                 <button
-                  onClick={() => { if (confirm("Erase ALL DevLab data from this browser?")) { localStorage.clear(); location.reload(); } }}
+                  onClick={() => { if (confirm("Erase DevLab WebView preferences and the Gemini key? Git credentials must be deleted separately in Source Control → Credentials.")) { localStorage.clear(); location.reload(); } }}
                   className="mt-4 inline-flex items-center gap-1.5 rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm text-rose-300 hover:bg-rose-500/20">
-                  <Trash2 className="h-3.5 w-3.5" /> Erase all local data
+                  <Trash2 className="h-3.5 w-3.5" /> Erase WebView data
                 </button>
               </Card>
             </>

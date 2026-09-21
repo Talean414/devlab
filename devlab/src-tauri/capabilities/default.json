@@ -24,6 +24,19 @@
     "allow-terminal-resize",
     "allow-terminal-clear",
     "allow-terminal-kill",
-    "allow-terminal-close"
+    "allow-terminal-close",
+    "allow-git-repository-snapshot",
+    "allow-git-stage-paths",
+    "allow-git-unstage-paths",
+    "allow-git-stage-all",
+    "allow-git-unstage-all",
+    "allow-git-commit",
+    "allow-git-diff",
+    "allow-git-fetch",
+    "allow-git-pull",
+    "allow-git-push",
+    "allow-git-credential-status",
+    "allow-git-credential-store",
+    "allow-git-credential-delete"
   ]
 }

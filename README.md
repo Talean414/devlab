@@ -6,13 +6,15 @@ DevLab is a native developer control plane built with **Tauri 2, Rust, React, Ty
 
 ## Native migration status
 
-Phases 1 through 3 are implemented: DevLab has a Tauri desktop shell, typed Rust-to-React IPC, restricted capabilities, a real scoped workspace service connected to Monaco, and a cross-platform PTY terminal connected to xterm.js.
+Phases 1 through 4 are implemented: DevLab has a Tauri desktop shell, typed Rust-to-React IPC, restricted capabilities, a real scoped workspace service connected to Monaco, a cross-platform PTY terminal connected to xterm.js, and native source control backed by the installed Git executable.
 
 A workspace can be granted only through the native folder picker. The Rust backend holds its canonical root in memory, rejects absolute paths and parent traversal, blocks symlink access, limits text I/O, watches native filesystem changes, and uses content revisions to prevent silent overwrites.
 
 A terminal starts only after an explicit click and launches the operating system’s real default shell in the selected workspace. Rust streams raw PTY bytes, validates session IDs, bounds retained history, handles resize and termination, and reports the real process exit status. Shell commands are intentionally not confined to the workspace and have the same authority as the user running DevLab.
 
-Simulated Git, Docker, database, deployment, CI, toolchain, API-client and test-runner results remain disabled. Those panels are re-enabled only after their real native backend is completed. The normal Vite server remains available strictly as a UI preview.
+Source Control discovers only a repository whose canonical root exactly matches the selected workspace. Fixed Rust commands read real porcelain status, diffs, history, branches and remotes; stage and unstage paths; create commits; and run confirmed fetch, fast-forward pull and non-force push operations with time and output limits. Git hooks and fsmonitor helpers are disabled for DevLab-owned commands. GitHub, GitLab and Bitbucket tokens are stored by the operating system credential store and are never returned to the renderer.
+
+Simulated Docker, database, deployment, CI, toolchain, API-client and test-runner results remain disabled. Those panels are re-enabled only after their real native backend is completed. The normal Vite server remains available strictly as a UI preview.
 
 ## Current working features
 
@@ -26,12 +28,15 @@ Simulated Git, Docker, database, deployment, CI, toolchain, API-client and test-
 - Review-only in-memory AI drafts that are never written automatically
 - Native filesystem change notifications and save-conflict detection
 - Real multi-session PTY terminal with raw streaming, resize, bounded replay and exit status
+- Real Git detection, status, diffs, staging, unstaging, commits, history, branches and remotes
+- Confirmed fetch, fast-forward pull and non-force push operations with bounded native processes
+- OS-protected GitHub, GitLab and Bitbucket credentials with presence-only renderer metadata
 - Project template and command references
 - BroadcastChannel/WebRTC collaboration primitives
 - Embedded web preview
-- WebView-local settings and credentials until secure native storage lands
+- WebView-local non-secret preferences; the Gemini BYOK key remains in its existing renderer flow
 
-The remaining native backends are being delivered in explicit phases: Git and secure secrets next, then Docker/databases/native HTTP, agent tool execution, and signed distribution. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
+The remaining native backends are being delivered in explicit phases: Docker/databases/native HTTP next, then agent tool execution and signed distribution. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
 
 ## Requirements
 
@@ -85,7 +90,8 @@ On Debian or Ubuntu:
 ```bash
 sudo apt update
 sudo apt install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
-  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+  libxdo-dev libssl-dev libdbus-1-dev pkg-config \
+  libayatana-appindicator3-dev librsvg2-dev
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 ```
@@ -129,13 +135,25 @@ The Test button validates authentication and model-list access without consuming
 
 ### Where the key is stored
 
-The key is temporarily stored in the application WebView's `localStorage` under `devlab.gemini.key`. It is sent only to Google's official Gemini endpoint. It is not written to this repository and no `.env` file is needed. Encrypted native secret storage is scheduled for the Git/credentials phase.
+The Gemini key is stored in the application WebView's `localStorage` under `devlab.gemini.key` because the current Gemini client runs in the renderer. It is sent only to Google's official Gemini endpoint. It is not written to this repository and no `.env` file is needed. Phase 4's OS-protected storage is deliberately limited to Git credentials, which are consumed by Rust and never returned to the renderer.
 
 Do not hardcode a shared key or add a `VITE_GEMINI_API_KEY` variable when deploying the public web app. Every user should enter their own key. A `VITE_` secret is bundled into public JavaScript and is not secret.
 
-To remove the key, use **Settings → Providers → Clear**. To erase every locally stored setting and workspace, use **Settings → Advanced → Erase all local data**.
+To remove the key, use **Settings → Providers → Clear**. To erase WebView preferences and the Gemini key, use **Settings → Advanced → Erase WebView data**. Git credentials are deleted separately in **Source Control → Credentials**.
 
-## 7. Verify the complete build
+## 7. Use native Source Control
+
+1. Open **Code Editor** and select the canonical root of an existing Git repository. Selecting only a subdirectory is rejected so Git cannot modify a parent outside the granted workspace.
+2. Open **Source Control**. DevLab reports the installed Git version, current branch, working-tree status, configured author, history, branches and remotes from the real repository.
+3. Open a changed path to inspect its staged and unstaged diff, then explicitly stage or unstage paths.
+4. Enter a message and commit staged changes. DevLab uses Git's existing `user.name` and `user.email`; missing identity and configured clean-filter failures are returned as real errors. Repository hooks are disabled for DevLab-owned commands.
+5. For HTTPS remotes, optionally open **Credentials** and save a matching provider token. The value goes to Windows Credential Manager, macOS Keychain, or Linux Secret Service/kernel keyring. DevLab exposes only whether it is configured.
+6. Choose a configured remote and explicitly confirm Fetch, Pull or Push. Pull is fast-forward only, force push is unavailable, interactive credential prompts are disabled, and each network process has a two-minute limit.
+7. SSH remotes use your existing SSH configuration. If no DevLab HTTPS token matches, Git may use an existing system credential helper.
+
+DevLab never initializes a repository, adds a remote, changes Git identity, checks out a branch, merges, rebases or force-pushes on its own. Use the real terminal for those administrative operations.
+
+## 8. Verify the complete build
 
 Run both frontend and native checks before packaging:
 
@@ -145,7 +163,7 @@ npm run native:check
 npm run native:test
 ```
 
-The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary, revision, terminal-dimension and bounded-output tests.
+The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary, revision, terminal-dimension, bounded-output, Git status-parser and Git path-validation tests.
 
 Build the native application and this operating system's installer formats:
 
@@ -155,7 +173,7 @@ npm run desktop:build
 
 For an interface-only production preview, run `npm run preview -- --host 0.0.0.0`. Native capabilities intentionally remain unavailable in that browser preview.
 
-## 8. Deploy the optional web preview
+## 9. Deploy the optional web preview
 
 DevLab is a static frontend. It does not need a Node server after the build finishes.
 
@@ -231,9 +249,14 @@ Use this list before calling an installation complete:
 - [ ] `pwd`/`cd`, interactive input, ANSI colors and full-screen terminal programs work
 - [ ] Terminal resizing works and a long-running process can be terminated
 - [ ] `exit 7` on Unix or `exit /b 7` on Windows is reported as the real exit code, and terminal tabs restore bounded history
+- [ ] Source Control reports the selected repository's real branch, status, history, branches and remotes
+- [ ] A real path can be staged and unstaged, its diff is displayed, and a commit returns Git's actual result
+- [ ] Selecting a repository subdirectory is rejected until the canonical repository root is selected
+- [ ] Fetch, fast-forward Pull and Push require confirmation and report actual network/authentication failures
+- [ ] Saving a Git token exposes only configured metadata, survives restart in the OS credential store, and can be deleted
 - [ ] Gemini key test says **Key valid**
 - [ ] AI Agent streams a response
-- [ ] Unimplemented native panels explicitly say **Simulation removed**
+- [ ] Docker, database, API-client, deployment and test-runner panels explicitly say **Simulation removed**
 - [ ] `npm run desktop:build` creates the platform bundle
 
 ## Common problems
@@ -277,9 +300,17 @@ Use the same browser profile and origin where the key was saved. Browser `localS
 
 Canvas, migration and vision tools produce source previews but do not automatically write AI output into the selected workspace. Open the native editor and explicitly create or update files after reviewing the generated source. A reviewed multi-file import flow will be added separately.
 
-### Git, Docker, database or test runner says “Simulation removed”
+### Docker, database, API client or test runner says “Simulation removed”
 
-This is intentional—not an installation failure. The previous fabricated results have been disabled. Each panel will be re-enabled only when its real native milestone is implemented and tested. The next milestone is real Git operations and encrypted credential storage.
+This is intentional—not an installation failure. The previous fabricated results have been disabled. Each panel will be re-enabled only when its real native milestone is implemented and tested. The next milestone is Docker, database and native HTTP integration.
+
+### Source Control says the repository root does not match
+
+DevLab will not let Git escape the selected workspace. If you selected a folder inside a larger repository, reopen **Code Editor** and select the repository's top-level folder—the path printed by `git rev-parse --show-toplevel`.
+
+### Git credentials are unavailable on Linux
+
+The desktop session must provide an unlocked Secret Service (for example GNOME Keyring or KDE Wallet). The credential backend can fall back to the user's kernel keyring where supported, but availability depends on the Linux desktop session. DevLab reports keyring access errors and never falls back to plaintext files or localStorage.
 
 ### Native Terminal says a workspace is required
 
@@ -310,7 +341,7 @@ devlab/
 │   ├── Cargo.toml
 │   ├── capabilities/       # default-deny native permission manifests
 │   ├── icons/              # generated desktop application icons
-│   ├── src/                # trusted Rust core, workspace service and PTY manager
+│   ├── src/                # trusted Rust core, workspace, PTY, Git and credential services
 │   └── tauri.conf.json
 └── src/
     ├── App.tsx
@@ -320,6 +351,7 @@ devlab/
     │   ├── gemini.ts       # BYOK Gemini client, retry, quota, fallback
     │   ├── native.ts       # typed native runtime bridge
     │   ├── terminal.ts     # typed PTY lifecycle and event IPC client
+    │   ├── git.ts          # typed repository, operation and credential IPC client
     │   ├── workspace.ts    # typed scoped-filesystem IPC client
     │   ├── settings.ts     # application settings
     │   └── sync.ts         # collaboration helpers
@@ -338,5 +370,8 @@ devlab/
 - Reject traversal and symbolic links at the native boundary; never rely on renderer validation.
 - Require revision matches before overwriting an existing file.
 - Rotate a key immediately if it is pasted into source code, an issue, a commit, or a public chat.
-- Treat WebView-local credentials as temporary until encrypted native storage is implemented.
+- Keep Git provider tokens in the OS credential store; expose only presence/backend metadata to the renderer and redact command failures.
+- Scope Git operations to a canonical repository root that exactly matches the selected workspace; use fixed argument arrays, output limits and timeouts instead of a shell.
+- Require explicit confirmation for every Git network operation; do not expose force push, merge or rebase through this panel.
+- Remember that the current Gemini key is still renderer-managed and separate from Rust-owned Git credentials.
 - Review generated commands and code before executing or deploying them.
