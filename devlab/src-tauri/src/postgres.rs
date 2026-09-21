@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    error::Error as StdError,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
     time::Duration,
@@ -21,6 +22,7 @@ const MAX_CONNECTION_ID_BYTES: usize = 64;
 const MAX_HOST_BYTES: usize = 253;
 const MAX_NAME_BYTES: usize = 128;
 const MAX_PASSWORD_BYTES: usize = 8 * 1024;
+const MAX_ERROR_BYTES: usize = 2 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 static KEYRING_LOCK: Mutex<()> = Mutex::new(());
 
@@ -474,9 +476,33 @@ fn postgres_error(action: &str, error: ::postgres::Error) -> CommandError {
     } else {
         CommandError::new(
             "postgres_connection_failed",
-            format!("Could not {action}: {error}"),
+            format!("Could not {action}: {}", bounded_error_chain(&error)),
         )
     }
+}
+
+fn bounded_error_chain(error: &(dyn StdError + 'static)) -> String {
+    let mut messages = Vec::new();
+    let mut current = Some(error);
+    while let Some(source) = current {
+        let message = source.to_string();
+        if !message.is_empty() && messages.last() != Some(&message) {
+            messages.push(message);
+        }
+        if messages.len() >= 6 {
+            break;
+        }
+        current = source.source();
+    }
+    let joined = messages.join(": ");
+    if joined.len() <= MAX_ERROR_BYTES {
+        return joined;
+    }
+    let mut end = MAX_ERROR_BYTES;
+    while end > 0 && !joined.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &joined[..end])
 }
 
 async fn blocking<T, F>(operation: F) -> Result<T, CommandError>
