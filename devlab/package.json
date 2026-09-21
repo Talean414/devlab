@@ -12,7 +12,7 @@
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
     "native:check": "cargo check --manifest-path src-tauri/Cargo.toml",
-    "native:test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "native:test": "cargo test --manifest-path src-tauri/Cargo.toml --lib",
     "typecheck": "tsc --noEmit",
     "build": "vite build",
     "check": "npm run typecheck && npm run build",

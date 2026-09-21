@@ -150,7 +150,6 @@ pub struct GitOperationResult {
 }
 
 struct StatusDetails {
-    head: Option<String>,
     branch: Option<String>,
     detached: bool,
     unborn: bool,
@@ -608,7 +607,6 @@ fn read_status(root: &Path) -> Result<StatusDetails, CommandError> {
 fn parse_status(value: &str) -> Result<StatusDetails, CommandError> {
     let records: Vec<&str> = value.split('\0').collect();
     let mut index = 0;
-    let mut head = None;
     let mut branch = None;
     let mut detached = false;
     let mut unborn = false;
@@ -626,8 +624,6 @@ fn parse_status(value: &str) -> Result<StatusDetails, CommandError> {
         if let Some(value) = record.strip_prefix("# branch.oid ") {
             if value == "(initial)" {
                 unborn = true;
-            } else {
-                head = Some(value.to_string());
             }
             continue;
         }
@@ -699,7 +695,6 @@ fn parse_status(value: &str) -> Result<StatusDetails, CommandError> {
     }
 
     Ok(StatusDetails {
-        head,
         branch,
         detached,
         unborn,

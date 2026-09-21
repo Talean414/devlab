@@ -894,7 +894,7 @@ mod tests {
     use super::*;
 
     fn test_session(allow_writes: bool) -> SqliteSession {
-        let mut connection = Connection::open_in_memory().expect("database should open");
+        let connection = Connection::open_in_memory().expect("database should open");
         connection
             .execute_batch("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
             .expect("table should be created before tests run");

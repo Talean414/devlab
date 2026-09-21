@@ -57,6 +57,37 @@ function stripJsonFence(value: string) {
   return value.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
 }
 
+function normalizeRepairPath(value: string) {
+  return value.trim().replace(/\\/g, "/").replace(/^\/+/, "");
+}
+
+function cargoManifestBase(evidence: string) {
+  const match = evidence.match(/--manifest-path\s+([^\s]+?)\/Cargo\.toml/);
+  return match?.[1]?.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+|\/+$/g, "") ?? "";
+}
+
+function cargoRelativePath(path: string) {
+  return /^(src|tests|test|benches|examples)\//.test(path) && path.endsWith(".rs");
+}
+
+function repairPathCandidates(input: string, result: TestRunResult) {
+  const clean = normalizeRepairPath(input);
+  const candidates = new Set<string>();
+  if (clean) candidates.add(clean);
+  const base = cargoManifestBase(`${result.profile.command}\n${result.stdout}\n${result.stderr}`);
+  if (base && cargoRelativePath(clean) && !clean.startsWith(`${base}/`)) {
+    candidates.add(`${base}/${clean}`);
+  }
+  return [...candidates];
+}
+
+function qualifyInferredRepairPath(path: string, evidence: string) {
+  const clean = normalizeRepairPath(path);
+  const base = cargoManifestBase(evidence);
+  if (base && cargoRelativePath(clean) && !clean.startsWith(`${base}/`)) return `${base}/${clean}`;
+  return clean;
+}
+
 function parseRepairDraft(raw: string, path: string): RepairDraft {
   const cleaned = stripJsonFence(raw);
   const first = cleaned.indexOf("{");
@@ -141,7 +172,8 @@ export function HealerPanel({
       setResult(next);
       setRepairDraft(null);
       setRepairNotice("");
-      const inferred = inferRepairPath(next.stdout + "\n" + next.stderr);
+      const evidence = `${next.profile.command}\n${next.stdout}\n${next.stderr}`;
+      const inferred = inferRepairPath(evidence);
       if (inferred) setRepairPath((current) => current || inferred);
     } catch (err) {
       setError(formatError(err));
@@ -151,8 +183,8 @@ export function HealerPanel({
   }
 
   function inferRepairPath(output: string) {
-    const match = output.match(/(?:^|\s)((?:src|test|tests|app|lib|packages|crates)\/[\w./-]+\.(?:ts|tsx|js|jsx|py|rs|go|java|rb|php|json|yml|yaml|toml|md|css|html))/m);
-    return match?.[1] ?? "";
+    const match = output.match(/(?:^|\s)((?:src|test|tests|benches|examples|app|lib|packages|crates)\/[\w./-]+\.(?:ts|tsx|js|jsx|py|rs|go|java|rb|php|json|yml|yaml|toml|md|css|html))/m);
+    return match ? qualifyInferredRepairPath(match[1], output) : "";
   }
 
   async function generateRepairDraft() {
@@ -170,8 +202,23 @@ export function HealerPanel({
     setRepairNotice("");
     setRepairDraft(null);
     try {
-      const targetPath = repairPath.trim().replace(/^\/+/, "");
-      const document = await readWorkspaceFile(targetPath);
+      let targetPath = "";
+      let document: Awaited<ReturnType<typeof readWorkspaceFile>> | null = null;
+      let lastReadError: unknown = null;
+      const candidates = repairPathCandidates(repairPath, result);
+      for (const candidate of candidates) {
+        try {
+          document = await readWorkspaceFile(candidate);
+          targetPath = candidate;
+          break;
+        } catch (err) {
+          lastReadError = err;
+        }
+      }
+      if (!document) {
+        throw new Error(`Could not read the repair target. Tried: ${candidates.join(", ") || "(none)"}. ${formatError(lastReadError)}`);
+      }
+      if (targetPath !== repairPath.trim()) setRepairPath(targetPath);
       if (document.content.length > MAX_REPAIR_SOURCE_CHARS) {
         throw new Error(`Repair drafts accept source files up to ${(MAX_REPAIR_SOURCE_CHARS / 1024).toFixed(0)} KiB for this checkpoint.`);
       }
@@ -254,7 +301,7 @@ ${document.content}
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Native Test Runner"
-        subtitle="Phase 6B · native tests plus reviewed in-memory repair drafts"
+        subtitle="Phase 6C · native tests plus reviewed draft application"
         badge={badge}
         badgeOk={result?.status === "passed" || (!result && !error && !loading)}
       />
