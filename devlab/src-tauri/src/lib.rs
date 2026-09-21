@@ -1,10 +1,15 @@
 mod credentials;
+mod database;
 mod docker;
 mod git;
 mod terminal;
 mod workspace;
 
 use credentials::{git_credential_delete, git_credential_status, git_credential_store};
+use database::{
+    database_connections, database_disconnect, database_query, database_schema,
+    database_set_write_access, database_sqlite_select, DatabaseService,
+};
 use docker::{
     docker_create, docker_logs, docker_pull, docker_remove, docker_restart, docker_snapshot,
     docker_start, docker_stop,
@@ -51,6 +56,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
             "git",
             "secure-storage",
             "docker",
+            "database",
         ],
     }
 }
@@ -60,6 +66,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(WorkspaceService::default())
         .manage(TerminalService::default())
+        .manage(DatabaseService::default())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -112,6 +119,12 @@ pub fn run() {
             docker_restart,
             docker_remove,
             docker_logs,
+            database_connections,
+            database_sqlite_select,
+            database_schema,
+            database_query,
+            database_set_write_access,
+            database_disconnect,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevLab");

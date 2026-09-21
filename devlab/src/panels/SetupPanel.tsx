@@ -97,7 +97,7 @@ const PHASES: readonly MigrationPhase[] = [
     n: 5,
     title: "Docker, databases and native HTTP",
     status: "active",
-    detail: "Docker detection, live state, logs, lifecycle actions, validated image pulls and constrained stopped-container creation are complete. Database connections and native HTTP are next.",
+    detail: "Docker is complete. Workspace-scoped SQLite now has real schema inspection, bounded queries, read-only mode and individually confirmed writes. PostgreSQL and native HTTP are next.",
   },
   {
     n: 6,
@@ -192,8 +192,8 @@ export function SetupPanel() {
               <Note>
                 <strong>No fake native results:</strong> opening the app with <code>npm run dev</code>
                 creates only a browser UI preview. Workspace Editor, PTY Terminal, Source Control
-                and Docker are available through <code>npm run desktop:dev</code>; database, native
-                HTTP and test execution stay disabled until their own native capability is implemented.
+                Docker and workspace-scoped SQLite are available through <code>npm run desktop:dev</code>;
+                PostgreSQL, native HTTP and test execution stay disabled until their own native capability is implemented.
               </Note>
             </>
           )}
@@ -211,7 +211,7 @@ export function SetupPanel() {
                 <ArchitectureCard
                   icon={Cpu}
                   title="Rust core · phased"
-                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Scoped Git, OS credentials and bounded Docker commands"]}
+                  items={["Runtime handshake", "Canonical workspace boundary", "Guarded file CRUD and watcher", "Cross-platform PTY sessions", "Scoped Git, OS credentials, bounded Docker and SQLite commands"]}
                 />
               </div>
 
@@ -235,6 +235,7 @@ export function SetupPanel() {
                   "Destructive agent commands require explicit approval unless a narrow policy permits them.",
                   "Saved Git tokens never return to the renderer; it receives only presence and backend metadata.",
                   "Docker commands accept validated IDs and typed creation fields; pulls have fixed arguments, and arbitrary CLI flags are not exposed.",
+                  "SQLite files must resolve inside the selected workspace; writes are disabled by default and confirmed one statement at a time.",
                   "Remote pages are never loaded into a privileged application context.",
                   "Every agent tool action will have timeout, cancellation and audit metadata.",
                 ].map((rule) => (

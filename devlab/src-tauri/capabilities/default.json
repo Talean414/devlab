@@ -45,6 +45,12 @@
     "allow-docker-stop",
     "allow-docker-restart",
     "allow-docker-remove",
-    "allow-docker-logs"
+    "allow-docker-logs",
+    "allow-database-connections",
+    "allow-database-sqlite-select",
+    "allow-database-schema",
+    "allow-database-query",
+    "allow-database-set-write-access",
+    "allow-database-disconnect"
   ]
 }

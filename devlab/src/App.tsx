@@ -38,6 +38,10 @@ const DockerPanel = lazy(() => import("./panels/DockerPanel").then((module) => (
   default: module.DockerPanel,
 })));
 
+const DatabasePanel = lazy(() => import("./panels/DatabasePanel").then((module) => ({
+  default: module.DatabasePanel,
+})));
+
 interface NavItem { id: ViewId; icon: typeof Sparkles; label: string; shortcut?: string }
 
 const NAV: NavItem[] = [
@@ -208,9 +212,13 @@ export default function App() {
       case "deploy":   return nativeFeature(
         "Deployment", "deploy", "Phase 6 · approved native deployment commands",
       );
-      case "database": return nativeFeature(
-        "Database Client", "database", "Phase 5 · native SQL connections",
-      );
+      case "database": return hasNativeCapability(runtime, "database")
+        ? <Suspense fallback={<NativePanelLoading label="Loading native database integration…" />}>
+          <DatabasePanel onOpenWorkspace={() => navigate("editor")} />
+        </Suspense>
+        : nativeFeature(
+          "Database Client", "database", "Phase 5B.1 · workspace-scoped SQLite connections",
+        );
       case "api":      return nativeFeature(
         "API Client", "native-http", "Phase 5 · native HTTP client without browser CORS limits",
       );
@@ -324,7 +332,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 5A.1 native Docker</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 5B.1 native SQLite</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}
@@ -332,7 +340,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-4">
             <span className="hidden font-mono md:inline">{model}</span>
-            <span className="font-mono">DevLab v1.5</span>
+            <span className="font-mono">DevLab v1.6</span>
           </div>
         </footer>
       )}

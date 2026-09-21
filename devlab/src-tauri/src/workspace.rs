@@ -111,6 +111,12 @@ impl WorkspaceRoot {
     }
 }
 
+pub(crate) struct ScopedWorkspaceFile {
+    pub(crate) path: PathBuf,
+    pub(crate) relative_path: String,
+    pub(crate) workspace_root: PathBuf,
+}
+
 #[derive(Default)]
 struct WorkspaceInner {
     root: Option<WorkspaceRoot>,
@@ -125,6 +131,49 @@ pub struct WorkspaceService {
 impl WorkspaceService {
     pub(crate) fn root_path(&self) -> Result<PathBuf, CommandError> {
         Ok(self.root()?.path().to_path_buf())
+    }
+
+    pub(crate) fn authorize_existing_file(
+        &self,
+        selected_path: &Path,
+    ) -> Result<ScopedWorkspaceFile, CommandError> {
+        let root = self.root()?;
+        let unresolved_metadata = fs::symlink_metadata(selected_path)
+            .map_err(|error| CommandError::io("inspect the selected workspace file", error))?;
+        if unresolved_metadata.file_type().is_symlink() {
+            return Err(CommandError::new(
+                "symlink_not_allowed",
+                "Symbolic links cannot be opened by the workspace service.",
+            ));
+        }
+        if !unresolved_metadata.is_file() {
+            return Err(CommandError::new(
+                "not_a_file",
+                "Select an existing regular file inside the workspace.",
+            ));
+        }
+        let path = fs::canonicalize(selected_path)
+            .map_err(|error| CommandError::io("resolve the selected workspace file", error))?;
+        let resolved_metadata = fs::symlink_metadata(selected_path)
+            .map_err(|error| CommandError::io("recheck the selected workspace file", error))?;
+        if resolved_metadata.file_type().is_symlink() {
+            return Err(CommandError::new(
+                "symlink_not_allowed",
+                "Symbolic links cannot be opened by the workspace service.",
+            ));
+        }
+        root.ensure_scoped(&path)?;
+        let relative = path.strip_prefix(root.path()).map_err(|_| {
+            CommandError::new(
+                "path_outside_workspace",
+                "The selected file resolves outside the active workspace.",
+            )
+        })?;
+        Ok(ScopedWorkspaceFile {
+            relative_path: path_to_wire(relative)?,
+            path,
+            workspace_root: root.path().to_path_buf(),
+        })
     }
 
     fn root(&self) -> Result<WorkspaceRoot, CommandError> {
@@ -834,6 +883,30 @@ mod tests {
         symlink("missing.txt", &dangling).expect("test symlink should be created");
 
         assert!(workspace_entry_exists(&dangling).expect("entry check should succeed"));
+    }
+
+    #[test]
+    fn authorizes_only_existing_regular_files_in_the_workspace() {
+        let workspace = TestWorkspace::new();
+        let database = workspace.0.join("app.sqlite");
+        fs::write(&database, b"SQLite format 3\0").expect("test file should exist");
+        let service = WorkspaceService {
+            inner: Mutex::new(WorkspaceInner {
+                root: Some(WorkspaceRoot::open(&workspace.0).expect("workspace should open")),
+                watcher: None,
+            }),
+        };
+        let scoped = service
+            .authorize_existing_file(&database)
+            .expect("workspace file should be authorized");
+        assert_eq!(scoped.relative_path, "app.sqlite");
+        assert_eq!(scoped.workspace_root, workspace.0);
+
+        let outside = TestWorkspace::new();
+        let outside_file = outside.0.join("outside.sqlite");
+        fs::write(&outside_file, b"SQLite format 3\0").expect("outside file should exist");
+        assert!(service.authorize_existing_file(&outside_file).is_err());
+        assert!(service.authorize_existing_file(&workspace.0).is_err());
     }
 
     #[test]

@@ -6,7 +6,7 @@ DevLab is a native developer control plane built with **Tauri 2, Rust, React, Ty
 
 ## Native migration status
 
-Phases 1 through 4 and the Docker portion of Phase 5 are implemented: DevLab has a Tauri desktop shell, typed Rust-to-React IPC, restricted capabilities, a real scoped workspace service connected to Monaco, a cross-platform PTY terminal connected to xterm.js, native source control, and bounded access to a real Docker CLI and engine.
+Phases 1 through 4, Docker, and the first database checkpoint of Phase 5 are implemented: DevLab has a Tauri desktop shell, typed Rust-to-React IPC, restricted capabilities, a real scoped workspace service connected to Monaco, a cross-platform PTY terminal connected to xterm.js, native source control, bounded access to a real Docker CLI and engine, and workspace-scoped SQLite connections.
 
 A workspace can be granted only through the native folder picker. The Rust backend holds its canonical root in memory, rejects absolute paths and parent traversal, blocks symlink access, limits text I/O, watches native filesystem changes, and uses content revisions to prevent silent overwrites.
 
@@ -16,7 +16,9 @@ Source Control discovers only a repository whose canonical root exactly matches 
 
 Containers detects the real Docker CLI and daemon, then reads actual containers, one-shot resource statistics, images and bounded logs. It can pull a validated image reference and create a stopped container with a validated name and optional loopback-only port mappings. Start, stop, restart and non-force removal use validated full container IDs; disruptive actions require confirmation. Arbitrary Docker arguments, custom container commands, environment values, host mounts, privileged mode, builds, image/volume deletion and Compose deployment are not exposed by this step.
 
-Simulated database, deployment, CI, toolchain, API-client and test-runner results remain disabled. Those panels are re-enabled only after their real native backend is completed. The normal Vite server remains available strictly as a UI preview.
+Database opens an existing SQLite file only through the native picker and only when its canonical path remains inside the selected workspace. The bundled Rust-owned SQLite engine exposes the real user schema and one statement at a time with a five-second timeout, 1,000 displayed rows, 200 columns, bounded cells and a 2 MiB encoded-result budget. Connections default to operating-system-enforced read-only mode. Users can explicitly enable writes per in-memory connection, but every mutating statement still requires separate confirmation. Database attachment, configuration PRAGMAs, explicit transactions, temporary/virtual-table DDL and filesystem-capable SQL functions are blocked.
+
+Simulated PostgreSQL and other server-database connections, deployment, CI, toolchain, API-client and test-runner results remain disabled. Those panels are re-enabled only after their real native backend is completed. The normal Vite server remains available strictly as a UI preview.
 
 ## Current working features
 
@@ -36,12 +38,14 @@ Simulated database, deployment, CI, toolchain, API-client and test-runner result
 - Real Docker CLI/daemon detection, container state, one-shot statistics, local images and bounded logs
 - Validated image pulls and constrained stopped-container creation with loopback-only port publishing
 - Confirmed container stop/restart/removal with validated IDs; explicit start and no force removal
+- Workspace-scoped native SQLite connections with real schema inspection and bounded query results
+- User-configurable read-only/write access with backend-enforced confirmation for every mutating statement
 - Project template and command references
 - BroadcastChannel/WebRTC collaboration primitives
 - Embedded web preview
 - WebView-local non-secret preferences; the Gemini BYOK key remains in its existing renderer flow
 
-The remaining Phase 5 backends are native database connections and native HTTP. Agent tool execution and signed distribution follow afterward. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
+The remaining Phase 5 backends are PostgreSQL server connections and native HTTP. Agent tool execution and signed distribution follow afterward. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
 
 ## Requirements
 
@@ -171,7 +175,20 @@ DevLab never initializes a repository, adds a remote, changes Git identity, chec
 
 DevLab refreshes Docker state every 15 seconds while the panel is open. This step intentionally does not expose arbitrary Docker arguments, custom commands, environment values, host mounts, privileged mode, builds, image or volume deletion, or Compose deployment.
 
-## 9. Verify the complete build
+## 9. Use native SQLite
+
+1. Select the canonical workspace that contains an existing SQLite database file.
+2. Open **Database** and choose **Open SQLite database**.
+3. Leave **Open read-only** selected for inspection, or explicitly choose **Allow confirmed writes** before opening the native file picker.
+4. Select an existing regular database file inside the workspace. A file outside the workspace, a symbolic link, a directory or an invalid SQLite file is rejected.
+5. Inspect the real tables, views and columns in the left sidebar. Selecting **Query first 100 rows** generates a quoted `SELECT` statement but does not execute it automatically.
+6. Run one statement with the **Run** button or `Ctrl/Cmd+Enter`. Results contain genuine SQLite values and clearly report row, output or cell truncation.
+7. To change access later, use **Enable writes** or **Disable writes**. Enabling writes reopens that connection in read/write mode; each statement SQLite classifies as mutating still opens a separate confirmation prompt.
+8. Disconnect when finished. SQLite connections and write-access choices stay only in Rust process memory and are not restored after restart.
+
+DevLab does not create a database file in this checkpoint. It blocks `ATTACH`, `DETACH`, configuration PRAGMAs, explicit transaction control, temporary or virtual-table DDL, and filesystem-capable functions. A write is a real database operation and may create SQLite journal or WAL files beside the selected database. PostgreSQL with protected credentials and explicit TLS policy is the next database checkpoint.
+
+## 10. Verify the complete build
 
 Run both frontend and native checks before packaging:
 
@@ -181,7 +198,7 @@ npm run native:check
 npm run native:test
 ```
 
-The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary, revision, terminal-dimension, bounded-output, Git parser/path validation, and Docker record, ID, image-reference and typed-creation validation tests.
+The first command type-checks React and creates `devlab/dist/`; the second compiles the Rust backend; the third exercises native path-boundary, revision, terminal-dimension, bounded-output, Git parser/path validation, Docker validation, SQLite access-mode/confirmation rules, SQL restrictions and result truncation.
 
 Build the native application and this operating system's installer formats:
 
@@ -191,7 +208,7 @@ npm run desktop:build
 
 For an interface-only production preview, run `npm run preview -- --host 0.0.0.0`. Native capabilities intentionally remain unavailable in that browser preview.
 
-## 10. Deploy the optional web preview
+## 11. Deploy the optional web preview
 
 DevLab is a static frontend. It does not need a Node server after the build finishes.
 
@@ -277,9 +294,13 @@ Use this list before calling an installation complete:
 - [ ] Creating a named container leaves it stopped, publishes requested ports only on `127.0.0.1`, and rejects invalid or duplicate fields
 - [ ] Container logs contain real output, and starting a stopped test container updates its actual Docker state
 - [ ] Stop/restart/removal require confirmation, removal refuses running containers, and daemon permission failures are reported honestly
+- [ ] Database rejects files outside the selected workspace and opens a real SQLite file read-only by default
+- [ ] Database schema, `SELECT` values, NULLs and BLOB sizes come from the actual file and large results report truncation
+- [ ] A write fails in read-only mode; after enabling writes it requires confirmation and changes the real database
+- [ ] `ATTACH`, configuration PRAGMAs, explicit transactions and virtual-table creation are rejected at the native boundary
 - [ ] Gemini key test says **Key valid**
 - [ ] AI Agent streams a response
-- [ ] Database, API-client, deployment and test-runner panels explicitly say **Simulation removed**
+- [ ] API-client, deployment and test-runner panels explicitly say **Simulation removed**; Database clearly marks PostgreSQL as the next checkpoint
 - [ ] `npm run desktop:build` creates the platform bundle
 
 ## Common problems
@@ -323,9 +344,9 @@ Use the same browser profile and origin where the key was saved. Browser `localS
 
 Canvas, migration and vision tools produce source previews but do not automatically write AI output into the selected workspace. Open the native editor and explicitly create or update files after reviewing the generated source. A reviewed multi-file import flow will be added separately.
 
-### Database, API client or test runner says “Simulation removed”
+### PostgreSQL, API client or test runner says “Simulation removed”
 
-This is intentional—not an installation failure. The previous fabricated results remain disabled until each real backend is implemented and tested. Native database connections and HTTP requests are the remaining Phase 5 work.
+This is intentional—not an installation failure. The previous fabricated results remain disabled until each real backend is implemented and tested. SQLite is the first real database backend; PostgreSQL and native HTTP are the remaining Phase 5 work.
 
 ### Containers says Docker is unavailable
 
@@ -334,6 +355,14 @@ Run `docker version` in a normal terminal. If the CLI is missing, install Docker
 ### Pull image reports access denied or manifest unknown
 
 DevLab uses the current Docker CLI context and registry credentials without collecting registry passwords itself. Confirm the reference and tag with `docker image pull IMAGE`, and use `docker login` in a trusted terminal when a private registry requires authentication. DevLab returns the registry or daemon error rather than creating a placeholder image.
+
+### SQLite file is rejected or writes fail
+
+Select the canonical workspace containing the database before opening **Database**. The selected item must be an existing regular file—not a symbolic link—and must remain inside that workspace after canonicalization. For writes, both the database file and its parent directory need appropriate operating-system permissions because SQLite can create journal or WAL files. DevLab never changes filesystem permissions automatically.
+
+### SQLite query is restricted or times out
+
+DevLab accepts one statement and stops it after five seconds. `ATTACH`, `DETACH`, configuration PRAGMAs, explicit transaction control, temporary or virtual-table DDL, and filesystem-capable functions are deliberately unavailable. Split normal SQL work into individual statements; use a trusted terminal or dedicated database administration tool for operations outside this policy.
 
 ### Source Control says the repository root does not match
 
@@ -372,7 +401,7 @@ devlab/
 │   ├── Cargo.toml
 │   ├── capabilities/       # default-deny native permission manifests
 │   ├── icons/              # generated desktop application icons
-│   ├── src/                # trusted Rust core, workspace, PTY, Git, credentials and Docker
+│   ├── src/                # trusted Rust core, workspace, PTY, Git, credentials, Docker and SQLite
 │   └── tauri.conf.json
 └── src/
     ├── App.tsx
@@ -384,6 +413,7 @@ devlab/
     │   ├── terminal.ts     # typed PTY lifecycle and event IPC client
     │   ├── git.ts          # typed repository, operation and credential IPC client
     │   ├── docker.ts       # typed Docker state, pull, creation, logs and lifecycle IPC client
+    │   ├── database.ts     # typed SQLite connection, schema, access-mode and query IPC client
     │   ├── workspace.ts    # typed scoped-filesystem IPC client
     │   ├── settings.ts     # application settings
     │   └── sync.ts         # collaboration helpers
@@ -406,5 +436,7 @@ devlab/
 - Scope Git operations to a canonical repository root that exactly matches the selected workspace; use fixed argument arrays, output limits and timeouts instead of a shell.
 - Require explicit confirmation for every Git network operation; do not expose force push, merge or rebase through this panel.
 - Treat Docker daemon access as privileged: validate full IDs, image references, names and ports; use fixed commands and timeouts; bind created ports to loopback; confirm disruptive actions; and never imply workload sandboxing.
+- Open SQLite files only through the native picker after canonical workspace authorization; default to read-only, classify statements in SQLite itself, confirm every write, and bound query time and output.
+- Deny SQLite database attachment, connection-changing PRAGMAs, explicit transactions, temporary/virtual-table DDL and filesystem-capable functions so SQL cannot escape the selected database policy.
 - Remember that the current Gemini key is still renderer-managed and separate from Rust-owned Git credentials.
 - Review generated commands and code before executing or deploying them.

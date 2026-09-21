@@ -39,6 +39,12 @@ const APP_COMMANDS: &[&str] = &[
     "docker_restart",
     "docker_remove",
     "docker_logs",
+    "database_connections",
+    "database_sqlite_select",
+    "database_schema",
+    "database_query",
+    "database_set_write_access",
+    "database_disconnect",
 ];
 
 fn main() {

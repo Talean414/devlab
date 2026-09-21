@@ -83,15 +83,6 @@ export interface DeployProvider {
   color: string;
 }
 
-export interface DbConnection {
-  id: string;
-  name: string;
-  engine: "PostgreSQL" | "MySQL" | "Redis" | "MongoDB" | "SQLite";
-  host: string;
-  port: number;
-  status: "connected" | "idle";
-}
-
 // ── Virtual file system for the built-in editor ──
 export interface VFile {
   path: string;
