@@ -36,6 +36,14 @@ function formatError(error: unknown) {
   return String(error);
 }
 
+function errorTitle(error: string) {
+  return error.startsWith("Repair draft error:") ? "Repair draft error" : "Native test runner error";
+}
+
+function visibleError(error: string) {
+  return error.replace(/^Repair draft error:\s*/, "");
+}
+
 function excerpt(value: string, maxChars: number) {
   if (value.length <= maxChars) return value;
   return `${value.slice(0, maxChars)}\n… truncated for prompt (${value.length.toLocaleString()} characters total).`;
@@ -88,23 +96,66 @@ function qualifyInferredRepairPath(path: string, evidence: string) {
   return clean;
 }
 
+function validateRepairContent(content: string) {
+  const clean = content.replace(/^```[\w-]*\s*/i, "").replace(/```\s*$/i, "").trim();
+  if (!clean) throw new Error("Model response did not include a non-empty patched file.");
+  if (clean.length > MAX_REPAIR_OUTPUT_CHARS) {
+    throw new Error(`Repair draft exceeded ${(MAX_REPAIR_OUTPUT_CHARS / 1024).toFixed(0)} KiB. Narrow the target file or failing test output.`);
+  }
+  return clean;
+}
+
+function extractFencedFile(raw: string) {
+  const matches = [...raw.matchAll(/```[\w-]*\s*\n([\s\S]*?)```/g)].map((match) => match[1]);
+  if (matches.length === 0) return "";
+  return matches.sort((left, right) => right.length - left.length)[0] ?? "";
+}
+
+function extractTaggedRepair(raw: string) {
+  const rationale = raw.match(/<devlab-rationale>([\s\S]*?)<\/devlab-rationale>/i)?.[1]?.trim() ?? "";
+  const content = raw.match(/<devlab-patched-file>([\s\S]*?)<\/devlab-patched-file>/i)?.[1] ?? "";
+  return content ? { rationale, content } : null;
+}
+
 function parseRepairDraft(raw: string, path: string): RepairDraft {
   const cleaned = stripJsonFence(raw);
   const first = cleaned.indexOf("{");
   const last = cleaned.lastIndexOf("}");
-  if (first < 0 || last <= first) throw new Error("Model response did not contain a JSON object.");
-  const parsed = JSON.parse(cleaned.slice(first, last + 1)) as { patched?: unknown; rationale?: unknown };
-  if (typeof parsed.patched !== "string" || !parsed.patched.trim()) {
-    throw new Error("Model response did not include a non-empty patched file.");
+  if (first >= 0 && last > first) {
+    try {
+      const parsed = JSON.parse(cleaned.slice(first, last + 1)) as { patched?: unknown; rationale?: unknown };
+      if (typeof parsed.patched === "string") {
+        return {
+          path,
+          content: validateRepairContent(parsed.patched),
+          rationale: typeof parsed.rationale === "string" ? parsed.rationale : "No rationale returned.",
+        };
+      }
+    } catch {
+      // Whole-file JSON is brittle for source code. Fall through to tags/fences.
+    }
   }
-  if (parsed.patched.length > MAX_REPAIR_OUTPUT_CHARS) {
-    throw new Error(`Repair draft exceeded ${(MAX_REPAIR_OUTPUT_CHARS / 1024).toFixed(0)} KiB. Narrow the target file or failing test output.`);
+
+  const tagged = extractTaggedRepair(raw);
+  if (tagged) {
+    return {
+      path,
+      content: validateRepairContent(tagged.content),
+      rationale: tagged.rationale || "Repair draft generated from the failing native test output.",
+    };
   }
-  return {
-    path,
-    content: parsed.patched,
-    rationale: typeof parsed.rationale === "string" ? parsed.rationale : "No rationale returned.",
-  };
+
+  const fenced = extractFencedFile(raw);
+  if (fenced) {
+    const rationale = raw.slice(0, raw.indexOf("```")).replace(/^(rationale|reasoning)\s*:\s*/i, "").trim();
+    return {
+      path,
+      content: validateRepairContent(fenced),
+      rationale: rationale || "Repair draft generated from the failing native test output.",
+    };
+  }
+
+  throw new Error("Model response did not include valid JSON, DevLab repair tags, or a fenced patched file.");
 }
 
 function statusStyle(status?: TestRunResult["status"]) {
@@ -225,18 +276,20 @@ export function HealerPanel({
       const prompt = `You are DevLab's reviewed repair assistant. A real native test run failed.
 
 Rules:
-- Produce ONLY valid JSON. No markdown fences, no prose outside JSON.
 - Patch exactly this one file: ${targetPath}
 - Return the ENTIRE patched file, not a diff.
 - Do not invent test results.
 - Preserve public APIs unless the test output requires a change.
 - If the evidence is insufficient, make the smallest defensive fix and explain uncertainty in rationale.
-
-JSON shape:
-{
-  "rationale": "short explanation of the root cause and fix",
-  "patched": "complete patched file contents"
-}
+- Prefer this exact response format so DevLab can parse source code safely:
+<devlab-rationale>
+short explanation of the root cause and fix
+</devlab-rationale>
+<devlab-patched-file>
+\`\`\`text
+complete patched file contents
+\`\`\`
+</devlab-patched-file>
 
 TEST PROFILE: ${result.profile.label}
 COMMAND: ${result.profile.command}
@@ -266,7 +319,7 @@ ${document.content}
       setRepairDraft(draft);
       setRepairNotice("Repair draft generated in memory. Review it before sending it to the editor draft flow.");
     } catch (err) {
-      setError(formatError(err));
+      setError(`Repair draft error: ${formatError(err)}`);
     } finally {
       setRepairBusy(false);
     }
@@ -396,9 +449,9 @@ ${document.content}
             {error && (
               <div className="mb-4 rounded-xl border border-rose-500/30 bg-rose-500/[0.06] p-4 text-[12.5px] leading-relaxed text-rose-100/90">
                 <div className="mb-2 flex items-center gap-2 font-semibold text-rose-200">
-                  <XCircle className="h-4 w-4" /> Native test runner error
+                  <XCircle className="h-4 w-4" /> {errorTitle(error)}
                 </div>
-                <pre className="whitespace-pre-wrap font-mono text-[11.5px]">{error}</pre>
+                <pre className="whitespace-pre-wrap font-mono text-[11.5px]">{visibleError(error)}</pre>
               </div>
             )}
 
