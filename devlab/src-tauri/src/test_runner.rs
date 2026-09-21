@@ -7,7 +7,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use wait_timeout::ChildExt;
 
 use crate::workspace::{CommandError, WorkspaceService};
