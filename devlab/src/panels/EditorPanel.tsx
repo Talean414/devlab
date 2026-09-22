@@ -24,6 +24,7 @@ import {
 import {
   AlertTriangle,
   ArrowUp,
+  CheckCircle2,
   ChevronRight,
   FileCode2,
   FilePlus2,
@@ -46,6 +47,21 @@ interface OpenDocument extends WorkspaceDocument {
   dirty: boolean;
   saving: boolean;
   changedOnDisk: boolean;
+}
+
+type DraftInspectionStatus = "loading" | "new" | "update" | "unchanged" | "unavailable" | "error";
+
+interface DraftInspection {
+  key: string;
+  path: string;
+  status: DraftInspectionStatus;
+  message: string;
+  added: number;
+  removed: number;
+  preview: string;
+  truncated: boolean;
+  existingRevision?: string;
+  existingSize?: number;
 }
 
 const LANGUAGE_BY_EXTENSION: Record<string, string> = {
@@ -103,6 +119,8 @@ export function EditorPanel({
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [draftReviewOpen, setDraftReviewOpen] = useState(incomingDrafts.length > 0);
   const [draftIndex, setDraftIndex] = useState(0);
+  const [draftInspection, setDraftInspection] = useState<DraftInspection | null>(null);
+  const [appliedDraftKeys, setAppliedDraftKeys] = useState<string[]>([]);
   const ignoredEvents = useRef(new Map<string, number>());
   const eventTimer = useRef<number | null>(null);
   const settings = loadSettings();
@@ -117,16 +135,120 @@ export function EditorPanel({
       : entries;
   }, [entries, filter]);
   const selectedDraft = incomingDrafts[draftIndex];
+  const selectedDraftKey = selectedDraft ? draftKey(selectedDraft, draftIndex) : "";
+  const selectedDraftApplied = selectedDraftKey ? appliedDraftKeys.includes(selectedDraftKey) : false;
 
   useEffect(() => {
     if (incomingDrafts.length === 0) {
       setDraftReviewOpen(false);
       setDraftIndex(0);
+      setAppliedDraftKeys([]);
+      setDraftInspection(null);
       return;
     }
     setDraftIndex(0);
+    setAppliedDraftKeys([]);
     setDraftReviewOpen(true);
   }, [incomingDrafts]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!draftReviewOpen || !selectedDraft) {
+      setDraftInspection(null);
+      return;
+    }
+
+    const key = draftKey(selectedDraft, draftIndex);
+    const path = normalizeDraftPath(selectedDraft.path);
+    if (!path) {
+      setDraftInspection({
+        key,
+        path: selectedDraft.path,
+        status: "error",
+        message: "This generated draft does not have a valid workspace-relative path.",
+        added: 0,
+        removed: 0,
+        preview: "",
+        truncated: false,
+      });
+      return;
+    }
+    if (!workspace) {
+      setDraftInspection({
+        key,
+        path,
+        status: "unavailable",
+        message: "Select a workspace to compare this generated draft against files on disk.",
+        added: countLines(selectedDraft.content),
+        removed: 0,
+        preview: buildDraftDiff(null, selectedDraft.content).preview,
+        truncated: false,
+      });
+      return;
+    }
+
+    setDraftInspection({
+      key,
+      path,
+      status: "loading",
+      message: "Comparing generated draft with the selected workspace…",
+      added: 0,
+      removed: 0,
+      preview: "",
+      truncated: false,
+    });
+
+    readWorkspaceFile(path)
+      .then((existing) => {
+        if (cancelled) return;
+        const diff = buildDraftDiff(existing.content, selectedDraft.content);
+        setDraftInspection({
+          key,
+          path,
+          status: diff.added === 0 && diff.removed === 0 ? "unchanged" : "update",
+          message: diff.added === 0 && diff.removed === 0
+            ? "The generated draft matches the workspace file exactly. Applying it would not change the file."
+            : "This generated draft updates an existing workspace file. The native revision check still runs when you apply it.",
+          added: diff.added,
+          removed: diff.removed,
+          preview: diff.preview,
+          truncated: diff.truncated,
+          existingRevision: existing.revision,
+          existingSize: existing.size,
+        });
+      })
+      .catch((commandError) => {
+        if (cancelled) return;
+        if (isMissingWorkspaceFile(commandError)) {
+          const diff = buildDraftDiff(null, selectedDraft.content);
+          setDraftInspection({
+            key,
+            path,
+            status: "new",
+            message: "This generated draft creates a new workspace file. Missing parent directories are created only by the reviewed-draft apply path.",
+            added: diff.added,
+            removed: 0,
+            preview: diff.preview,
+            truncated: diff.truncated,
+          });
+          return;
+        }
+        setDraftInspection({
+          key,
+          path,
+          status: "error",
+          message: `Could not compare with the workspace file: ${errorMessage(commandError)}`,
+          added: 0,
+          removed: 0,
+          preview: "",
+          truncated: false,
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [draftReviewOpen, selectedDraft, draftIndex, workspace, refreshVersion]);
 
   useEffect(() => {
     onDirtyChange?.(dirtyCount > 0);
@@ -389,8 +511,15 @@ export function EditorPanel({
       setOpenTabs((tabs) => [...tabs.filter((tab) => tab !== path), path]);
       setActivePath(path);
       setCurrentDirectory(parentPath(path));
-      setDraftReviewOpen(false);
       setRefreshVersion((version) => version + 1);
+      const appliedKey = draftKey(draft, draftIndex);
+      const nextAppliedKeys = appliedDraftKeys.includes(appliedKey)
+        ? appliedDraftKeys
+        : [...appliedDraftKeys, appliedKey];
+      setAppliedDraftKeys(nextAppliedKeys);
+      const nextDraftIndex = nextUnappliedDraftIndex(incomingDrafts, nextAppliedKeys, draftIndex);
+      if (nextDraftIndex >= 0) setDraftIndex(nextDraftIndex);
+      else setDraftReviewOpen(false);
       setNotice(`${action} ${path} from a reviewed draft. This action was recorded in the native agent audit log.`);
     } catch (commandError) {
       ignoredEvents.current.delete(path);
@@ -807,19 +936,24 @@ export function EditorPanel({
                 </p>
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto p-2">
-                {incomingDrafts.map((draft, index) => (
-                  <button
-                    key={`${draft.path}-${index}`}
-                    onClick={() => setDraftIndex(index)}
-                    className={`mb-1 w-full rounded-lg px-3 py-2 text-left font-mono text-[11px] transition ${
-                      index === draftIndex
-                        ? "bg-violet-500/15 text-violet-100"
-                        : "text-zinc-500 hover:bg-white/5 hover:text-zinc-300"
-                    }`}
-                  >
-                    {draft.path}
-                  </button>
-                ))}
+                {incomingDrafts.map((draft, index) => {
+                  const key = draftKey(draft, index);
+                  const applied = appliedDraftKeys.includes(key);
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => setDraftIndex(index)}
+                      className={`mb-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left font-mono text-[11px] transition ${
+                        index === draftIndex
+                          ? "bg-violet-500/15 text-violet-100"
+                          : "text-zinc-500 hover:bg-white/5 hover:text-zinc-300"
+                      }`}
+                    >
+                      <span className="min-w-0 flex-1 truncate">{draft.path}</span>
+                      {applied && <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />}
+                    </button>
+                  );
+                })}
               </div>
               <div className="border-t border-white/10 p-3">
                 <button
@@ -837,26 +971,60 @@ export function EditorPanel({
               <div className="flex items-center gap-3 border-b border-white/10 px-4 py-3">
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-mono text-[12px] text-zinc-200">{selectedDraft.path}</div>
-                  <div className="mt-0.5 text-[10.5px] text-zinc-600">{selectedDraft.language} · generated preview</div>
+                  <div className="mt-0.5 text-[10.5px] text-zinc-600">
+                    {draftInspection?.key === selectedDraftKey ? draftStatusLabel(draftInspection) : "Inspecting draft…"} · {selectedDraft.language}
+                  </div>
                 </div>
                 <button onClick={() => setDraftReviewOpen(false)} className="rounded-lg p-2 text-zinc-500 hover:bg-white/5 hover:text-white" aria-label="Close draft review">
                   <X className="h-4 w-4" />
                 </button>
+              </div>
+              <div className={`border-b border-white/10 px-4 py-3 ${draftStatusClass(draftInspection?.status)}`}>
+                <div className="flex items-start justify-between gap-3 text-[11.5px] leading-relaxed">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-semibold text-zinc-100">Workspace diff review</div>
+                    <div className="mt-0.5 text-zinc-300/80">
+                      {draftInspection?.key === selectedDraftKey ? draftInspection.message : "Inspecting this generated draft before it can be applied…"}
+                    </div>
+                    {draftInspection?.existingRevision && (
+                      <div className="mt-1 font-mono text-[10.5px] text-zinc-500">
+                        Existing revision {draftInspection.existingRevision.slice(0, 12)} · {draftInspection.existingSize} bytes
+                      </div>
+                    )}
+                  </div>
+                  {draftInspection?.key === selectedDraftKey && draftInspection.status !== "loading" && (
+                    <div className="shrink-0 rounded-lg border border-white/10 bg-black/20 px-2.5 py-1 font-mono text-[11px] text-zinc-200">
+                      +{draftInspection.added} / -{draftInspection.removed}
+                    </div>
+                  )}
+                </div>
+                {draftInspection?.preview && (
+                  <pre className="mt-3 max-h-44 overflow-auto rounded-lg border border-white/10 bg-black/25 p-3 font-mono text-[11px] leading-relaxed text-zinc-300">
+                    {draftInspection.preview}
+                  </pre>
+                )}
+                {draftInspection?.truncated && (
+                  <div className="mt-2 text-[10.5px] text-zinc-500">
+                    Diff preview truncated to keep review responsive. The generated file preview below remains available for full review.
+                  </div>
+                )}
               </div>
               <pre className="min-h-0 flex-1 overflow-auto whitespace-pre p-5 font-mono text-[11.5px] leading-relaxed text-zinc-300">
                 {selectedDraft.content}
               </pre>
               <div className="flex items-center gap-3 border-t border-white/10 bg-amber-500/[0.04] px-4 py-3 text-[11.5px] leading-relaxed text-amber-100/75">
                 <div className="min-w-0 flex-1">
-                  Review this output before using it. DevLab writes it only when you explicitly apply the reviewed draft; existing files are protected by the native revision check.
+                  {selectedDraftApplied
+                    ? "This draft has already been applied in this review session. Other generated drafts still require their own explicit Apply click."
+                    : "Review the diff and generated output before using it. DevLab writes only when you explicitly apply this one reviewed draft; existing files are protected by the native revision check."}
                 </div>
                 <button
                   onClick={() => void applyDraftToWorkspace(selectedDraft)}
-                  disabled={working || !workspace}
+                  disabled={working || !workspace || selectedDraftApplied}
                   className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-violet-500 px-3 py-2 text-[12px] font-semibold text-white hover:bg-violet-400 disabled:opacity-40"
                 >
-                  {working ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                  Apply reviewed draft
+                  {selectedDraftApplied ? <CheckCircle2 className="h-3.5 w-3.5" /> : working ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                  {selectedDraftApplied ? "Applied" : "Apply reviewed draft"}
                 </button>
               </div>
             </section>
@@ -865,6 +1033,139 @@ export function EditorPanel({
       )}
     </div>
   );
+}
+
+
+const MAX_DIFF_PREVIEW_LINES = 240;
+const MAX_DIFF_CONTEXT_LINES = 3;
+const MAX_DIFF_LINE_CHARS = 240;
+
+function normalizeDraftPath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").trim();
+}
+
+function draftKey(draft: VFile, index: number): string {
+  return `${index}:${normalizeDraftPath(draft.path)}:${draft.content.length}`;
+}
+
+function nextUnappliedDraftIndex(drafts: VFile[], appliedKeys: string[], currentIndex: number): number {
+  for (let offset = 1; offset <= drafts.length; offset += 1) {
+    const index = (currentIndex + offset) % drafts.length;
+    if (!appliedKeys.includes(draftKey(drafts[index], index))) return index;
+  }
+  return -1;
+}
+
+function countLines(value: string): number {
+  if (!value) return 0;
+  return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n").length;
+}
+
+function buildDraftDiff(existing: string | null, next: string): Pick<DraftInspection, "added" | "removed" | "preview" | "truncated"> {
+  const nextLines = splitDiffLines(next);
+  if (existing === null) {
+    const preview = createDiffPreview([], nextLines, 0, -1, 0, nextLines.length - 1);
+    return { added: nextLines.length, removed: 0, preview: preview.preview, truncated: preview.truncated };
+  }
+
+  const existingLines = splitDiffLines(existing);
+  if (existing === next) {
+    return { added: 0, removed: 0, preview: "No line changes.", truncated: false };
+  }
+
+  let prefix = 0;
+  while (
+    prefix < existingLines.length
+    && prefix < nextLines.length
+    && existingLines[prefix] === nextLines[prefix]
+  ) {
+    prefix += 1;
+  }
+
+  let existingEnd = existingLines.length - 1;
+  let nextEnd = nextLines.length - 1;
+  while (
+    existingEnd >= prefix
+    && nextEnd >= prefix
+    && existingLines[existingEnd] === nextLines[nextEnd]
+  ) {
+    existingEnd -= 1;
+    nextEnd -= 1;
+  }
+
+  const added = Math.max(0, nextEnd - prefix + 1);
+  const removed = Math.max(0, existingEnd - prefix + 1);
+  const preview = createDiffPreview(existingLines, nextLines, prefix, existingEnd, prefix, nextEnd);
+  return { added, removed, preview: preview.preview, truncated: preview.truncated };
+}
+
+function splitDiffLines(value: string): string[] {
+  if (!value) return [];
+  return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+}
+
+function createDiffPreview(
+  existingLines: string[],
+  nextLines: string[],
+  existingStart: number,
+  existingEnd: number,
+  nextStart: number,
+  nextEnd: number,
+): { preview: string; truncated: boolean } {
+  const lines: string[] = [];
+  let truncated = false;
+  const push = (line: string) => {
+    if (lines.length >= MAX_DIFF_PREVIEW_LINES) {
+      truncated = true;
+      return;
+    }
+    lines.push(line.length > MAX_DIFF_LINE_CHARS ? `${line.slice(0, MAX_DIFF_LINE_CHARS)}…` : line);
+  };
+
+  const beforeStart = Math.max(0, existingStart - MAX_DIFF_CONTEXT_LINES);
+  if (beforeStart > 0) push(`… ${beforeStart} unchanged line${beforeStart === 1 ? "" : "s"} before`);
+  for (let index = beforeStart; index < existingStart; index += 1) push(` ${existingLines[index] ?? ""}`);
+
+  for (let index = existingStart; index <= existingEnd; index += 1) push(`-${existingLines[index] ?? ""}`);
+  for (let index = nextStart; index <= nextEnd; index += 1) push(`+${nextLines[index] ?? ""}`);
+
+  const afterStart = Math.max(existingEnd + 1, existingStart);
+  const afterEnd = Math.min(existingLines.length, afterStart + MAX_DIFF_CONTEXT_LINES);
+  for (let index = afterStart; index < afterEnd; index += 1) push(` ${existingLines[index] ?? ""}`);
+  const remaining = existingLines.length - afterEnd;
+  if (remaining > 0) push(`… ${remaining} unchanged line${remaining === 1 ? "" : "s"} after`);
+
+  return { preview: lines.join("\n") || "No previewable line changes.", truncated };
+}
+
+function isMissingWorkspaceFile(error: unknown): boolean {
+  return error instanceof WorkspaceCommandError
+    && error.code === "io_error"
+    && /no such file|not found|os error 2|cannot find/i.test(error.message);
+}
+
+function draftStatusLabel(inspection: DraftInspection): string {
+  switch (inspection.status) {
+    case "loading": return "Inspecting workspace diff";
+    case "new": return "New file";
+    case "update": return "Updates existing file";
+    case "unchanged": return "No file changes";
+    case "unavailable": return "Workspace comparison unavailable";
+    case "error": return "Comparison failed";
+  }
+}
+
+function draftStatusClass(status?: DraftInspectionStatus): string {
+  switch (status) {
+    case "new": return "bg-emerald-500/[0.05]";
+    case "update": return "bg-cyan-500/[0.05]";
+    case "unchanged": return "bg-zinc-500/[0.05]";
+    case "error": return "bg-rose-500/[0.08]";
+    case "unavailable": return "bg-amber-500/[0.05]";
+    case "loading":
+    default:
+      return "bg-white/[0.02]";
+  }
 }
 
 function joinPath(parent: string, child: string): string {
