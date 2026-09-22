@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import Editor from "@monaco-editor/react";
+import Editor, { DiffEditor } from "@monaco-editor/react";
 import { PanelHeader } from "./AgentPanel";
 import { loadSettings, getTheme } from "../lib/settings";
 import { testRunnerSnapshot, type TestProfile, type TestRunnerSnapshot } from "../lib/testRunner";
@@ -63,6 +63,7 @@ interface DraftInspection {
   removed: number;
   preview: string;
   truncated: boolean;
+  originalContent: string;
   inspectedAtMs?: number;
   existingRevision?: string;
   existingSize?: number;
@@ -201,6 +202,7 @@ export function EditorPanel({
         removed: 0,
         preview: "",
         truncated: false,
+        originalContent: "",
         inspectedAtMs: Date.now(),
       });
       return;
@@ -215,6 +217,7 @@ export function EditorPanel({
         removed: 0,
         preview: buildDraftDiff(null, selectedDraft.content).preview,
         truncated: false,
+        originalContent: "",
         inspectedAtMs: Date.now(),
       });
       return;
@@ -229,6 +232,7 @@ export function EditorPanel({
       removed: 0,
       preview: "",
       truncated: false,
+      originalContent: "",
     });
 
     readWorkspaceFile(path)
@@ -246,6 +250,7 @@ export function EditorPanel({
           removed: diff.removed,
           preview: diff.preview,
           truncated: diff.truncated,
+          originalContent: existing.content,
           inspectedAtMs: Date.now(),
           existingRevision: existing.revision,
           existingSize: existing.size,
@@ -264,6 +269,7 @@ export function EditorPanel({
             removed: 0,
             preview: diff.preview,
             truncated: diff.truncated,
+            originalContent: "",
             inspectedAtMs: Date.now(),
           });
           return;
@@ -277,6 +283,7 @@ export function EditorPanel({
           removed: 0,
           preview: "",
           truncated: false,
+          originalContent: "",
           inspectedAtMs: Date.now(),
         });
       });
@@ -1178,14 +1185,49 @@ export function EditorPanel({
                     </div>
                   )}
                 </div>
+                {draftInspection?.key === selectedDraftKey && draftInspection.status !== "loading" && draftInspection.status !== "error" && (
+                  <div className="mt-3 overflow-hidden rounded-xl border border-white/10 bg-black/25">
+                    <div className="flex items-center justify-between border-b border-white/10 px-3 py-2 text-[10.5px] text-zinc-500">
+                      <span>Inline Monaco diff · original workspace content on the left, reviewed draft on the right</span>
+                      <span className="font-mono">read-only</span>
+                    </div>
+                    <div className="h-72 min-h-0">
+                      <DiffEditor
+                        original={draftInspection.originalContent}
+                        modified={selectedDraft.content}
+                        language={selectedDraft.language || languageForDraftPath(selectedDraft.path)}
+                        originalLanguage={languageForDraftPath(selectedDraft.path)}
+                        modifiedLanguage={selectedDraft.language || languageForDraftPath(selectedDraft.path)}
+                        theme={theme.editor}
+                        originalModelPath={`devlab-reviewed-draft://original/${selectedDraftKey}`}
+                        modifiedModelPath={`devlab-reviewed-draft://modified/${selectedDraftKey}`}
+                        options={{
+                          readOnly: true,
+                          originalEditable: false,
+                          renderSideBySide: true,
+                          automaticLayout: true,
+                          scrollBeyondLastLine: false,
+                          minimap: { enabled: false },
+                          fontSize: Math.max(11, settings.fontSize - 1),
+                          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                          renderOverviewRuler: false,
+                          wordWrap: "off",
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
                 {draftInspection?.preview && (
-                  <pre className="mt-3 max-h-44 overflow-auto rounded-lg border border-white/10 bg-black/25 p-3 font-mono text-[11px] leading-relaxed text-zinc-300">
-                    {draftInspection.preview}
-                  </pre>
+                  <details className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3 text-[11px] text-zinc-400">
+                    <summary className="cursor-pointer select-none font-semibold text-zinc-300 hover:text-white">Text diff summary</summary>
+                    <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap font-mono leading-relaxed text-zinc-400">
+                      {draftInspection.preview}
+                    </pre>
+                  </details>
                 )}
                 {draftInspection?.truncated && (
                   <div className="mt-2 text-[10.5px] text-zinc-500">
-                    Diff preview truncated to keep review responsive. The generated file preview below remains available for full review.
+                    Text diff summary truncated to keep review responsive. The inline Monaco diff and generated file preview remain available for review.
                   </div>
                 )}
               </div>
