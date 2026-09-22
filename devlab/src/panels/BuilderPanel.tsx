@@ -1,4 +1,4 @@
-import { useRef, type Dispatch, type SetStateAction } from "react";
+import { useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { PanelHeader } from "./AgentPanel";
 import { Markdown } from "../components/CodeBlock";
 import { getApiKey, getCurrentAiRoute, streamChat, type GenTurn } from "../lib/gemini";
@@ -7,12 +7,15 @@ import { projectTemplates } from "../data/templates";
 import type { BuilderPhase, BuilderPlan, OpenGeneratedDrafts, VFile } from "../types";
 import {
   Wand2, Loader2, CheckCircle2, FileCode2, TerminalSquare,
-  Sparkles, RotateCcw, FolderPlus, ArrowRight,
+  Sparkles, RotateCcw, FolderPlus, ArrowRight, ClipboardList, Copy,
 } from "lucide-react";
 
 const MAX_PLAN_FILES = 12;
+const MAX_PLAN_STEPS = 12;
+const MAX_PLAN_COMMANDS = 16;
 const MAX_DRAFT_BYTES = 512 * 1024;
 const MAX_FILE_OUTPUT_CHARS = 96 * 1024;
+const MAX_SPEC_CHARS = 48 * 1024;
 
 const IDEAS = [
   "A SaaS dashboard with auth, Stripe billing and a Postgres database",
@@ -102,6 +105,7 @@ export function BuilderPanel({
   setStageNotice: Dispatch<SetStateAction<string>>;
 }) {
   const outRef = useRef<HTMLDivElement>(null);
+  const [specNotice, setSpecNotice] = useState("");
   const settings = loadSettings();
 
   async function generatePlan(text: string) {
@@ -109,7 +113,7 @@ export function BuilderPanel({
     const route = getCurrentAiRoute("planning");
     if (route.status !== "active") { setError(route.reason); return; }
     if (!getApiKey()) { onNeedKey(); return; }
-    setBusy(true); setError(""); setRaw(""); setPlan(null); setPhase("planning");
+    setBusy(true); setError(""); setRaw(""); setPlan(null); setSpecNotice(""); setPhase("planning");
 
     const templateList = projectTemplates.map((t) => `${t.id} (${t.stack}, ${t.lang})`).join(", ");
     const prompt = `You are DevLab's project architect. The developer wants to build:
@@ -216,16 +220,55 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     }
   }
 
+  async function copySpecDraft() {
+    if (!plan) return;
+    setError("");
+    setSpecNotice("");
+    if (!navigator.clipboard?.writeText) {
+      setError("Clipboard access is unavailable in this environment. Nothing was copied.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(buildSpecMarkdown(plan, brief));
+      setSpecNotice("Copied spec.md draft with task DAG metadata. Nothing was written.");
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
+  async function openSpecInEditorReview() {
+    if (!plan) return;
+    setStaging(true);
+    setError("");
+    setStageNotice("");
+    setSpecNotice("");
+    try {
+      const content = buildSpecMarkdown(plan, brief);
+      const opened = await onOpenFiles([
+        { path: "spec.md", content, language: "markdown" },
+      ], `Spec-first plan draft: ${plan.summary}`);
+      if (opened) {
+        setSpecNotice("Staged spec.md for Editor review. Nothing was written until reviewed apply.");
+      } else {
+        setError("Spec draft was not staged for editor review. Nothing was written.");
+      }
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setStaging(false);
+    }
+  }
+
   function reset() {
     setPhase("brief"); setBrief(""); setPlan(null); setRaw("");
-    setBuiltFiles([]); setError(""); setStageNotice("");
+    setBuiltFiles([]); setError(""); setStageNotice(""); setSpecNotice("");
   }
 
   return (
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Agentic Project Builder"
-        subtitle="Phase 6E · permission-gated multi-file draft staging"
+        subtitle="Phase 6Y · spec-first reviewed planning"
         badge={settings.autonomy === "auto" ? "Autonomous" : settings.autonomy === "suggest" ? "Suggest mode" : "Ask first"}
         badgeOk={settings.autonomy !== "ask"}
       />
@@ -332,6 +375,51 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
               </button>
             </div>
 
+            <div className="mt-7 rounded-xl border border-violet-500/20 bg-violet-500/[0.06] p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <h3 className="flex items-center gap-2 text-sm font-semibold text-violet-100">
+                    <ClipboardList className="h-4 w-4 text-violet-300" />
+                    Spec-first review pack
+                  </h3>
+                  <p className="mt-1 max-w-2xl text-[12.5px] leading-relaxed text-violet-100/70">
+                    DevLab can derive a bounded <span className="font-mono text-violet-100">spec.md</span> from this approved plan, including scope, commands, reviewed files and a sequential task DAG. It stays in memory until copied or opened for reviewed Editor apply.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => { void copySpecDraft(); }}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-semibold text-violet-100 hover:bg-white/[0.08]"
+                  >
+                    <Copy className="h-3.5 w-3.5" /> Copy spec.md
+                  </button>
+                  <button
+                    onClick={() => { void openSpecInEditorReview(); }}
+                    disabled={staging}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-violet-400/40 bg-violet-400/10 px-3 py-1.5 text-xs font-semibold text-violet-100 hover:bg-violet-400/20 disabled:opacity-40"
+                  >
+                    {staging ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowRight className="h-3.5 w-3.5" />}
+                    Open spec review
+                  </button>
+                </div>
+              </div>
+              <div className="mt-3 grid gap-2 text-[11.5px] sm:grid-cols-3">
+                <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-violet-100/65">
+                  <span className="block text-violet-100">{Math.min(plan.steps.length, MAX_PLAN_STEPS)} task DAG node{Math.min(plan.steps.length, MAX_PLAN_STEPS) === 1 ? "" : "s"}</span>
+                  Sequential dependencies only
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-violet-100/65">
+                  <span className="block text-violet-100">{plan.files.length} reviewed file target{plan.files.length === 1 ? "" : "s"}</span>
+                  Written only after Editor apply
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-violet-100/65">
+                  <span className="block text-violet-100">{Math.min(plan.commands.length, MAX_PLAN_COMMANDS)} command reference{Math.min(plan.commands.length, MAX_PLAN_COMMANDS) === 1 ? "" : "s"}</span>
+                  Display-only; no execution
+                </div>
+              </div>
+              {specNotice && <div className="mt-3 text-[12px] text-emerald-300">{specNotice}</div>}
+            </div>
+
             {/* Steps */}
             <h3 className="mb-3 mt-8 text-sm font-semibold text-white">Execution plan</h3>
             <div className="relative space-y-4 pl-7">
@@ -430,4 +518,124 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
       </div>
     </div>
   );
+}
+
+interface SpecTaskNode {
+  id: string;
+  title: string;
+  detail: string;
+  dependsOn: string[];
+  reviewedFileTargets: string[];
+}
+
+function buildSpecMarkdown(plan: BuilderPlan, brief: string): string {
+  const boundedPlan = boundPlanForSpec(plan);
+  const taskDag = buildTaskDag(boundedPlan);
+  const lines = [
+    "# Project specification",
+    "",
+    "> Generated by DevLab Project Builder as an in-memory reviewed draft. Review before applying. Workspace writes still require explicit Editor reviewed-draft apply.",
+    "",
+    "## Original brief",
+    "",
+    boundSpecText(brief.trim() || "No brief was retained for this plan.", 6_000),
+    "",
+    "## Summary",
+    "",
+    boundedPlan.summary,
+    "",
+    "## Stack",
+    "",
+    ...listOrFallback(boundedPlan.stack, "No stack choices were returned.").map((item) => `- ${item}`),
+    "",
+    "## Task DAG",
+    "",
+    "The initial DAG is intentionally sequential and review-oriented. Future phases can split or reorder tasks after richer repository context and verification metadata exist.",
+    "",
+    "```json",
+    JSON.stringify({ tasks: taskDag }, null, 2),
+    "```",
+    "",
+    "## Execution plan",
+    "",
+    ...boundedPlan.steps.flatMap((step, index) => [
+      `### ${index + 1}. ${step.title}`,
+      "",
+      step.detail,
+      "",
+    ]),
+    "## Setup command references",
+    "",
+    "These commands are references only. DevLab does not execute them from this spec.",
+    "",
+    "```bash",
+    ...listOrFallback(boundedPlan.commands, "# No setup commands were returned."),
+    "```",
+    "",
+    "## Reviewed file targets",
+    "",
+    ...boundedPlan.files.map((file) => `- \`${file.path}\` — ${file.description}`),
+    "",
+    "## Review and safety checklist",
+    "",
+    "- Confirm the scope and out-of-scope boundaries before generating or applying files.",
+    "- Generate file drafts into memory, then inspect each draft in the Editor.",
+    "- Recompare existing files before applying reviewed drafts.",
+    "- Run bounded verification profiles after applying reviewed changes.",
+    "- Keep secrets out of generated files and prompts.",
+    "- Treat setup commands as manual terminal references unless a future bounded backend-owned profile exists.",
+    "",
+    "## Out of scope for this draft",
+    "",
+    "- Automatic workspace writes.",
+    "- Automatic command execution.",
+    "- CI/deploy/toolchain install or update management.",
+    "- Provider credentials or secrets.",
+  ];
+  const markdown = lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+  return markdown.length > MAX_SPEC_CHARS
+    ? `${markdown.slice(0, MAX_SPEC_CHARS)}\n\n[DevLab truncated this spec draft to the configured Builder spec size limit.]\n`
+    : markdown;
+}
+
+function buildTaskDag(plan: BuilderPlan): SpecTaskNode[] {
+  const files = plan.files.slice(0, MAX_PLAN_FILES).map((file) => file.path);
+  return plan.steps.slice(0, MAX_PLAN_STEPS).map((step, index) => ({
+    id: `task-${String(index + 1).padStart(2, "0")}`,
+    title: step.title,
+    detail: step.detail,
+    dependsOn: index === 0 ? [] : [`task-${String(index).padStart(2, "0")}`],
+    reviewedFileTargets: filesForTask(files, index, plan.steps.length),
+  }));
+}
+
+function filesForTask(files: string[], index: number, stepCount: number): string[] {
+  if (files.length === 0) return [];
+  const bucketCount = Math.max(1, Math.min(stepCount, files.length));
+  return files.filter((_, fileIndex) => fileIndex % bucketCount === index % bucketCount).slice(0, 4);
+}
+
+function boundPlanForSpec(plan: BuilderPlan): BuilderPlan {
+  return {
+    summary: boundSpecText(plan.summary || "No summary was returned.", 4_000),
+    stack: plan.stack.slice(0, 20).map((item) => boundSpecText(item, 160)),
+    steps: plan.steps.slice(0, MAX_PLAN_STEPS).map((step, index) => ({
+      title: boundSpecText(step.title || `Task ${index + 1}`, 240),
+      detail: boundSpecText(step.detail || "No detail was returned for this task.", 1_500),
+    })),
+    commands: plan.commands.slice(0, MAX_PLAN_COMMANDS).map((command) => boundSpecText(command, 800)),
+    files: plan.files.filter((file) => validDraftPath(file.path)).slice(0, MAX_PLAN_FILES).map((file) => ({
+      path: boundSpecText(file.path, 512),
+      description: boundSpecText(file.description || "Generated project file.", 800),
+    })),
+  };
+}
+
+function listOrFallback(values: string[], fallback: string): string[] {
+  return values.length > 0 ? values : [fallback];
+}
+
+function boundSpecText(value: string, maxChars: number): string {
+  const normalized = value.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "").trim();
+  return normalized.length > maxChars ? `${normalized.slice(0, maxChars)}…` : normalized;
 }
