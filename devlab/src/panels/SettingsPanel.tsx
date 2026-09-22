@@ -9,10 +9,13 @@ import {
   loadSettings, saveSettings, DEFAULT_SETTINGS, THEMES, ALL_PANELS,
   type DevLabSettings, type ThemeId, type Autonomy, type Density, type AiProviderId, type ModelRoutingMode,
 } from "../lib/settings";
+import { starterBlueprintInstruction } from "../lib/generationBlueprints";
+import { componentScaffoldInstruction, summarizeGenerationGuidance } from "../lib/generationGuidance";
 import {
   AI_PROVIDER_PROFILES,
   AI_TASK_PROFILES,
   describeAiRoute,
+  generationGuardrailInstruction,
   resolveAiRoute,
 } from "../lib/modelRouting";
 import {
@@ -45,6 +48,13 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
     selectedModel: model,
     pickedModel: autoPicked,
   }, s));
+  const guidancePreview = routePreview.map((route) => ({
+    route,
+    guardrail: generationGuardrailInstruction(route.task),
+    blueprint: starterBlueprintInstruction(route.task),
+    component: componentScaffoldInstruction(route.task),
+    summary: summarizeGenerationGuidance(route.task),
+  }));
 
   function update(patch: Partial<DevLabSettings>) {
     const next = { ...s, ...patch };
@@ -345,6 +355,39 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                 </div>
                 <p className="mt-3 text-[11px] leading-relaxed text-zinc-500">
                   This router does not install models, run commands, store non-Gemini secrets, or send requests to future providers. It only selects the current approved Gemini path unless a future native adapter is implemented.
+                </p>
+              </Card>
+
+              <Card title="Generation guidance preview" desc="Read-only metadata showing the guidance DevLab injects into generation prompts. It does not run tools, install dependencies, write files or bypass reviewed apply.">
+                <div className="space-y-2">
+                  {guidancePreview.map(({ route, guardrail, blueprint, component, summary }) => (
+                    <details key={route.task} className="rounded-lg border border-white/10 bg-black/15 p-3 text-[11.5px] text-zinc-400">
+                      <summary className="cursor-pointer select-none font-semibold text-zinc-200">
+                        {route.taskLabel} · {summary.join(" · ")}
+                      </summary>
+                      <div className="mt-2 grid gap-2">
+                        <div>
+                          <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Prompt guardrails</div>
+                          <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap rounded-md bg-black/25 p-2 font-mono text-[10.5px] leading-relaxed text-zinc-500">{guardrail}</pre>
+                        </div>
+                        {blueprint && (
+                          <div>
+                            <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Starter blueprint guidance</div>
+                            <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap rounded-md bg-black/25 p-2 font-mono text-[10.5px] leading-relaxed text-zinc-500">{blueprint}</pre>
+                          </div>
+                        )}
+                        {component && (
+                          <div>
+                            <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Component/style guidance</div>
+                            <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap rounded-md bg-black/25 p-2 font-mono text-[10.5px] leading-relaxed text-zinc-500">{component}</pre>
+                          </div>
+                        )}
+                      </div>
+                    </details>
+                  ))}
+                </div>
+                <p className="mt-3 text-[11px] leading-relaxed text-zinc-500">
+                  This preview is metadata only. It does not include your Gemini key, custom prompt text, file contents or attached workspace context.
                 </p>
               </Card>
 
