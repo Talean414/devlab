@@ -57,6 +57,12 @@ function textBytes(value: string) {
   return new TextEncoder().encode(value).length;
 }
 
+function formatByteCount(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes >= 10 * 1024 ? 0 : 1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
 export function BuilderPanel({
   onNeedKey,
   onOpenFiles,
@@ -108,17 +114,19 @@ export function BuilderPanel({
   const [specNotice, setSpecNotice] = useState("");
   const [specPreviewNotice, setSpecPreviewNotice] = useState("");
   const [taskPlanNotice, setTaskPlanNotice] = useState("");
+  const [taskHandoffNotice, setTaskHandoffNotice] = useState("");
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const settings = loadSettings();
   const specPreview = plan ? buildSpecMetadataPreview(plan, brief) : null;
   const taskPlanPreview = plan ? buildTaskPlanPreview(plan, builtFiles) : null;
+  const taskHandoffPreview = taskPlanPreview && plan ? buildTaskHandoffPreview(taskPlanPreview, builtFiles, plan.summary) : null;
 
   async function generatePlan(text: string) {
     if (!text.trim()) return;
     const route = getCurrentAiRoute("planning");
     if (route.status !== "active") { setError(route.reason); return; }
     if (!getApiKey()) { onNeedKey(); return; }
-    setBusy(true); setError(""); setRaw(""); setPlan(null); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setActiveTaskId(null); setPhase("planning");
+    setBusy(true); setError(""); setRaw(""); setPlan(null); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setTaskHandoffNotice(""); setActiveTaskId(null); setPhase("planning");
 
     const templateList = projectTemplates.map((t) => `${t.id} (${t.stack}, ${t.lang})`).join(", ");
     const prompt = `You are DevLab's project architect. The developer wants to build:
@@ -217,6 +225,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setError("");
     setStageNotice("");
     setTaskPlanNotice("");
+    setTaskHandoffNotice("");
     try {
       const opened = await onOpenFiles(builtFiles, plan.summary);
       if (opened) {
@@ -237,6 +246,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setSpecNotice("");
     setSpecPreviewNotice("");
     setTaskPlanNotice("");
+    setTaskHandoffNotice("");
     if (!navigator.clipboard?.writeText) {
       setError("Clipboard access is unavailable in this environment. Nothing was copied.");
       return;
@@ -255,6 +265,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setSpecNotice("");
     setSpecPreviewNotice("");
     setTaskPlanNotice("");
+    setTaskHandoffNotice("");
     if (!navigator.clipboard?.writeText) {
       setError("Clipboard access is unavailable in this environment. Nothing was copied.");
       return;
@@ -273,6 +284,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setSpecNotice("");
     setSpecPreviewNotice("");
     setTaskPlanNotice("");
+    setTaskHandoffNotice("");
     if (!navigator.clipboard?.writeText) {
       setError("Clipboard access is unavailable in this environment. Nothing was copied.");
       return;
@@ -280,6 +292,34 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     try {
       await navigator.clipboard.writeText(taskPlanPreview.exportText);
       setTaskPlanNotice(`Copied task DAG implementation preview for ${taskPlanPreview.tasks.length} task batch${taskPlanPreview.tasks.length === 1 ? "" : "es"}.`);
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
+  async function copyTaskHandoffPreview(taskId?: string) {
+    if (!taskHandoffPreview) return;
+    setError("");
+    setSpecNotice("");
+    setSpecPreviewNotice("");
+    setTaskPlanNotice("");
+    setTaskHandoffNotice("");
+    if (!navigator.clipboard?.writeText) {
+      setError("Clipboard access is unavailable in this environment. Nothing was copied.");
+      return;
+    }
+    const packet = taskId ? taskHandoffPreview.packets.find((item) => item.id === taskId) : null;
+    if (taskId && !packet) {
+      setTaskHandoffNotice(`No task handoff packet was found for ${taskId}. Nothing was copied.`);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(packet ? packet.exportText : taskHandoffPreview.exportText);
+      setTaskHandoffNotice(
+        packet
+          ? `Copied metadata-only handoff packet for ${packet.id} with ${packet.generatedDrafts.length} generated draft target${packet.generatedDrafts.length === 1 ? "" : "s"}.`
+          : `Copied metadata-only handoff ledger for ${taskHandoffPreview.packets.length} task batch${taskHandoffPreview.packets.length === 1 ? "" : "es"}.`,
+      );
     } catch (err) {
       setError(formatError(err));
     }
@@ -293,6 +333,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setSpecNotice("");
     setSpecPreviewNotice("");
     setTaskPlanNotice("");
+    setTaskHandoffNotice("");
     const targetFiles = task.reviewedFileTargets
       .map((targetPath) => plan.files.find((file) => file.path === targetPath))
       .filter((file): file is BuilderPlan["files"][number] => Boolean(file));
@@ -333,6 +374,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setSpecNotice("");
     setSpecPreviewNotice("");
     setTaskPlanNotice("");
+    setTaskHandoffNotice("");
     try {
       const content = buildSpecMarkdown(plan, brief);
       const opened = await onOpenFiles([
@@ -352,14 +394,14 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
 
   function reset() {
     setPhase("brief"); setBrief(""); setPlan(null); setRaw("");
-    setBuiltFiles([]); setError(""); setStageNotice(""); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setActiveTaskId(null);
+    setBuiltFiles([]); setError(""); setStageNotice(""); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setTaskHandoffNotice(""); setActiveTaskId(null);
   }
 
   return (
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Agentic Project Builder"
-        subtitle="Phase 8J · task DAG batches"
+        subtitle="Phase 8K · task handoff metadata"
         badge={settings.autonomy === "auto" ? "Autonomous" : settings.autonomy === "suggest" ? "Suggest mode" : "Ask first"}
         badgeOk={settings.autonomy !== "ask"}
       />
@@ -566,14 +608,22 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                       Turn the approved plan into discrete sequential batches. Each batch only generates missing in-memory drafts for its assigned file targets; commands remain references, and workspace writes still require Editor reviewed apply.
                     </p>
                   </div>
-                  <button
-                    onClick={() => { void copyTaskPlanPreview(); }}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/20"
-                  >
-                    <Copy className="h-3.5 w-3.5" /> Copy task DAG preview
-                  </button>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => { void copyTaskPlanPreview(); }}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/20"
+                    >
+                      <Copy className="h-3.5 w-3.5" /> Copy task DAG preview
+                    </button>
+                    <button
+                      onClick={() => { void copyTaskHandoffPreview(); }}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-400/20"
+                    >
+                      <Copy className="h-3.5 w-3.5" /> Copy handoff ledger
+                    </button>
+                  </div>
                 </div>
-                <div className="mt-3 grid gap-2 text-[11.5px] sm:grid-cols-3">
+                <div className="mt-3 grid gap-2 text-[11.5px] sm:grid-cols-4">
                   <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-cyan-100/65">
                     <span className="block text-cyan-100">{taskPlanPreview.tasks.length} implementation batch{taskPlanPreview.tasks.length === 1 ? "" : "es"}</span>
                     Sequential dependency chain
@@ -586,11 +636,16 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                     <span className="block text-cyan-100">{taskPlanPreview.pendingFileCount} pending draft target{taskPlanPreview.pendingFileCount === 1 ? "" : "s"}</span>
                     Apply remains per-file review
                   </div>
+                  <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-cyan-100/65">
+                    <span className="block text-cyan-100">{taskHandoffPreview?.readyTaskCount ?? 0} ready handoff{(taskHandoffPreview?.readyTaskCount ?? 0) === 1 ? "" : "s"}</span>
+                    {formatByteCount(taskHandoffPreview?.totalDraftBytes ?? 0)} generated draft metadata
+                  </div>
                 </div>
                 <div className="mt-3 space-y-2">
                   {taskPlanPreview.tasks.map((task) => {
                     const generatingTask = activeTaskId === task.id;
                     const canGenerateTask = !generating && !activeTaskId && task.pendingFileTargets.length > 0;
+                    const handoffPacket = taskHandoffPreview?.packets.find((packet) => packet.id === task.id);
                     return (
                       <div key={task.id} className="rounded-lg border border-white/10 bg-black/15 p-3">
                         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -617,14 +672,22 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                               )}
                             </div>
                           </div>
-                          <button
-                            onClick={() => { void generateTaskFiles(task.id); }}
-                            disabled={!canGenerateTask}
-                            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/20 disabled:opacity-40"
-                          >
-                            {generatingTask ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
-                            Generate missing drafts
-                          </button>
+                          <div className="flex shrink-0 flex-wrap gap-2">
+                            <button
+                              onClick={() => { void copyTaskHandoffPreview(task.id); }}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-400/20"
+                            >
+                              <Copy className="h-3.5 w-3.5" /> Copy handoff
+                            </button>
+                            <button
+                              onClick={() => { void generateTaskFiles(task.id); }}
+                              disabled={!canGenerateTask}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/20 disabled:opacity-40"
+                            >
+                              {generatingTask ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+                              Generate missing drafts
+                            </button>
+                          </div>
                         </div>
                         <details className="mt-2 text-[11px] text-cyan-100/60">
                           <summary className="cursor-pointer select-none text-cyan-100/80">Acceptance and review gate</summary>
@@ -640,6 +703,21 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                               <p className="mt-1">{task.reviewGate}</p>
                               <p className="mt-1 text-cyan-100/45">Depends on: {task.dependsOn.length > 0 ? task.dependsOn.join(", ") : "none"}</p>
                             </div>
+                            <div>
+                              <div className="text-[10px] font-semibold uppercase tracking-wide text-emerald-200/60">Handoff metadata</div>
+                              {handoffPacket && handoffPacket.generatedDrafts.length > 0 ? (
+                                <ul className="mt-1 space-y-1">
+                                  {handoffPacket.generatedDrafts.map((file) => (
+                                    <li key={`${task.id}-handoff-${file.path}`}>- {file.path} · {file.language} · {formatByteCount(file.bytes)} · {file.lines} line{file.lines === 1 ? "" : "s"}</li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <p className="mt-1 text-cyan-100/45">No generated draft metadata yet. Draft contents and workspace diffs are not included in handoff packets.</p>
+                              )}
+                              {handoffPacket && handoffPacket.pendingFileTargets.length > 0 && (
+                                <p className="mt-1 text-cyan-100/45">Pending: {handoffPacket.pendingFileTargets.join(", ")}</p>
+                              )}
+                            </div>
                           </div>
                         </details>
                       </div>
@@ -647,6 +725,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                   })}
                 </div>
                 {taskPlanNotice && <div className="mt-3 text-[12px] text-emerald-300">{taskPlanNotice}</div>}
+                {taskHandoffNotice && <div className="mt-2 text-[12px] text-emerald-300">{taskHandoffNotice}</div>}
               </div>
             )}
 
@@ -790,6 +869,141 @@ interface TaskPlanPreview {
   generatedFileCount: number;
   pendingFileCount: number;
   exportText: string;
+}
+
+interface DraftHandoffFile {
+  path: string;
+  language: string;
+  bytes: number;
+  lines: number;
+}
+
+interface TaskHandoffPacket {
+  id: string;
+  title: string;
+  handoffState: string;
+  dependsOn: string[];
+  nextTaskIds: string[];
+  generatedDrafts: DraftHandoffFile[];
+  pendingFileTargets: string[];
+  acceptance: string[];
+  reviewGate: string;
+  exportText: string;
+}
+
+interface TaskHandoffPreview {
+  summary: string;
+  packets: TaskHandoffPacket[];
+  readyTaskCount: number;
+  partialTaskCount: number;
+  generatedDraftCount: number;
+  totalDraftBytes: number;
+  exportText: string;
+}
+
+function buildTaskHandoffPreview(taskPlan: TaskPlanPreview, builtFiles: VFile[], projectSummary: string): TaskHandoffPreview {
+  const generatedAt = new Date().toISOString();
+  const builtByPath = new Map(builtFiles.map((file) => [file.path, file]));
+  const packets = taskPlan.tasks.map((task, _index, tasks) => {
+    const generatedDrafts = task.generatedFileTargets
+      .map((path) => buildDraftHandoffFile(builtByPath.get(path)))
+      .filter((file): file is DraftHandoffFile => Boolean(file));
+    const nextTaskIds = tasks.filter((candidate) => candidate.dependsOn.includes(task.id)).map((candidate) => candidate.id);
+    const handoffState = task.reviewedFileTargets.length === 0
+      ? "metadata-only task; no reviewed file targets assigned"
+      : generatedDrafts.length > 0 && task.pendingFileTargets.length === 0
+        ? "ready for Editor review handoff"
+        : generatedDrafts.length > 0
+          ? "partial handoff; some draft targets are still pending"
+          : "waiting for in-memory draft generation";
+    const exportText = [
+      "DevLab Builder task handoff packet",
+      `Generated: ${generatedAt}`,
+      "Source: Project Builder approved plan metadata plus current in-memory draft metadata",
+      "Safety: metadata-only handoff; draft contents, workspace file contents, diffs, command output and verification results are not included.",
+      "",
+      "## Project summary",
+      boundSpecText(projectSummary || "No project summary was retained for this plan.", 1_000),
+      "",
+      `## ${task.id} — ${task.title}`,
+      `State: ${handoffState}`,
+      `Depends on: ${task.dependsOn.length > 0 ? task.dependsOn.join(", ") : "none"}`,
+      `Next task(s): ${nextTaskIds.length > 0 ? nextTaskIds.join(", ") : "none"}`,
+      `Review gate: ${task.reviewGate}`,
+      "",
+      "### Generated draft metadata",
+      ...(generatedDrafts.length > 0
+        ? generatedDrafts.map((file) => `- ${file.path} — ${file.language}, ${formatByteCount(file.bytes)}, ${file.lines} line${file.lines === 1 ? "" : "s"}`)
+        : ["- No generated draft metadata yet."]),
+      "",
+      "### Pending reviewed file targets",
+      ...(task.pendingFileTargets.length > 0 ? task.pendingFileTargets.map((path) => `- ${path}`) : ["- None"]),
+      "",
+      "### Acceptance notes",
+      ...task.acceptance.map((item) => `- ${item}`),
+      "",
+      "### Apply boundary",
+      "- Handoff packets do not apply, persist or execute anything.",
+      "- Editor reviewed-draft apply remains the only workspace write path.",
+      "- Verification must be run explicitly after reviewed apply; this packet does not claim checks passed.",
+    ].join("\n");
+    return {
+      id: task.id,
+      title: task.title,
+      handoffState,
+      dependsOn: task.dependsOn,
+      nextTaskIds,
+      generatedDrafts,
+      pendingFileTargets: task.pendingFileTargets,
+      acceptance: task.acceptance,
+      reviewGate: task.reviewGate,
+      exportText,
+    };
+  });
+  const generatedDraftCount = packets.reduce((total, packet) => total + packet.generatedDrafts.length, 0);
+  const totalDraftBytes = packets.reduce((total, packet) => total + packet.generatedDrafts.reduce((packetTotal, file) => packetTotal + file.bytes, 0), 0);
+  const readyTaskCount = packets.filter((packet) => packet.handoffState === "ready for Editor review handoff").length;
+  const partialTaskCount = packets.filter((packet) => packet.handoffState.startsWith("partial handoff")).length;
+  const summary = `${readyTaskCount} ready handoff${readyTaskCount === 1 ? "" : "s"} · ${partialTaskCount} partial · ${generatedDraftCount} generated draft target${generatedDraftCount === 1 ? "" : "s"}`;
+  const exportText = [
+    "DevLab Builder task handoff ledger",
+    `Generated: ${generatedAt}`,
+    "Source: Project Builder approved plan metadata plus current in-memory draft metadata",
+    "Safety: metadata-only handoff; no file contents, workspace reads, command execution, verification execution, persistence or workspace write.",
+    "",
+    "## Summary",
+    `- ${summary}`,
+    `- Generated draft metadata: ${generatedDraftCount} target${generatedDraftCount === 1 ? "" : "s"}, ${formatByteCount(totalDraftBytes)} total`,
+    "- Draft contents and workspace diffs are intentionally omitted; use Editor review/recompare before apply.",
+    "",
+    "## Task handoff packets",
+    ...packets.flatMap((packet) => [
+      `### ${packet.id} — ${packet.title}`,
+      `State: ${packet.handoffState}`,
+      `Depends on: ${packet.dependsOn.length > 0 ? packet.dependsOn.join(", ") : "none"}`,
+      `Next task(s): ${packet.nextTaskIds.length > 0 ? packet.nextTaskIds.join(", ") : "none"}`,
+      `Generated draft metadata: ${packet.generatedDrafts.length > 0 ? packet.generatedDrafts.map((file) => `${file.path} (${file.language}, ${formatByteCount(file.bytes)}, ${file.lines} line${file.lines === 1 ? "" : "s"})`).join(", ") : "none"}`,
+      `Pending targets: ${packet.pendingFileTargets.length > 0 ? packet.pendingFileTargets.join(", ") : "none"}`,
+      `Review gate: ${packet.reviewGate}`,
+      "",
+    ]),
+  ].join("\n");
+  return { summary, packets, readyTaskCount, partialTaskCount, generatedDraftCount, totalDraftBytes, exportText };
+}
+
+function buildDraftHandoffFile(file: VFile | undefined): DraftHandoffFile | null {
+  if (!file) return null;
+  return {
+    path: boundSpecText(file.path, 512),
+    language: boundSpecText(file.language || languageForPath(file.path), 80),
+    bytes: textBytes(file.content),
+    lines: countLines(file.content),
+  };
+}
+
+function countLines(value: string) {
+  if (!value) return 0;
+  return value.split(/\r\n|\r|\n/).length;
 }
 
 function buildTaskPlanPreview(plan: BuilderPlan, builtFiles: VFile[]): TaskPlanPreview {
