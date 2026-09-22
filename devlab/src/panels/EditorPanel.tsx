@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import { PanelHeader } from "./AgentPanel";
 import { loadSettings, getTheme } from "../lib/settings";
+import { testRunnerSnapshot, type TestProfile, type TestRunnerSnapshot } from "../lib/testRunner";
 import type { VFile } from "../types";
 import {
   applyReviewedDraftToWorkspace,
@@ -26,6 +27,8 @@ import {
   ArrowUp,
   CheckCircle2,
   ChevronRight,
+  ClipboardList,
+  Copy,
   FileCode2,
   FilePlus2,
   Folder,
@@ -124,6 +127,9 @@ export function EditorPanel({
   const [appliedDraftKeys, setAppliedDraftKeys] = useState<string[]>([]);
   const [appliedDraftRecords, setAppliedDraftRecords] = useState<Record<string, ReviewedDraftApplicationRecord>>({});
   const [draftReviewCopyNotice, setDraftReviewCopyNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const [verificationLoading, setVerificationLoading] = useState(false);
+  const [verificationPlan, setVerificationPlan] = useState<ReviewedDraftVerificationPlan | null>(null);
+  const [verificationNotice, setVerificationNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const ignoredEvents = useRef(new Map<string, number>());
   const eventTimer = useRef<number | null>(null);
   const settings = loadSettings();
@@ -163,12 +169,16 @@ export function EditorPanel({
       setAppliedDraftRecords({});
       setDraftInspection(null);
       setDraftReviewCopyNotice(null);
+      setVerificationPlan(null);
+      setVerificationNotice(null);
       return;
     }
     setDraftIndex(0);
     setAppliedDraftKeys([]);
     setAppliedDraftRecords({});
     setDraftReviewCopyNotice(null);
+    setVerificationPlan(null);
+    setVerificationNotice(null);
     setDraftReviewOpen(true);
   }, [incomingDrafts]);
 
@@ -545,6 +555,8 @@ export function EditorPanel({
         : [...appliedDraftKeys, appliedKey];
       setAppliedDraftKeys(nextAppliedKeys);
       setAppliedDraftRecords((current) => ({ ...current, [appliedKey]: appliedRecord }));
+      setVerificationPlan(null);
+      setVerificationNotice(null);
       const nextDraftIndex = nextUnappliedDraftIndex(incomingDrafts, nextAppliedKeys, draftIndex);
       if (nextDraftIndex >= 0) setDraftIndex(nextDraftIndex);
       else setDraftReviewOpen(false);
@@ -576,6 +588,45 @@ export function EditorPanel({
       const copyError = `Could not copy reviewed-draft metadata: ${errorMessage(commandError)}`;
       setDraftReviewCopyNotice({ kind: "error", text: copyError });
       setError(copyError);
+    }
+  }
+
+  async function refreshVerificationPlan() {
+    setVerificationLoading(true);
+    setVerificationNotice(null);
+    setError("");
+    try {
+      const snapshot = await testRunnerSnapshot();
+      const plan = buildReviewedDraftVerificationPlan(incomingDrafts, appliedDraftKeys, appliedDraftRecords, snapshot);
+      setVerificationPlan(plan);
+      setVerificationNotice({
+        kind: "ok",
+        text: `Discovered ${snapshot.profiles.length} backend-owned verification profile${snapshot.profiles.length === 1 ? "" : "s"}. Nothing was executed.`,
+      });
+    } catch (commandError) {
+      const plan = buildReviewedDraftVerificationPlan(incomingDrafts, appliedDraftKeys, appliedDraftRecords, null, errorMessage(commandError));
+      setVerificationPlan(plan);
+      setVerificationNotice({
+        kind: "error",
+        text: "Could not discover native test profiles. A metadata-only draft verification checklist is still available.",
+      });
+    } finally {
+      setVerificationLoading(false);
+    }
+  }
+
+  async function copyVerificationPlan() {
+    const plan = verificationPlan ?? buildReviewedDraftVerificationPlan(incomingDrafts, appliedDraftKeys, appliedDraftRecords, null);
+    setVerificationNotice(null);
+    if (!navigator.clipboard?.writeText) {
+      setVerificationNotice({ kind: "error", text: "Clipboard access is unavailable in this environment. Nothing was copied." });
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(plan, null, 2));
+      setVerificationNotice({ kind: "ok", text: "Copied reviewed-draft verification metadata. Nothing was executed." });
+    } catch (commandError) {
+      setVerificationNotice({ kind: "error", text: `Could not copy verification metadata: ${errorMessage(commandError)}` });
     }
   }
 
@@ -1005,6 +1056,50 @@ export function EditorPanel({
                     {draftReviewCopyNotice.text}
                   </div>
                 )}
+                <div className="mt-3 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.05] p-3 text-[11px] text-emerald-100/75">
+                  <div className="flex items-center gap-2 font-semibold text-emerald-100">
+                    <ClipboardList className="h-3.5 w-3.5 text-emerald-300" /> Verification guidance
+                  </div>
+                  <p className="mt-1 leading-relaxed text-emerald-100/60">
+                    Discover backend-owned test profiles for after reviewed apply. DevLab does not run them from this panel.
+                  </p>
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      onClick={() => { void refreshVerificationPlan(); }}
+                      disabled={verificationLoading}
+                      className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg border border-emerald-400/25 px-2 py-1.5 text-[10.5px] font-semibold text-emerald-100 hover:bg-emerald-400/10 disabled:opacity-40"
+                    >
+                      {verificationLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                      Refresh
+                    </button>
+                    <button
+                      onClick={() => { void copyVerificationPlan(); }}
+                      className="inline-flex items-center justify-center gap-1 rounded-lg border border-white/10 px-2 py-1.5 text-[10.5px] font-semibold text-emerald-100 hover:bg-white/5"
+                    >
+                      <Copy className="h-3 w-3" /> Copy
+                    </button>
+                  </div>
+                  {verificationPlan && (
+                    <div className="mt-2 space-y-1.5">
+                      <div className="rounded-lg border border-white/10 bg-black/15 px-2 py-1.5">
+                        {verificationPlan.recommendedProfiles.length > 0
+                          ? `${verificationPlan.recommendedProfiles.length} recommended profile${verificationPlan.recommendedProfiles.length === 1 ? "" : "s"}`
+                          : "No detected profile recommendation yet"}
+                        {verificationPlan.unavailableReason ? " · discovery unavailable" : ""}
+                      </div>
+                      {verificationPlan.recommendedProfiles.slice(0, 3).map((profile) => (
+                        <div key={profile.id} className="truncate rounded-md bg-black/20 px-2 py-1 font-mono text-[10px] text-emerald-100/65" title={profile.command}>
+                          {profile.command}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {verificationNotice && (
+                    <div className={`mt-2 text-[10.5px] ${verificationNotice.kind === "ok" ? "text-emerald-300" : "text-amber-300"}`}>
+                      {verificationNotice.text}
+                    </div>
+                  )}
+                </div>
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto p-2">
                 {incomingDrafts.map((draft, index) => {
@@ -1171,6 +1266,27 @@ interface ReviewedDraftSummary {
   files: ReviewedDraftSummaryItem[];
 }
 
+interface VerificationProfileRecommendation {
+  id: string;
+  label: string;
+  command: string;
+  reason: string;
+  matchedDraftPaths: string[];
+}
+
+interface ReviewedDraftVerificationPlan {
+  label: "DevLab reviewed-draft verification plan";
+  generatedAt: string;
+  note: string;
+  unavailableReason?: string;
+  draftSummary: ReviewedDraftSummary;
+  affectedPaths: string[];
+  recommendedProfiles: VerificationProfileRecommendation[];
+  detectedProfiles: Array<Pick<TestProfile, "id" | "label" | "command" | "reason">>;
+  warnings: string[];
+  manualChecklist: string[];
+}
+
 function summarizeReviewedDrafts(
   drafts: VFile[],
   appliedKeys: string[],
@@ -1219,6 +1335,88 @@ function buildReviewedDraftSummaryExport(
     lastAppliedAtMs: summary.lastAppliedAtMs,
     files: summary.files,
   }, null, 2);
+}
+
+function buildReviewedDraftVerificationPlan(
+  drafts: VFile[],
+  appliedKeys: string[],
+  appliedRecords: Record<string, ReviewedDraftApplicationRecord>,
+  snapshot: TestRunnerSnapshot | null,
+  unavailableReason?: string,
+): ReviewedDraftVerificationPlan {
+  const draftSummary = summarizeReviewedDrafts(drafts, appliedKeys, appliedRecords);
+  const affectedPaths = draftSummary.files.map((file) => file.path);
+  const recommendedProfiles = snapshot
+    ? recommendVerificationProfiles(snapshot.profiles, affectedPaths)
+    : [];
+  return {
+    label: "DevLab reviewed-draft verification plan",
+    generatedAt: new Date().toISOString(),
+    note: "Metadata only. No tests or shell commands were executed by this plan. Run backend-owned profiles explicitly from Self-Healing Tests after applying reviewed drafts.",
+    ...(unavailableReason ? { unavailableReason } : {}),
+    draftSummary,
+    affectedPaths,
+    recommendedProfiles,
+    detectedProfiles: snapshot?.profiles.map((profile) => ({
+      id: profile.id,
+      label: profile.label,
+      command: profile.command,
+      reason: profile.reason,
+    })) ?? [],
+    warnings: snapshot?.warnings ?? [],
+    manualChecklist: [
+      "Apply only the reviewed drafts you approve in the Editor.",
+      "Recompare existing files before applying if the workspace changed.",
+      "Open Self-Healing Tests and run the recommended backend-owned profile explicitly.",
+      "Inspect stdout/stderr and generate a repair draft only from a real failing run if needed.",
+      "Do not treat this manifest as proof that verification has run.",
+    ],
+  };
+}
+
+function recommendVerificationProfiles(
+  profiles: TestProfile[],
+  affectedPaths: string[],
+): VerificationProfileRecommendation[] {
+  const scored = profiles.map((profile) => {
+    const score = verificationProfileScore(profile, affectedPaths);
+    return { profile, score };
+  }).filter((item) => item.score > 0);
+
+  const candidates = scored.length > 0
+    ? scored.sort((left, right) => right.score - left.score || left.profile.label.localeCompare(right.profile.label))
+    : profiles.map((profile) => ({ profile, score: 1 }));
+
+  return candidates.slice(0, 6).map(({ profile }) => ({
+    id: profile.id,
+    label: profile.label,
+    command: profile.command,
+    reason: profile.reason,
+    matchedDraftPaths: affectedPaths.filter((path) => profileMatchesPath(profile, path)).slice(0, 12),
+  }));
+}
+
+function verificationProfileScore(profile: TestProfile, affectedPaths: string[]): number {
+  let score = 0;
+  for (const path of affectedPaths) {
+    if (profileMatchesPath(profile, path)) score += 3;
+  }
+  const command = profile.command.toLowerCase();
+  if (/\b(test|check|typecheck|pytest|cargo|go test|vitest|jest)\b/.test(command)) score += 1;
+  return score;
+}
+
+function profileMatchesPath(profile: TestProfile, path: string): boolean {
+  const lowerPath = path.toLowerCase();
+  const command = profile.command.toLowerCase();
+  if (/\.(rs|toml)$/.test(lowerPath) || lowerPath.includes("cargo.toml")) return command.includes("cargo");
+  if (/\.(py)$/.test(lowerPath) || lowerPath.includes("pyproject.toml") || lowerPath.includes("requirements.txt")) return command.includes("pytest") || command.includes("python");
+  if (/\.(go)$/.test(lowerPath) || lowerPath.endsWith("go.mod")) return command.includes("go test") || command.includes("go ");
+  if (/\.(ts|tsx|js|jsx|css|html|json)$/.test(lowerPath) || lowerPath.includes("package.json")) {
+    return /npm|pnpm|yarn|bun|vitest|jest|tsc|eslint|biome/.test(command);
+  }
+  if (/\.(sql|prisma)$/.test(lowerPath)) return /test|check|prisma|sql/.test(command);
+  return /test|check/.test(command);
 }
 
 function buildReviewedDraftApplicationRecord(
