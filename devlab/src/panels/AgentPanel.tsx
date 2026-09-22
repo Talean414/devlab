@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import type { ChatMessage } from "../types";
+import type { ChatMessage, OpenGeneratedDrafts, VFile } from "../types";
 import { Markdown } from "../components/CodeBlock";
 import { getApiKey, streamChat, getModel, type GenTurn } from "../lib/gemini";
-import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff } from "lucide-react";
+import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight } from "lucide-react";
 
 interface SpeechRecognitionLike {
   continuous: boolean;
@@ -20,14 +20,22 @@ function getSpeechRecognition(): (new () => SpeechRecognitionLike) | null {
 }
 
 const SUGGESTIONS = [
-  "Scaffold a Next.js app with Prisma and Postgres",
+  "Draft a Next.js app with Prisma and Postgres using file= paths",
   "Write a GitHub Actions workflow to deploy to Vercel",
   "Explain Docker multi-stage builds with an example",
-  "Generate a REST API in FastAPI with JWT auth",
+  "Generate a REST API in FastAPI with JWT auth using file= paths",
 ];
+
+const AGENT_DRAFT_FORMAT_HINT = `DevLab can stage complete generated files for reviewed editor apply only when each file is a fenced code block with an explicit safe workspace-relative path, for example: \`\`\`tsx file=src/App.tsx
+...
+\`\`\`. If you provide complete files, use that format. Do not claim files were written; DevLab opens them for user review.`;
+const MAX_AGENT_DRAFT_FILES = 12;
+const MAX_AGENT_DRAFT_BYTES = 512 * 1024;
+const MAX_AGENT_DRAFT_PATH_BYTES = 512;
 
 export function AgentPanel({
   onNeedKey,
+  onOpenFiles,
   messages,
   setMessages,
   input,
@@ -36,6 +44,7 @@ export function AgentPanel({
   setBusy,
 }: {
   onNeedKey: () => void;
+  onOpenFiles: OpenGeneratedDrafts;
   messages: ChatMessage[];
   setMessages: Dispatch<SetStateAction<ChatMessage[]>>;
   input: string;
@@ -44,6 +53,9 @@ export function AgentPanel({
   setBusy: Dispatch<SetStateAction<boolean>>;
 }) {
   const [listening, setListening] = useState(false);
+  const [stagingMessageId, setStagingMessageId] = useState<string | null>(null);
+  const [stageNotice, setStageNotice] = useState("");
+  const [stageError, setStageError] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const recRef = useRef<SpeechRecognitionLike | null>(null);
   const hasKey = !!getApiKey();
@@ -97,9 +109,12 @@ export function AgentPanel({
     setInput("");
     setBusy(true);
 
-    const history: GenTurn[] = [...messages, userMsg]
-      .filter((m) => m.role !== "system")
-      .map((m) => ({ role: m.role === "model" ? "model" : "user", text: m.content }));
+    const history: GenTurn[] = [
+      { role: "user", text: AGENT_DRAFT_FORMAT_HINT },
+      ...[...messages, userMsg]
+        .filter((m) => m.role !== "system")
+        .map((m) => ({ role: m.role === "model" ? "model" as const : "user" as const, text: m.content })),
+    ];
 
     try {
       let acc = "";
@@ -142,6 +157,23 @@ export function AgentPanel({
     }
   }
 
+  async function stageDraftsFromMessage(message: ChatMessage, drafts: VFile[]) {
+    if (drafts.length === 0 || stagingMessageId) return;
+    setStageNotice("");
+    setStageError("");
+    setStagingMessageId(message.id);
+    try {
+      const opened = await onOpenFiles(
+        drafts,
+        `AI Agent reviewed drafts from ${new Date(message.ts).toLocaleString()}`,
+      );
+      if (opened) setStageNotice(`Staged ${drafts.length} AI Agent draft${drafts.length === 1 ? "" : "s"} for editor review.`);
+      else setStageError("AI Agent drafts were not staged for editor review. Nothing was written.");
+    } finally {
+      setStagingMessageId(null);
+    }
+  }
+
   return (
     <div className="flex h-full flex-col">
       <PanelHeader
@@ -160,7 +192,7 @@ export function AgentPanel({
             <h3 className="text-xl font-semibold text-white">Your autonomous coding agent</h3>
             <p className="mx-auto mt-2 max-w-md text-sm text-zinc-400">
               Ask it to scaffold projects, write CI pipelines, debug code or explain anything.
-              No context switching to a separate chat app.
+              When a reply contains complete fenced files labeled with <span className="font-mono text-zinc-300">file=src/path</span>, DevLab can stage them for reviewed editor apply.
             </p>
             <div className="mt-7 grid gap-2.5 sm:grid-cols-2">
               {SUGGESTIONS.map((s) => (
@@ -177,7 +209,9 @@ export function AgentPanel({
           </div>
         )}
 
-        {messages.map((m) => (
+        {messages.map((m) => {
+          const draftFiles = m.role === "model" ? extractAgentDrafts(m.content) : [];
+          return (
           <div
             key={m.id}
             className={`flex gap-3 ${m.role === "user" ? "justify-end" : "justify-start"}`}
@@ -197,7 +231,30 @@ export function AgentPanel({
               {m.role === "user" ? (
                 <p className="whitespace-pre-wrap text-[14px] leading-relaxed">{m.content}</p>
               ) : m.content ? (
-                <Markdown text={m.content} />
+                <>
+                  <Markdown text={m.content} />
+                  {draftFiles.length > 0 && (
+                    <div className="mt-3 rounded-xl border border-violet-500/20 bg-violet-500/[0.06] p-3 text-[11.5px] text-violet-100/80">
+                      <div className="flex items-center gap-2">
+                        <FileCode2 className="h-3.5 w-3.5 text-violet-300" />
+                        <span className="min-w-0 flex-1">
+                          {draftFiles.length} labeled file draft{draftFiles.length === 1 ? "" : "s"} detected. Stage for reviewed Editor diff/apply?
+                        </span>
+                        <button
+                          onClick={() => void stageDraftsFromMessage(m, draftFiles)}
+                          disabled={!!stagingMessageId}
+                          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-violet-400/40 bg-violet-400/10 px-2.5 py-1.5 text-[11px] font-semibold text-violet-100 hover:bg-violet-400/20 disabled:opacity-40"
+                        >
+                          {stagingMessageId === m.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArrowRight className="h-3 w-3" />}
+                          Open reviewed drafts
+                        </button>
+                      </div>
+                      <div className="mt-2 truncate font-mono text-[10.5px] text-violet-100/60">
+                        {draftFiles.map((file) => file.path).join(" · ")}
+                      </div>
+                    </div>
+                  )}
+                </>
               ) : (
                 <span className="inline-flex gap-1.5 py-1">
                   <Dot d={0} /><Dot d={150} /><Dot d={300} />
@@ -210,7 +267,14 @@ export function AgentPanel({
               </div>
             )}
           </div>
-        ))}
+          );
+        })}
+
+        {(stageNotice || stageError) && (
+          <div className={`mx-auto max-w-2xl rounded-xl border px-4 py-3 text-[12.5px] ${stageError ? "border-rose-500/30 bg-rose-500/10 text-rose-200" : "border-emerald-500/30 bg-emerald-500/10 text-emerald-100"}`}>
+            {stageError || stageNotice}
+          </div>
+        )}
 
         {busy && messages[messages.length - 1]?.role !== "model" && (
           <div className="flex items-center gap-2 text-xs text-zinc-500">
@@ -302,4 +366,83 @@ export function PanelHeader({
       )}
     </div>
   );
+}
+
+
+function extractAgentDrafts(markdown: string): VFile[] {
+  const drafts: VFile[] = [];
+  const seen = new Set<string>();
+  const encoder = new TextEncoder();
+  let totalBytes = 0;
+  let lastFenceEnd = 0;
+  const fence = /```([^\n`]*)\n([\s\S]*?)```/g;
+  let match: RegExpExecArray | null;
+  while ((match = fence.exec(markdown)) && drafts.length < MAX_AGENT_DRAFT_FILES) {
+    const info = match[1]?.trim() ?? "";
+    const content = trimFenceContent(match[2] ?? "");
+    const before = markdown.slice(lastFenceEnd, match.index);
+    lastFenceEnd = fence.lastIndex;
+    if (!content.trim()) continue;
+    const path = extractDraftPath(info, before);
+    if (!path || !validDraftPath(path) || seen.has(path)) continue;
+    const bytes = encoder.encode(content).length;
+    if (totalBytes + bytes > MAX_AGENT_DRAFT_BYTES) break;
+    seen.add(path);
+    totalBytes += bytes;
+    drafts.push({ path, content, language: languageForDraftPath(path, info) });
+  }
+  return drafts;
+}
+
+function extractDraftPath(info: string, beforeFence: string): string | null {
+  const direct = info.match(/(?:^|\s)(?:file|path|filename)=(["']?)([^"'\s]+)\1/i);
+  if (direct) return cleanDraftPath(direct[2]);
+
+  const tokens = info.split(/\s+/).filter(Boolean);
+  for (const token of tokens) {
+    const candidate = token.replace(/^file:/i, "").replace(/^path:/i, "");
+    if (candidate.includes("/") || candidate.includes(".")) {
+      const clean = cleanDraftPath(candidate);
+      if (validDraftPath(clean)) return clean;
+    }
+  }
+
+  const lines = beforeFence.split("\n").slice(-3).join("\n");
+  const preceding = lines.match(/(?:^|\n)\s*(?:file|path|filename):\s*`?([^`\n]+?)`?\s*$/i);
+  return preceding ? cleanDraftPath(preceding[1]) : null;
+}
+
+function cleanDraftPath(path: string): string {
+  return path.trim().replace(/^[\'"`]+|[\'"`]+$/g, "").replace(/^\/+|\/+$/g, "");
+}
+
+function validDraftPath(path: string): boolean {
+  const clean = path.trim();
+  return !!clean
+    && clean.length <= MAX_AGENT_DRAFT_PATH_BYTES
+    && !clean.startsWith("/")
+    && !clean.startsWith("~")
+    && !clean.includes("\\")
+    && !clean.includes("//")
+    && !clean.endsWith("/")
+    && !/[\x00-\x1f\x7f]/.test(clean)
+    && !clean.split("/").some((part) => !part || part === "." || part === "..");
+}
+
+function trimFenceContent(content: string): string {
+  return content.replace(/^\n/, "").replace(/\n$/, "");
+}
+
+function languageForDraftPath(path: string, info: string): string {
+  const token = info.split(/\s+/).find((part) => part && !part.includes("=") && !validDraftPath(cleanDraftPath(part)));
+  if (token) return token.toLowerCase();
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  const map: Record<string, string> = {
+    ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript",
+    py: "python", rs: "rust", go: "go", java: "java", cs: "csharp",
+    rb: "ruby", php: "php", ex: "elixir", json: "json", yml: "yaml",
+    yaml: "yaml", md: "markdown", html: "html", css: "css", sql: "sql",
+    sh: "shell", toml: "toml", dockerfile: "dockerfile",
+  };
+  return map[ext] ?? "plaintext";
 }

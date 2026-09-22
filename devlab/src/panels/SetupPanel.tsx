@@ -97,13 +97,13 @@ const PHASES: readonly MigrationPhase[] = [
     n: 5,
     title: "Docker, databases and native HTTP",
     status: "complete",
-    detail: "Docker, SQLite, PostgreSQL and native HTTP are complete. Phase 6 now has bounded test execution, reviewed repair drafts, explicit reviewed-draft application, native audit metadata, permission-gated multi-file draft staging, reviewed draft diff inspection and unified generated-draft staging across generators; broader agent patch tools are next.",
+    detail: "Docker, SQLite, PostgreSQL and native HTTP are complete. Phase 6 now has bounded test execution, reviewed repair drafts, explicit reviewed-draft application, native audit metadata, permission-gated multi-file draft staging, reviewed draft diff inspection, unified generated-draft staging across generators and AI Agent reviewed draft extraction; broader agent patch tools are next.",
   },
   {
     n: 6,
     title: "Agent tool execution",
     status: "active",
-    detail: "Bounded native test execution, reviewed in-memory repair drafts, explicit draft application, native audit metadata, permission-gated multi-file draft staging, draft diff inspection and unified generator staging are implemented first. Broader agent patch tools and Ollama support follow.",
+    detail: "Bounded native test execution, reviewed in-memory repair drafts, explicit draft application, native audit metadata, permission-gated multi-file draft staging, draft diff inspection, unified generator staging and AI Agent reviewed draft extraction are implemented first. Broader agent patch tools and Ollama support follow.",
   },
   {
     n: 7,
