@@ -67,6 +67,7 @@ const APP_COMMANDS: &[&str] = &[
     "search_index_build",
     "search_index_status",
     "search_index_query",
+    "search_index_embed",
     "search_index_clear",
     "test_runner_snapshot",
     "test_runner_run",

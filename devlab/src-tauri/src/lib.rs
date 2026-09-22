@@ -38,7 +38,8 @@ use postgres::{
     database_postgres_schema, database_postgres_set_write_access, PostgresService,
 };
 use search_index::{
-    search_index_build, search_index_clear, search_index_query, search_index_status, SearchIndexService,
+    search_index_build, search_index_clear, search_index_embed, search_index_query, search_index_status,
+    SearchIndexService,
 };
 use serde::Serialize;
 use terminal::{
@@ -89,6 +90,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
             "local-ai",
             "ai-providers",
             "search-index",
+            "semantic-search",
         ],
     }
 }
@@ -182,6 +184,7 @@ pub fn run() {
             search_index_build,
             search_index_status,
             search_index_query,
+            search_index_embed,
             search_index_clear,
             test_runner_snapshot,
             test_runner_run,

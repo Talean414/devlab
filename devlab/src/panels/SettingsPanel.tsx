@@ -525,6 +525,16 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                           {ollamaModels.map((m) => <option key={m.name} value={m.name} />)}
                         </datalist>
                       </label>
+                      <label className="block text-[12px] text-zinc-400 sm:col-span-2">
+                        Embedding model for semantic workspace search (Phase 9D)
+                        <input value={s.ollamaEmbedModel} onChange={(e) => update({ ollamaEmbedModel: e.target.value })}
+                          placeholder="nomic-embed-text, mxbai-embed-large, bge-m3"
+                          list="devlab-ollama-models"
+                          className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                        <span className="mt-1 block text-[11px] text-zinc-500">
+                          Used only by the Agent context picker's Search → Embed step. Vectors are computed through the same loopback-only adapter, kept in Rust memory and dropped with the index. Pull it with <code>ollama pull nomic-embed-text</code>.
+                        </span>
+                      </label>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <button

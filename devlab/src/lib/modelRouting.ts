@@ -136,7 +136,7 @@ export const AI_PROVIDER_PROFILES: AiProviderProfile[] = [
     transport: "Rust-owned loopback-only HTTP adapter (fixed /api/tags and /api/chat paths, bounded prompt and reply, 120 s generation timeout)",
     defaultModel: "llama3.1",
     modelExamples: ["llama3.1", "qwen2.5-coder", "deepseek-r1"],
-    note: "Phase 9A native local adapter. Only http://localhost or 127.0.0.1/::1 endpoints are accepted, the WebView never calls localhost itself, and generation is non-streamed. Unavailable in the plain web preview.",
+    note: "Phase 9A native local adapter (Phase 9D adds embeddings for semantic workspace search through the same adapter). Only http://localhost or 127.0.0.1/::1 endpoints are accepted, the WebView never calls localhost itself, and generation is non-streamed. Unavailable in the plain web preview.",
   },
   {
     id: "openai",

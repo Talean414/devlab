@@ -17,7 +17,11 @@ import {
 import { recordAgentContext } from "../lib/agentTools";
 import { buildRepoMap, renderRepoMap, REPO_MAP_CONTEXT_PATH } from "../lib/repoMap";
 import { listDirectory, onWorkspaceChange, readWorkspaceFile, type WorkspaceDocument, type WorkspaceEntry } from "../lib/workspace";
-import { buildSearchIndex, describeIndexStats, querySearchIndex, searchIndexStatus, type SearchHit, type SearchIndexStatus } from "../lib/searchIndex";
+import {
+  buildSearchIndex, describeIndexStats, describeSemanticStatus, embedSearchIndex, querySearchIndex, searchIndexStatus,
+  type SearchHit, type SearchIndexStatus, type SearchMode, type SemanticTarget,
+} from "../lib/searchIndex";
+import { loadSettings } from "../lib/settings";
 import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight, ArrowUp, Folder, FolderTree, Paperclip, RefreshCw, X } from "lucide-react";
 
 interface SpeechRecognitionLike {
@@ -57,6 +61,7 @@ export function AgentPanel({
   onOpenFiles,
   canAttachWorkspace,
   canSearchWorkspace,
+  canSemanticSearch,
   canShowAudit,
   contextFiles,
   setContextFiles,
@@ -71,6 +76,7 @@ export function AgentPanel({
   onOpenFiles: OpenGeneratedDrafts;
   canAttachWorkspace: boolean;
   canSearchWorkspace: boolean;
+  canSemanticSearch: boolean;
   canShowAudit: boolean;
   contextFiles: AgentContextFile[];
   setContextFiles: Dispatch<SetStateAction<AgentContextFile[]>>;
@@ -105,6 +111,10 @@ export function AgentPanel({
   const [searchBusy, setSearchBusy] = useState(false);
   const [searchError, setSearchError] = useState("");
   const [searchStale, setSearchStale] = useState(false);
+  const [searchMode, setSearchMode] = useState<SearchMode>("lexical");
+  const [embedBusy, setEmbedBusy] = useState(false);
+  const [embedNotice, setEmbedNotice] = useState("");
+  const embedCancelRef = useRef(false);
   const [auditOpen, setAuditOpen] = useState(false);
   const [auditEvents, setAuditEvents] = useState<AgentAuditEvent[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
@@ -307,15 +317,47 @@ export function AgentPanel({
     }
   }
 
+  function semanticTarget(): SemanticTarget {
+    const settings = loadSettings();
+    return { endpoint: settings.customEndpoint, model: settings.ollamaEmbedModel.trim() || "nomic-embed-text" };
+  }
+
+  /** Runs bounded embed batches back-to-back until complete, cancelled, or an error. Never automatic. */
+  async function embedIndex() {
+    if (!canSemanticSearch || embedBusy) return;
+    embedCancelRef.current = false;
+    setEmbedBusy(true);
+    setEmbedNotice("");
+    setSearchError("");
+    const target = semanticTarget();
+    try {
+      let passes = 0;
+      for (;;) {
+        const response = await embedSearchIndex(target);
+        passes += 1;
+        setSearchStatus((previous) => (previous ? { ...previous, semantic: response.semantic } : previous));
+        setEmbedNotice(`${describeSemanticStatus(response.semantic)} · pass ${passes}${response.restarted ? " (restarted for a new model)" : ""}`);
+        if (response.semantic.complete || response.semantic.truncated || response.embeddedNow === 0 || embedCancelRef.current) break;
+      }
+      if (embedCancelRef.current) setEmbedNotice((text) => `${text} · stopped by you`);
+    } catch (error) {
+      setSearchError(formatContextError(error));
+    } finally {
+      setEmbedBusy(false);
+    }
+  }
+
   async function runSearch() {
     const query = searchQuery.trim();
     if (!query) return;
     setSearchBusy(true);
     setSearchError("");
     try {
-      const response = await querySearchIndex(query, { limit: 30 });
+      const mode: SearchMode = canSemanticSearch ? searchMode : "lexical";
+      const response = await querySearchIndex(query, { limit: 30, mode, semantic: mode === "lexical" ? undefined : semanticTarget() });
       setSearchHits(response.hits);
-      setSearchMeta(`${response.totalMatches} match${response.totalMatches === 1 ? "" : "es"} for ${response.ftsQuery} in ${response.elapsedMs} ms${response.truncated ? ` · showing top ${response.hits.length}` : ""}. Lexical bm25 only; snippets are bounded excerpts.`);
+      const modeText = response.mode === "lexical" ? `for ${response.ftsQuery}` : response.mode === "semantic" ? "by meaning" : `for ${response.ftsQuery} + meaning`;
+      setSearchMeta(`${response.totalMatches} match${response.totalMatches === 1 ? "" : "es"} ${modeText} in ${response.elapsedMs} ms${response.truncated ? ` · showing top ${response.hits.length}` : ""}. Score: ${response.scoreKind}; snippets are bounded excerpts.${response.semanticNote ? ` ${response.semanticNote}` : ""}`);
     } catch (error) {
       setSearchHits([]);
       setSearchError(formatContextError(error));
@@ -970,11 +1012,39 @@ export function AgentPanel({
                     className="rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/20 disabled:opacity-40">
                     Search
                   </button>
-                  <button onClick={() => { void buildIndex(); }} disabled={searchBusy}
+                  <button onClick={() => { void buildIndex(); }} disabled={searchBusy || embedBusy}
                     className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-white/5 disabled:opacity-40">
                     {searchBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />} {searchStatus?.available ? "Rebuild index" : "Build index"}
                   </button>
                 </div>
+                {canSemanticSearch && (
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                    <span>Mode</span>
+                    <div className="inline-flex rounded-lg border border-white/10 p-0.5">
+                      {(["lexical", "hybrid", "semantic"] as SearchMode[]).map((mode) => (
+                        <button key={mode} onClick={() => setSearchMode(mode)}
+                          disabled={mode !== "lexical" && !(searchStatus?.semantic.embeddedChunks)}
+                          title={mode === "lexical" ? "FTS5 bm25 over words" : mode === "hybrid" ? "Reciprocal-rank fusion of lexical and semantic" : "Cosine similarity over local embeddings"}
+                          className={`rounded-md px-2 py-0.5 capitalize ${searchMode === mode ? "bg-white/10 text-white" : "hover:text-zinc-200"} disabled:cursor-not-allowed disabled:opacity-40`}>
+                          {mode}
+                        </button>
+                      ))}
+                    </div>
+                    {embedBusy ? (
+                      <button onClick={() => { embedCancelRef.current = true; }}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-amber-400/30 px-2.5 py-1 font-semibold text-amber-200 hover:bg-amber-400/10">
+                        <Loader2 className="h-3 w-3 animate-spin" /> Stop embedding
+                      </button>
+                    ) : (
+                      <button onClick={() => { void embedIndex(); }} disabled={!searchStatus?.available || searchBusy || (searchStatus?.stats?.chunkCount ?? 0) === 0}
+                        className="rounded-lg border border-white/10 px-2.5 py-1 font-semibold text-zinc-300 hover:bg-white/5 disabled:opacity-40">
+                        {searchStatus?.semantic.embeddedChunks ? (searchStatus.semantic.complete ? "Re-embed" : "Continue embedding") : "Embed with Ollama"}
+                      </button>
+                    )}
+                    <span className="text-zinc-600">{searchStatus ? describeSemanticStatus(searchStatus.semantic) : ""} · model {semanticTarget().model} (Settings → Providers → Ollama)</span>
+                  </div>
+                )}
+                {embedNotice && <div className="mt-1 text-[10.5px] text-cyan-300/80">{embedNotice}</div>}
                 <div className="mt-2 text-[10.5px] text-zinc-600">
                   {searchStatus?.available && searchStatus.stats
                     ? `Index: ${describeIndexStats(searchStatus.stats)}`
@@ -1002,8 +1072,8 @@ export function AgentPanel({
                       <FileCode2 className="mt-0.5 h-4 w-4 shrink-0 text-zinc-500 group-hover:text-violet-300" />
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center justify-between gap-2">
-                          <span className="truncate font-mono">{hit.path}</span>
-                          <span className="shrink-0 text-[10px] text-zinc-600">{hit.size} B · bm25 {hit.rank.toFixed(2)}</span>
+                          <span className="truncate font-mono">{hit.path}{hit.startLine ? <span className="text-zinc-600">:{hit.startLine}–{hit.endLine}</span> : null}</span>
+                          <span className="shrink-0 text-[10px] text-zinc-600">{hit.size} B · {hit.sources.join("+")} {hit.rank.toFixed(3)}</span>
                         </div>
                         {hit.snippet && <div className="mt-0.5 truncate font-mono text-[10.5px] text-zinc-500">{hit.snippet}</div>}
                       </div>

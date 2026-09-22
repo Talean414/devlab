@@ -74,6 +74,7 @@
     "allow-search-index-build",
     "allow-search-index-status",
     "allow-search-index-query",
+    "allow-search-index-embed",
     "allow-search-index-clear",
     "allow-test-runner-snapshot",
     "allow-test-runner-run",

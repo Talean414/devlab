@@ -38,6 +38,11 @@ const MAX_PREDICT_TOKENS: u64 = 8192;
 // (still finite) bound than the API client's 30 s ceiling, via the in-crate timeout entry point.
 const LIST_TIMEOUT_SECS: u64 = 10;
 const GENERATE_TIMEOUT_SECS: u64 = 120;
+const EMBED_TIMEOUT_SECS: u64 = 120;
+pub(crate) const MAX_EMBED_BATCH: usize = 16;
+pub(crate) const MAX_EMBED_INPUT_CHARS: usize = 4 * 1024;
+const MIN_EMBED_DIMS: usize = 16;
+const MAX_EMBED_DIMS: usize = 8192;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -425,6 +430,119 @@ fn chat(request: OllamaChatRequest) -> Result<OllamaChatResponse, CommandError> 
     })
 }
 
+/// Embedding batch result: one unit-normalized vector per input, all of the same dimension.
+pub(crate) struct EmbeddingBatch {
+    pub(crate) endpoint: String,
+    pub(crate) model: String,
+    pub(crate) dims: usize,
+    pub(crate) vectors: Vec<Vec<f32>>,
+    pub(crate) prompt_eval_count: u64,
+}
+
+/// Validates the endpoint/model exactly like chat and returns the normalized origin + model id,
+/// so callers can record which local model produced a set of vectors.
+pub(crate) fn validate_embed_target(endpoint: &str, model: &str) -> Result<(String, String), CommandError> {
+    let (_, origin) = validate_loopback_endpoint(endpoint)?;
+    let model = validate_model(model)?;
+    Ok((origin, model))
+}
+
+/// Parses an `/api/embed` body into exactly `expected` finite, non-empty, equal-length vectors and
+/// normalizes them to unit length. Anything else is a protocol error; nothing is guessed.
+pub(crate) fn parse_embeddings(body: &Value, expected: usize) -> Result<(usize, Vec<Vec<f32>>), CommandError> {
+    let protocol = |detail: &str| CommandError::new("ollama_protocol_error", format!("Ollama embedding response was rejected: {detail}"));
+    let rows = body
+        .get("embeddings")
+        .and_then(Value::as_array)
+        .ok_or_else(|| protocol("missing `embeddings` array (update Ollama to a version that supports /api/embed)"))?;
+    if rows.len() != expected {
+        return Err(protocol(&format!("expected {expected} vectors but received {}", rows.len())));
+    }
+    let mut dims = 0usize;
+    let mut vectors = Vec::with_capacity(rows.len());
+    for row in rows {
+        let values = row.as_array().ok_or_else(|| protocol("a vector is not an array"))?;
+        if dims == 0 {
+            dims = values.len();
+            if !(MIN_EMBED_DIMS..=MAX_EMBED_DIMS).contains(&dims) {
+                return Err(protocol(&format!("vector dimension {dims} is outside {MIN_EMBED_DIMS}..={MAX_EMBED_DIMS}")));
+            }
+        } else if values.len() != dims {
+            return Err(protocol("vectors have inconsistent dimensions"));
+        }
+        let mut vector = Vec::with_capacity(dims);
+        let mut norm = 0.0f64;
+        for value in values {
+            let number = value.as_f64().ok_or_else(|| protocol("a vector component is not a number"))?;
+            if !number.is_finite() {
+                return Err(protocol("a vector component is not finite"));
+            }
+            norm += number * number;
+            vector.push(number as f32);
+        }
+        if norm <= 0.0 {
+            return Err(protocol("received a zero vector"));
+        }
+        let scale = (1.0 / norm.sqrt()) as f32;
+        for component in &mut vector {
+            *component *= scale;
+        }
+        vectors.push(vector);
+    }
+    Ok((dims, vectors))
+}
+
+/// Embeds up to `MAX_EMBED_BATCH` texts with a local Ollama model. Inputs are bounded per text;
+/// the call is non-streamed and bounded by `EMBED_TIMEOUT_SECS`.
+pub(crate) fn embed_texts(endpoint: &str, model: &str, inputs: &[&str]) -> Result<EmbeddingBatch, CommandError> {
+    let (origin, model) = validate_embed_target(endpoint, model)?;
+    if inputs.is_empty() || inputs.len() > MAX_EMBED_BATCH {
+        return Err(CommandError::new(
+            "ollama_embed_invalid",
+            format!("Embedding batches must contain between 1 and {MAX_EMBED_BATCH} texts."),
+        ));
+    }
+    let mut bounded = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err(CommandError::new("ollama_embed_invalid", "Cannot embed an empty text."));
+        }
+        bounded.push(bound_text(trimmed, MAX_EMBED_INPUT_CHARS).0);
+    }
+    let payload = json!({ "model": model, "input": bounded, "truncate": true });
+    let response = send_request_with_timeout(
+        HttpRequest {
+            method: "POST".to_string(),
+            url: api_url(&origin, "/api/embed"),
+            headers: vec![json_header()],
+            body: payload.to_string(),
+            timeout_secs: None,
+        },
+        Duration::from_secs(EMBED_TIMEOUT_SECS),
+    )
+    .map_err(|error| transport_error(&origin, EMBED_TIMEOUT_SECS, error))?;
+    let body = parse_json_body(&response.body, response.body_truncated, "embedding")?;
+    if !(200..300).contains(&response.status) {
+        let error = http_status_error(response.status, &response.status_text, &body);
+        if response.status == 404 {
+            return Err(CommandError::new(
+                "ollama_model_not_found",
+                format!("{} Pull an embedding model (for example `ollama pull nomic-embed-text`) and make sure Ollama is recent enough to serve /api/embed.", error.message),
+            ));
+        }
+        return Err(error);
+    }
+    let (dims, vectors) = parse_embeddings(&body, inputs.len())?;
+    Ok(EmbeddingBatch {
+        endpoint: origin,
+        model,
+        dims,
+        vectors,
+        prompt_eval_count: body.get("prompt_eval_count").and_then(Value::as_u64).unwrap_or(0),
+    })
+}
+
 fn bound_text(text: &str, max_chars: usize) -> (String, bool) {
     if text.chars().count() <= max_chars {
         return (text.to_string(), false);
@@ -458,6 +576,37 @@ mod tests {
             role: role.to_string(),
             content: content.to_string(),
         }
+    }
+
+    #[test]
+    fn embedding_parser_is_strict_and_normalizes() {
+        let body = json!({ "embeddings": [[3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                                          [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0]] });
+        let (dims, vectors) = parse_embeddings(&body, 2).unwrap();
+        assert_eq!(dims, 16);
+        assert!((vectors[0][0] - 0.6).abs() < 1e-6 && (vectors[0][1] - 0.8).abs() < 1e-6);
+        assert!((vectors[1][15] - 1.0).abs() < 1e-6);
+
+        assert_eq!(parse_embeddings(&body, 1).unwrap_err().code, "ollama_protocol_error");
+        assert_eq!(parse_embeddings(&json!({ "embedding": [1.0] }), 1).unwrap_err().code, "ollama_protocol_error");
+        assert_eq!(parse_embeddings(&json!({ "embeddings": [[1.0, 2.0]] }), 1).unwrap_err().code, "ollama_protocol_error");
+        let ragged = json!({ "embeddings": [vec![1.0; 16], vec![1.0; 17]] });
+        assert_eq!(parse_embeddings(&ragged, 2).unwrap_err().code, "ollama_protocol_error");
+        let zero = json!({ "embeddings": [vec![0.0; 16]] });
+        assert_eq!(parse_embeddings(&zero, 1).unwrap_err().code, "ollama_protocol_error");
+        let text = json!({ "embeddings": [vec![json!("x"); 16]] });
+        assert_eq!(parse_embeddings(&text, 1).unwrap_err().code, "ollama_protocol_error");
+    }
+
+    #[test]
+    fn embed_inputs_are_validated_before_any_request() {
+        assert_eq!(embed_texts("http://127.0.0.1:11434", "nomic-embed-text", &[]).unwrap_err().code, "ollama_embed_invalid");
+        assert_eq!(embed_texts("http://127.0.0.1:11434", "nomic-embed-text", &["   "]).unwrap_err().code, "ollama_embed_invalid");
+        let too_many = vec!["x"; MAX_EMBED_BATCH + 1];
+        assert_eq!(embed_texts("http://127.0.0.1:11434", "nomic-embed-text", &too_many).unwrap_err().code, "ollama_embed_invalid");
+        assert_eq!(embed_texts("http://example.com:11434", "nomic-embed-text", &["x"]).unwrap_err().code, "ollama_endpoint_not_loopback");
+        assert_eq!(embed_texts("http://127.0.0.1:11434", "bad model!", &["x"]).unwrap_err().code, "ollama_model_invalid");
+        assert_eq!(validate_embed_target("", "nomic-embed-text").unwrap(), ("http://127.0.0.1:11434".to_string(), "nomic-embed-text".to_string()));
     }
 
     #[test]

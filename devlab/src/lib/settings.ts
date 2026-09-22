@@ -52,6 +52,8 @@ export interface DevLabSettings {
   openaiModel: string;
   anthropicModel: string;
   ollamaModel: string;
+  /** Local embedding model used by semantic workspace search (Ollama, loopback only). */
+  ollamaEmbedModel: string;
   customModel: string;
   customEndpoint: string;
   temperature: number;
@@ -102,6 +104,7 @@ export const DEFAULT_SETTINGS: DevLabSettings = {
   openaiModel: "gpt-4.1-mini",
   anthropicModel: "claude-sonnet-4-5",
   ollamaModel: "llama3.1",
+  ollamaEmbedModel: "nomic-embed-text",
   customModel: "",
   customEndpoint: "",
   temperature: 0.7,
