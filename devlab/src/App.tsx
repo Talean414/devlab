@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import type { VFile, ViewId } from "./types";
+import type { ChatMessage, VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import { loadDeploy, loadGit, loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
 import {
@@ -92,6 +92,9 @@ export default function App() {
   const [runtime, setRuntime] = useState(WEB_RUNTIME);
   const [editorDirty, setEditorDirty] = useState(false);
   const [generatedDrafts, setGeneratedDrafts] = useState<VFile[]>([]);
+  const [agentMessages, setAgentMessages] = useState<ChatMessage[]>([]);
+  const [agentInput, setAgentInput] = useState("");
+  const [agentBusy, setAgentBusy] = useState(false);
 
   const hasKey = !!getApiKey();
   const model = getPicked() || getModel();
@@ -179,7 +182,16 @@ export default function App() {
 
     switch (view) {
       case "welcome":  return <WelcomePanel key={keyVersion} onNavigate={navigate} hasKey={hasKey} />;
-      case "agent":    return <AgentPanel key={keyVersion} onNeedKey={() => setShowModal(true)} />;
+      case "agent":    return <AgentPanel
+        key={keyVersion}
+        onNeedKey={() => setShowModal(true)}
+        messages={agentMessages}
+        setMessages={setAgentMessages}
+        input={agentInput}
+        setInput={setAgentInput}
+        busy={agentBusy}
+        setBusy={setAgentBusy}
+      />;
       case "builder":  return hasNativeCapability(runtime, "agent-tools")
         ? <Suspense fallback={<NativePanelLoading label="Loading native agent tools…" />}>
           <BuilderPanel key={keyVersion} onNeedKey={() => setShowModal(true)} onOpenFiles={openGeneratedSource} />

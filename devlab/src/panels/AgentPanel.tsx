@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import type { ChatMessage } from "../types";
 import { Markdown } from "../components/CodeBlock";
 import { getApiKey, streamChat, getModel, type GenTurn } from "../lib/gemini";
@@ -26,10 +26,23 @@ const SUGGESTIONS = [
   "Generate a REST API in FastAPI with JWT auth",
 ];
 
-export function AgentPanel({ onNeedKey }: { onNeedKey: () => void }) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
+export function AgentPanel({
+  onNeedKey,
+  messages,
+  setMessages,
+  input,
+  setInput,
+  busy,
+  setBusy,
+}: {
+  onNeedKey: () => void;
+  messages: ChatMessage[];
+  setMessages: Dispatch<SetStateAction<ChatMessage[]>>;
+  input: string;
+  setInput: Dispatch<SetStateAction<string>>;
+  busy: boolean;
+  setBusy: Dispatch<SetStateAction<boolean>>;
+}) {
   const [listening, setListening] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const recRef = useRef<SpeechRecognitionLike | null>(null);
