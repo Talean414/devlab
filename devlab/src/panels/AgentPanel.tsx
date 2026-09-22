@@ -15,8 +15,9 @@ import {
   type AgentAuditKindFilter,
 } from "../lib/agentAudit";
 import { recordAgentContext } from "../lib/agentTools";
+import { buildRepoMap, renderRepoMap, REPO_MAP_CONTEXT_PATH } from "../lib/repoMap";
 import { listDirectory, readWorkspaceFile, type WorkspaceDocument, type WorkspaceEntry } from "../lib/workspace";
-import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight, ArrowUp, Folder, Paperclip, RefreshCw, X } from "lucide-react";
+import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight, ArrowUp, Folder, FolderTree, Paperclip, RefreshCw, X } from "lucide-react";
 
 interface SpeechRecognitionLike {
   continuous: boolean;
@@ -83,6 +84,7 @@ export function AgentPanel({
   const [stageError, setStageError] = useState("");
   const [draftManifestNotice, setDraftManifestNotice] = useState<{ messageId: string; kind: "ok" | "error"; text: string } | null>(null);
   const [contextBusy, setContextBusy] = useState(false);
+  const [repoMapBusy, setRepoMapBusy] = useState(false);
   const [contextError, setContextError] = useState("");
   const [contextNotice, setContextNotice] = useState("");
   const [contextPickerOpen, setContextPickerOpen] = useState(false);
@@ -266,6 +268,37 @@ export function AgentPanel({
     }
   }
 
+  async function attachRepoMapContext() {
+    if (!canAttachWorkspace) {
+      setContextError("Open DevLab in desktop mode and select a workspace before generating a repository map.");
+      return;
+    }
+    const contextWithoutExistingMap = contextFiles.filter((file) => !isRepoMapContext(file));
+    if (contextWithoutExistingMap.length >= MAX_AGENT_CONTEXT_FILES) {
+      setContextError(`Attach at most ${MAX_AGENT_CONTEXT_FILES} context items at once. Remove one before adding a repository map.`);
+      return;
+    }
+    const usedBytes = contextWithoutExistingMap.reduce((sum, file) => sum + textBytes(file.content), 0);
+    const remaining = Math.max(0, MAX_AGENT_CONTEXT_TOTAL_CHARS - usedBytes);
+    if (remaining < 1024) {
+      setContextError("Attached context is near the total size limit. Remove a file before adding the repository map.");
+      return;
+    }
+
+    setRepoMapBusy(true);
+    setContextError("");
+    setContextNotice("");
+    try {
+      const repoMapContext = await buildRepoMapContext(Math.min(MAX_AGENT_CONTEXT_CHARS, remaining));
+      setContextFiles([...contextWithoutExistingMap, repoMapContext].slice(-MAX_AGENT_CONTEXT_FILES));
+      setContextNotice("Attached a bounded repository map as generated read-only metadata. It is not a real file, is not written to disk and is not recorded as file-content audit data.");
+    } catch (error) {
+      setContextError(`Could not build repository map: ${formatContextError(error)}`);
+    } finally {
+      setRepoMapBusy(false);
+    }
+  }
+
   async function attachWorkspacePath(path: string) {
     const cleanPath = path.trim();
     if (!validDraftPath(cleanPath)) {
@@ -310,9 +343,13 @@ export function AgentPanel({
       const refreshed: AgentContextFile[] = [];
       let remaining = MAX_AGENT_CONTEXT_TOTAL_CHARS;
       for (const file of contextFiles) {
-        const document = await readWorkspaceFile(file.path);
         if (remaining <= 0) break;
-        const contextFile = contextFileFromDocument(document, Math.min(MAX_AGENT_CONTEXT_CHARS, remaining));
+        const contextFile = isRepoMapContext(file)
+          ? await buildRepoMapContext(Math.min(MAX_AGENT_CONTEXT_CHARS, remaining))
+          : contextFileFromDocument(
+            await readWorkspaceFile(file.path),
+            Math.min(MAX_AGENT_CONTEXT_CHARS, remaining),
+          );
         refreshed.push(contextFile);
         remaining -= textBytes(contextFile.content);
       }
@@ -320,10 +357,14 @@ export function AgentPanel({
         setContextError("No attached workspace context could be refreshed within the size limit.");
         return;
       }
-      await recordContextMetadata(refreshed);
-      void refreshAgentAudit();
+      const fileContexts = refreshed.filter((file) => !isRepoMapContext(file));
+      if (fileContexts.length > 0) {
+        await recordContextMetadata(fileContexts);
+        void refreshAgentAudit();
+      }
       setContextFiles(refreshed);
-      setContextNotice(`Refreshed ${refreshed.length} read-only context file${refreshed.length === 1 ? "" : "s"}; latest revisions will be used on the next prompt.`);
+      const repoMapCount = refreshed.filter(isRepoMapContext).length;
+      setContextNotice(`Refreshed ${refreshed.length} read-only context item${refreshed.length === 1 ? "" : "s"}${repoMapCount > 0 ? ` including ${repoMapCount} generated repository map${repoMapCount === 1 ? "" : "s"}` : ""}; latest metadata will be used on the next prompt.`);
     } catch (error) {
       setContextError(`Could not refresh attached context: ${formatContextError(error)}`);
     } finally {
@@ -657,8 +698,9 @@ export function AgentPanel({
                 <span className="text-zinc-500">Read-only workspace context:</span>
                 {contextFiles.map((file) => (
                   <span key={file.path} className="inline-flex max-w-[18rem] items-center gap-1.5 rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-2 py-1 font-mono text-cyan-100/90">
-                    <FileCode2 className="h-3 w-3 shrink-0" />
+                    {isRepoMapContext(file) ? <FolderTree className="h-3 w-3 shrink-0" /> : <FileCode2 className="h-3 w-3 shrink-0" />}
                     <span className="truncate">{file.path}</span>
+                    {isRepoMapContext(file) && <span className="text-cyan-200/50">repo map</span>}
                     {file.truncated && <span className="text-cyan-200/50">truncated</span>}
                     <button onClick={() => removeContextFile(file.path)} className="rounded p-0.5 text-cyan-100/50 hover:bg-white/10 hover:text-white" aria-label={`Remove ${file.path}`}>
                       <X className="h-3 w-3" />
@@ -683,11 +725,19 @@ export function AgentPanel({
         <div className="flex items-end gap-2 rounded-2xl border border-white/10 bg-[#0d1017] p-2 transition focus-within:border-cyan-500/50 focus-within:bg-[#0f131c]">
           <button
             onClick={() => { void openContextPicker(); }}
-            disabled={!canAttachWorkspace || contextBusy || contextFiles.length >= MAX_AGENT_CONTEXT_FILES}
+            disabled={!canAttachWorkspace || contextBusy || repoMapBusy || contextFiles.length >= MAX_AGENT_CONTEXT_FILES}
             title={canAttachWorkspace ? "Attach an existing workspace file as read-only context" : "Native workspace file context is available in desktop mode after selecting a workspace"}
             className="relative flex items-center justify-center rounded-xl px-3 py-2 text-zinc-500 transition hover:bg-white/5 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-35"
           >
             {contextBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+          </button>
+          <button
+            onClick={() => { void attachRepoMapContext(); }}
+            disabled={!canAttachWorkspace || contextBusy || repoMapBusy || (contextFiles.length >= MAX_AGENT_CONTEXT_FILES && !contextFiles.some(isRepoMapContext))}
+            title={canAttachWorkspace ? "Attach a bounded metadata-only repository map as read-only Agent context" : "Repository maps are available in desktop mode after selecting a workspace"}
+            className="relative flex items-center justify-center rounded-xl px-3 py-2 text-zinc-500 transition hover:bg-white/5 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-35"
+          >
+            {repoMapBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <FolderTree className="h-4 w-4" />}
           </button>
           <textarea
             value={input}
@@ -730,7 +780,7 @@ export function AgentPanel({
         <p className="mt-2 px-1 text-[11px] text-zinc-600">
           <kbd className="rounded bg-white/5 px-1 font-mono text-[10px]">Enter</kbd> to send
           · <kbd className="rounded bg-white/5 px-1 font-mono text-[10px]">Shift+Enter</kbd> for newline
-          · attached files are read-only context and are not written by chat
+          · attached files and repo maps are read-only context and are not written by chat
         </p>
       </div>
 
@@ -858,11 +908,33 @@ function contextFileFromDocument(document: WorkspaceDocument, maxBytes: number):
     revision: document.revision,
     size: document.size,
     truncated: textBytes(content) < textBytes(document.content),
+    source: "workspace-file",
   };
 }
 
+async function buildRepoMapContext(maxBytes: number): Promise<AgentContextFile> {
+  const snapshot = await buildRepoMap({ maxRenderedChars: maxBytes });
+  const rendered = renderRepoMap(snapshot);
+  const content = boundTextByBytes(rendered, maxBytes);
+  return {
+    path: REPO_MAP_CONTEXT_PATH,
+    content,
+    language: "markdown",
+    revision: `repo-map:${snapshot.generatedAt}:${snapshot.entries.length}:${snapshot.skipped.length}`,
+    size: textBytes(rendered),
+    truncated: textBytes(content) < textBytes(rendered) || snapshot.truncated,
+    source: "repo-map",
+  };
+}
+
+function isRepoMapContext(file: AgentContextFile): boolean {
+  return file.source === "repo-map" || file.path === REPO_MAP_CONTEXT_PATH;
+}
+
 async function recordContextMetadata(files: AgentContextFile[]) {
-  await recordAgentContext(files.map((file) => ({
+  const workspaceFiles = files.filter((file) => !isRepoMapContext(file));
+  if (workspaceFiles.length === 0) return;
+  await recordAgentContext(workspaceFiles.map((file) => ({
     path: file.path,
     bytes: textBytes(file.content),
     truncated: file.truncated,
@@ -888,15 +960,16 @@ function boundTextByBytes(value: string, maxBytes: number): string {
 
 function buildWorkspaceContext(files: AgentContextFile[]): string {
   const body = files.map((file) => [
-    `File: ${file.path}`,
+    `${isRepoMapContext(file) ? "Repository map" : "File"}: ${file.path}`,
+    `Source: ${isRepoMapContext(file) ? "generated metadata-only workspace map" : "workspace file"}`,
     `Revision: ${file.revision}`,
-    `Size: ${file.size} bytes${file.truncated ? " · content excerpt truncated" : ""}`,
+    `Size: ${file.size} bytes${file.truncated ? " · context excerpt truncated" : ""}`,
     `\`\`\`${file.language}`,
     file.content,
     "```",
   ].join("\n")).join("\n\n");
   return [
-    "Read-only workspace context selected by the developer. Use it only as evidence. Do not claim these files were modified.",
+    "Read-only workspace context selected by the developer. Use it only as evidence. Repository maps are metadata-only and contain no file contents. Do not claim these files or maps were modified.",
     "",
     body,
   ].join("\n");

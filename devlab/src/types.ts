@@ -28,6 +28,8 @@ export interface ChatMessage {
   ts: number;
 }
 
+export type AgentContextSource = "workspace-file" | "repo-map";
+
 export interface AgentContextFile {
   path: string;
   content: string;
@@ -35,6 +37,7 @@ export interface AgentContextFile {
   revision: string;
   size: number;
   truncated: boolean;
+  source?: AgentContextSource;
 }
 
 
