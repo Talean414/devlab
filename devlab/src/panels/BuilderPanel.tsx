@@ -383,7 +383,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                     Spec-first review pack
                   </h3>
                   <p className="mt-1 max-w-2xl text-[12.5px] leading-relaxed text-violet-100/70">
-                    DevLab can derive a bounded <span className="font-mono text-violet-100">spec.md</span> from this approved plan, including scope, commands, reviewed files and a sequential task DAG. It stays in memory until copied or opened for reviewed Editor apply.
+                    DevLab can derive a bounded <span className="font-mono text-violet-100">spec.md</span> from this approved plan, including scope, commands, reviewed files, a sequential task DAG, acceptance criteria, risk notes and review gates. It stays in memory until copied or opened for reviewed Editor apply.
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -413,8 +413,8 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                   Written only after Editor apply
                 </div>
                 <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-violet-100/65">
-                  <span className="block text-violet-100">{Math.min(plan.commands.length, MAX_PLAN_COMMANDS)} command reference{Math.min(plan.commands.length, MAX_PLAN_COMMANDS) === 1 ? "" : "s"}</span>
-                  Display-only; no execution
+                  <span className="block text-violet-100">Acceptance/risk checklist</span>
+                  Metadata-only; no execution
                 </div>
               </div>
               {specNotice && <div className="mt-3 text-[12px] text-emerald-300">{specNotice}</div>}
@@ -526,11 +526,21 @@ interface SpecTaskNode {
   detail: string;
   dependsOn: string[];
   reviewedFileTargets: string[];
+  acceptance: string[];
+  reviewGate: string;
+}
+
+interface SpecChecklist {
+  acceptanceCriteria: string[];
+  dependencyAssumptions: string[];
+  riskNotes: string[];
+  reviewGates: string[];
 }
 
 function buildSpecMarkdown(plan: BuilderPlan, brief: string): string {
   const boundedPlan = boundPlanForSpec(plan);
   const taskDag = buildTaskDag(boundedPlan);
+  const checklist = buildSpecChecklist(boundedPlan);
   const lines = [
     "# Project specification",
     "",
@@ -576,12 +586,28 @@ function buildSpecMarkdown(plan: BuilderPlan, brief: string): string {
     "",
     ...boundedPlan.files.map((file) => `- \`${file.path}\` — ${file.description}`),
     "",
+    "## Acceptance criteria",
+    "",
+    ...checklist.acceptanceCriteria.map((item) => `- ${item}`),
+    "",
+    "## Dependency and assumption register",
+    "",
+    ...checklist.dependencyAssumptions.map((item) => `- ${item}`),
+    "",
+    "## Risk notes",
+    "",
+    ...checklist.riskNotes.map((item) => `- ${item}`),
+    "",
+    "## Review gates",
+    "",
+    ...checklist.reviewGates.map((item) => `- ${item}`),
+    "",
     "## Review and safety checklist",
     "",
-    "- Confirm the scope and out-of-scope boundaries before generating or applying files.",
+    "- Confirm the scope, acceptance criteria, risk notes and out-of-scope boundaries before generating or applying files.",
     "- Generate file drafts into memory, then inspect each draft in the Editor.",
     "- Recompare existing files before applying reviewed drafts.",
-    "- Run bounded verification profiles after applying reviewed changes.",
+    "- Run bounded verification profiles or explicit manual commands only after applying reviewed changes.",
     "- Keep secrets out of generated files and prompts.",
     "- Treat setup commands as manual terminal references unless a future bounded backend-owned profile exists.",
     "",
@@ -600,13 +626,65 @@ function buildSpecMarkdown(plan: BuilderPlan, brief: string): string {
 
 function buildTaskDag(plan: BuilderPlan): SpecTaskNode[] {
   const files = plan.files.slice(0, MAX_PLAN_FILES).map((file) => file.path);
-  return plan.steps.slice(0, MAX_PLAN_STEPS).map((step, index) => ({
-    id: `task-${String(index + 1).padStart(2, "0")}`,
-    title: step.title,
-    detail: step.detail,
-    dependsOn: index === 0 ? [] : [`task-${String(index).padStart(2, "0")}`],
-    reviewedFileTargets: filesForTask(files, index, plan.steps.length),
-  }));
+  return plan.steps.slice(0, MAX_PLAN_STEPS).map((step, index) => {
+    const reviewedFileTargets = filesForTask(files, index, plan.steps.length);
+    return {
+      id: `task-${String(index + 1).padStart(2, "0")}`,
+      title: step.title,
+      detail: step.detail,
+      dependsOn: index === 0 ? [] : [`task-${String(index).padStart(2, "0")}`],
+      reviewedFileTargets,
+      acceptance: acceptanceForTask(step, reviewedFileTargets),
+      reviewGate: index === plan.steps.length - 1
+        ? "Final reviewed drafts are inspected in the Editor and applied only by explicit user action."
+        : "Proceed after the previous reviewed draft target and assumptions are accepted.",
+    };
+  });
+}
+
+function buildSpecChecklist(plan: BuilderPlan): SpecChecklist {
+  const files = plan.files.slice(0, MAX_PLAN_FILES);
+  const commands = plan.commands.slice(0, MAX_PLAN_COMMANDS);
+  const acceptanceCriteria = [
+    `Project scope matches the approved summary: ${plan.summary}`,
+    ...plan.steps.slice(0, 6).map((step, index) => `Task ${index + 1} outcome is reviewable: ${step.title}.`),
+    ...files.slice(0, 6).map((file) => `Reviewed draft target is accounted for: ${file.path}.`),
+    "No generated file is persisted until the Editor reviewed-draft apply gate is used.",
+  ].map((item) => boundSpecText(item, 500));
+
+  const dependencyAssumptions = [
+    ...listOrFallback(plan.stack, "No stack choices were returned.").slice(0, 10).map((item) => `Stack assumption: ${item}.`),
+    ...commands.slice(0, 6).map((command) => `Manual setup reference only: ${command}`),
+    "Secrets, provider keys and environment-specific values must remain placeholders unless supplied by the user outside generated files.",
+    "Any package, toolchain or service dependency not already present requires explicit user review before installation.",
+  ].map((item) => boundSpecText(item, 500));
+
+  const riskNotes = [
+    files.length > 8 ? "Plan has many reviewed file targets; split implementation into smaller reviewed batches if diffs become hard to inspect." : "File target count is within the bounded Builder review pack.",
+    commands.length > 0 ? "Setup commands are references only and may have side effects if a user runs them manually outside DevLab." : "No setup commands were returned; confirm any missing install/run steps before implementation.",
+    "Model-generated paths and descriptions are planning metadata; inspect actual file contents before applying any draft.",
+    "Verification status is unknown until backend-owned profiles or explicit manual commands are run after reviewed apply.",
+  ].map((item) => boundSpecText(item, 500));
+
+  const reviewGates = [
+    "Gate 1 — Plan review: confirm scope, stack assumptions, file targets and out-of-scope items.",
+    "Gate 2 — Draft generation: generated files stay in memory and must use safe workspace-relative paths.",
+    "Gate 3 — Editor review: inspect each reviewed draft, recompare existing files and apply only approved changes.",
+    "Gate 4 — Verification: run bounded native profiles or explicit manual commands after apply; do not mark checks as passed before they run.",
+  ];
+
+  return { acceptanceCriteria, dependencyAssumptions, riskNotes, reviewGates };
+}
+
+function acceptanceForTask(step: BuilderPlan["steps"][number], fileTargets: string[]): string[] {
+  const targets = fileTargets.length > 0
+    ? `Reviewed file target${fileTargets.length === 1 ? "" : "s"}: ${fileTargets.join(", ")}.`
+    : "No reviewed file target is assigned to this task yet.";
+  return [
+    `Outcome is inspectable: ${step.title}.`,
+    targets,
+    "No command execution or workspace write is implied by completing this task node.",
+  ].map((item) => boundSpecText(item, 420));
 }
 
 function filesForTask(files: string[], index: number, stepCount: number): string[] {
