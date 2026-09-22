@@ -16,6 +16,10 @@ import {
   describeDraftPolicy, evaluateDraftPath, loadDraftPolicy, parsePatternList, saveDraftPolicy,
 } from "../lib/draftPolicy";
 import {
+  OLLAMA_DEFAULT_ENDPOINT, describeOllamaEndpoint, formatOllamaSize, listOllamaModels, ollamaAdapterAvailable,
+  type OllamaModelInfo,
+} from "../lib/ollama";
+import {
   AI_PROVIDER_PROFILES,
   AI_TASK_PROFILES,
   describeAiRoute,
@@ -52,6 +56,39 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
   const [policyDenyText, setPolicyDenyText] = useState(() => loadDraftPolicy().deny.join("\n"));
   const [policyProbePath, setPolicyProbePath] = useState("src/config/.env");
   const [policyNotice, setPolicyNotice] = useState("");
+  const [ollamaModels, setOllamaModels] = useState<OllamaModelInfo[]>([]);
+  const [ollamaBusy, setOllamaBusy] = useState(false);
+  const [ollamaNotice, setOllamaNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const ollamaEndpointCheck = describeOllamaEndpoint(s.customEndpoint);
+
+  async function detectOllamaModels() {
+    setOllamaNotice(null);
+    setOllamaModels([]);
+    if (!ollamaAdapterAvailable()) {
+      setOllamaNotice({ kind: "error", text: "The native Ollama adapter is only available inside the DevLab desktop app, not the web preview." });
+      return;
+    }
+    if (!ollamaEndpointCheck.ok) {
+      setOllamaNotice({ kind: "error", text: `Endpoint refused before any request: ${ollamaEndpointCheck.reason}` });
+      return;
+    }
+    setOllamaBusy(true);
+    try {
+      const result = await listOllamaModels(s.customEndpoint);
+      setOllamaModels(result.models);
+      setOllamaNotice({
+        kind: "ok",
+        text: result.models.length === 0
+          ? `Reached Ollama at ${result.endpoint} in ${result.elapsedMs} ms, but no models are installed. Pull one with \`ollama pull llama3.1\`.`
+          : `Found ${result.models.length}${result.truncated ? "+" : ""} installed model${result.models.length === 1 ? "" : "s"} at ${result.endpoint} in ${result.elapsedMs} ms.`,
+      });
+    } catch (error) {
+      const detail = typeof error === "object" && error && "message" in error ? String((error as { message: unknown }).message) : String(error);
+      setOllamaNotice({ kind: "error", text: detail });
+    } finally {
+      setOllamaBusy(false);
+    }
+  }
   const policyProbe = policyProbePath.trim() ? evaluateDraftPath(policyProbePath, draftPolicy) : null;
 
   function savePolicy() {
@@ -362,19 +399,61 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                   </label>
                 )}
                 {s.aiProvider === "ollama" && (
-                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                    <label className="block text-[12px] text-zinc-400">
-                      Ollama endpoint profile
-                      <input value={s.customEndpoint} onChange={(e) => update({ customEndpoint: e.target.value })}
-                        placeholder="http://localhost:11434"
-                        className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
-                    </label>
-                    <label className="block text-[12px] text-zinc-400">
-                      Local model id
-                      <input value={s.ollamaModel} onChange={(e) => update({ ollamaModel: e.target.value })}
-                        placeholder="llama3.1, qwen2.5-coder, deepseek-r1"
-                        className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
-                    </label>
+                  <div className="mt-3 space-y-2">
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <label className="block text-[12px] text-zinc-400">
+                        Ollama loopback endpoint
+                        <input value={s.customEndpoint} onChange={(e) => update({ customEndpoint: e.target.value })}
+                          placeholder={OLLAMA_DEFAULT_ENDPOINT}
+                          className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                        <span className={`mt-1 block text-[11px] ${ollamaEndpointCheck.ok ? "text-emerald-300/80" : "text-amber-300/90"}`}>
+                          {ollamaEndpointCheck.ok ? `Will call ${ollamaEndpointCheck.origin}` : ollamaEndpointCheck.reason} · empty means {OLLAMA_DEFAULT_ENDPOINT}
+                        </span>
+                      </label>
+                      <label className="block text-[12px] text-zinc-400">
+                        Local model id
+                        <input value={s.ollamaModel} onChange={(e) => update({ ollamaModel: e.target.value })}
+                          placeholder="llama3.1, qwen2.5-coder, deepseek-r1"
+                          list="devlab-ollama-models"
+                          className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                        <datalist id="devlab-ollama-models">
+                          {ollamaModels.map((m) => <option key={m.name} value={m.name} />)}
+                        </datalist>
+                      </label>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => { void detectOllamaModels(); }}
+                        disabled={ollamaBusy}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/20 disabled:opacity-40"
+                      >
+                        <RefreshCw className={`h-3.5 w-3.5 ${ollamaBusy ? "animate-spin" : ""}`} /> Detect installed models
+                      </button>
+                      <span className="text-[11px] text-zinc-500">Rust calls GET /api/tags on the loopback endpoint; the WebView never contacts localhost. Nothing is installed or pulled.</span>
+                    </div>
+                    {ollamaNotice && (
+                      <div className={`text-[11.5px] ${ollamaNotice.kind === "ok" ? "text-emerald-300" : "text-rose-300"}`}>{ollamaNotice.text}</div>
+                    )}
+                    {ollamaModels.length > 0 && (
+                      <ul className="grid gap-1 sm:grid-cols-2">
+                        {ollamaModels.map((m) => (
+                          <li key={m.name}>
+                            <button
+                              type="button"
+                              onClick={() => update({ ollamaModel: m.name })}
+                              className={`w-full rounded-lg border px-2.5 py-1.5 text-left text-[11.5px] ${s.ollamaModel === m.name ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-100" : "border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/5"}`}
+                            >
+                              <span className="font-mono font-semibold">{m.name}</span>
+                              <span className="ml-2 text-[10.5px] text-zinc-500">{[m.parameterSize, m.quantization, m.family, formatOllamaSize(m.sizeBytes)].filter(Boolean).join(" · ")}</span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <p className="text-[11px] text-zinc-500">
+                      Generation for chat, planning, coding, architecture, migration and repair runs on this machine through the native adapter with a 120 s non-streamed bound per reply. Vision stays on Gemini. There is no fallback from Ollama to Gemini.
+                    </p>
                   </div>
                 )}
                 {s.aiProvider === "custom" && (

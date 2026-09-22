@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { PanelHeader } from "./AgentPanel";
 import { CodeBlock } from "../components/CodeBlock";
-import { getApiKey, getCurrentAiRoute, streamChat } from "../lib/gemini";
+import { getCurrentAiRoute, hasGenerationAccess, streamChat } from "../lib/gemini";
 import type { OpenGeneratedDrafts, VFile } from "../types";
 import { Database, Wand2, Loader2, ArrowRight, FileDiff, ScrollText, Plug, ListChecks } from "lucide-react";
 
@@ -34,7 +34,7 @@ export function MigratePanel({ onOpenFiles }: { onOpenFiles: OpenGeneratedDrafts
     if (!text.trim() || busy) return;
     const route = getCurrentAiRoute("migration");
     if (route.status !== "active") { setError(route.reason); return; }
-    if (!getApiKey()) { setError("Add your Gemini key in Settings first."); return; }
+    if (!hasGenerationAccess("migration")) { setError("Add your Gemini key in Settings first, or select the native Ollama provider."); return; }
     setBusy(true); setError(""); setResult(null);
     try {
       let acc = "";

@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { PanelHeader } from "./AgentPanel";
-import { getApiKey, getCurrentAiRoute, streamChat, type GenTurn } from "../lib/gemini";
+import { getCurrentAiRoute, hasGenerationAccess, streamChat, type GenTurn } from "../lib/gemini";
 import type { OpenGeneratedDrafts, VFile } from "../types";
 import {
   Monitor, Server, Database, DatabaseZap, ListOrdered, HardDrive, ShieldCheck,
@@ -129,7 +129,7 @@ export function CanvasPanel({ onOpenFiles }: { onOpenFiles: OpenGeneratedDrafts 
   async function generate() {
     const route = getCurrentAiRoute("architecture");
     if (route.status !== "active") { setStatus(route.reason); return; }
-    if (!getApiKey()) { setStatus("Add your Gemini key in Settings first."); return; }
+    if (!hasGenerationAccess("architecture")) { setStatus("Add your Gemini key in Settings first, or select the native Ollama provider."); return; }
     if (!nodes.length) { setStatus("Add some nodes to the canvas first (or load the sample)."); return; }
     setBusy(true); setGenLog([]); setBuilt([]);
     const log = (s: string) => setGenLog((l) => [...l, s]);

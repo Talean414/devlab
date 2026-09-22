@@ -65,6 +65,8 @@
     "allow-database-postgres-disconnect",
     "allow-database-postgres-forget-password",
     "allow-http-request",
+    "allow-ollama-list-models",
+    "allow-ollama-chat",
     "allow-test-runner-snapshot",
     "allow-test-runner-run",
     "allow-toolchain-snapshot"

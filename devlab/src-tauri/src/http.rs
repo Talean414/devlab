@@ -28,44 +28,44 @@ impl<T: Read + Write> ReadWrite for T {}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HttpHeader {
-    name: String,
-    value: String,
+    pub(crate) name: String,
+    pub(crate) value: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HttpRequest {
-    method: String,
-    url: String,
+    pub(crate) method: String,
+    pub(crate) url: String,
     #[serde(default)]
-    headers: Vec<HttpHeader>,
+    pub(crate) headers: Vec<HttpHeader>,
     #[serde(default)]
-    body: String,
-    timeout_secs: Option<u64>,
+    pub(crate) body: String,
+    pub(crate) timeout_secs: Option<u64>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpResponse {
     url: String,
-    status: u16,
-    status_text: String,
+    pub(crate) status: u16,
+    pub(crate) status_text: String,
     headers: Vec<HttpHeader>,
-    body: String,
+    pub(crate) body: String,
     body_kind: &'static str,
-    body_truncated: bool,
+    pub(crate) body_truncated: bool,
     bytes_received: usize,
     request_body_bytes: usize,
     elapsed_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ParsedUrl {
-    scheme: String,
-    host: String,
-    host_header: String,
-    port: u16,
-    path: String,
+pub(crate) struct ParsedUrl {
+    pub(crate) scheme: String,
+    pub(crate) host: String,
+    pub(crate) host_header: String,
+    pub(crate) port: u16,
+    pub(crate) path: String,
 }
 
 #[derive(Clone, Debug)]
@@ -192,7 +192,7 @@ fn validate_timeout(value: Option<u64>) -> Result<Duration, CommandError> {
     Ok(Duration::from_secs(seconds))
 }
 
-fn parse_url(input: &str) -> Result<ParsedUrl, CommandError> {
+pub(crate) fn parse_url(input: &str) -> Result<ParsedUrl, CommandError> {
     let input = input.trim();
     if input.is_empty() {
         return Err(CommandError::new("http_url_required", "Enter an HTTP or HTTPS URL."));
@@ -773,10 +773,20 @@ fn http_io_error(action: &str, error: io::Error) -> CommandError {
     }
 }
 
-fn send_request(request: HttpRequest) -> Result<HttpResponse, CommandError> {
+pub(crate) fn send_request(request: HttpRequest) -> Result<HttpResponse, CommandError> {
+    let timeout = validate_timeout(request.timeout_secs)?;
+    send_request_with_timeout(request, timeout)
+}
+
+/// Same bounded client, but with a caller-supplied total timeout. Only trusted in-crate callers
+/// (the loopback Ollama adapter) use this; the public `http_request` command always goes through
+/// `validate_timeout`.
+pub(crate) fn send_request_with_timeout(
+    request: HttpRequest,
+    timeout: Duration,
+) -> Result<HttpResponse, CommandError> {
     let started = Instant::now();
     let method = validate_method(&request.method)?;
-    let timeout = validate_timeout(request.timeout_secs)?;
     let url = parse_url(&request.url)?;
     let headers = validate_headers(&request.headers)?;
     let body = request.body.into_bytes();
@@ -812,7 +822,7 @@ fn send_request(request: HttpRequest) -> Result<HttpResponse, CommandError> {
     })
 }
 
-async fn blocking<T, F>(work: F) -> Result<T, CommandError>
+pub(crate) async fn blocking<T, F>(work: F) -> Result<T, CommandError>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, CommandError> + Send + 'static,

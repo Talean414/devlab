@@ -1,7 +1,7 @@
 import { useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { PanelHeader } from "./AgentPanel";
 import { Markdown } from "../components/CodeBlock";
-import { getApiKey, getCurrentAiRoute, streamChat, type GenTurn } from "../lib/gemini";
+import { getCurrentAiRoute, hasGenerationAccess, streamChat, type GenTurn } from "../lib/gemini";
 import { loadSettings } from "../lib/settings";
 import { projectTemplates } from "../data/templates";
 import { testRunnerSnapshot, type TestRunnerSnapshot } from "../lib/testRunner";
@@ -169,7 +169,7 @@ export function BuilderPanel({
     if (!text.trim()) return;
     const route = getCurrentAiRoute("planning");
     if (route.status !== "active") { setError(route.reason); return; }
-    if (!getApiKey()) { onNeedKey(); return; }
+    if (!hasGenerationAccess("planning")) { onNeedKey(); return; }
     setBusy(true); setError(""); setRaw(""); setPlan(null); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setTaskHandoffNotice(""); setTaskStagingNotice(""); setTaskStagingLedger([]); setApplyOutcomes([]); setVerificationNotice(""); setActiveTaskId(null); setPhase("planning");
 
     const templateList = projectTemplates.map((t) => `${t.id} (${t.stack}, ${t.lang})`).join(", ");
@@ -226,7 +226,7 @@ Rules:
   async function generateFile(path: string, description: string, taskContext?: SpecTaskNode): Promise<boolean> {
     const route = getCurrentAiRoute("coding");
     if (route.status !== "active") { setError(route.reason); return false; }
-    if (!getApiKey()) { onNeedKey(); return false; }
+    if (!hasGenerationAccess("coding")) { onNeedKey(); return false; }
     setGenerating(path);
     const taskGuidance = taskContext
       ? `Current reviewed task: ${taskContext.id} — ${taskContext.title}\nTask detail: ${taskContext.detail}\nTask acceptance notes: ${taskContext.acceptance.join("; ")}\nTask review gate: ${taskContext.reviewGate}\n`

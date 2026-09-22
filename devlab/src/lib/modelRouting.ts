@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import { loadSettings, type AiProviderId, type DevLabSettings } from "./settings";
 
 export type AiTaskKind =
@@ -11,12 +12,15 @@ export type AiTaskKind =
 
 export type AiRouteClass = "general" | "reasoning" | "implementation" | "diagnostic" | "vision";
 export type AiRouteStatus = "active" | "unavailable";
+// Whether the native runtime is hosting the renderer. Providers whose transport is Rust-owned
+// (Ollama) are active only when this is true; the plain Vite preview never calls them.
+const NATIVE_RUNTIME = typeof window !== "undefined" && isTauri();
 
 export interface AiProviderProfile {
   id: AiProviderId;
   name: string;
   shortName: string;
-  statusLabel: "Available" | "Future native adapter" | "Future local adapter";
+  statusLabel: "Available" | "Available in native DevLab" | "Future native adapter" | "Future local adapter";
   availableNow: boolean;
   credentialStorage: string;
   transport: string;
@@ -126,13 +130,13 @@ export const AI_PROVIDER_PROFILES: AiProviderProfile[] = [
     id: "ollama",
     name: "Ollama (local)",
     shortName: "Ollama",
-    statusLabel: "Future local adapter",
-    availableNow: false,
-    credentialStorage: "No cloud key; planned local endpoint profile only",
-    transport: "Planned bounded localhost/native adapter with model health checks",
+    statusLabel: "Available in native DevLab",
+    availableNow: NATIVE_RUNTIME,
+    credentialStorage: "No credential; loopback endpoint and model id are non-secret settings",
+    transport: "Rust-owned loopback-only HTTP adapter (fixed /api/tags and /api/chat paths, bounded prompt and reply, 120 s generation timeout)",
     defaultModel: "llama3.1",
     modelExamples: ["llama3.1", "qwen2.5-coder", "deepseek-r1"],
-    note: "Roadmap local-model provider. DevLab does not call localhost from browser-facing code or assume a model is installed yet.",
+    note: "Phase 9A native local adapter. Only http://localhost or 127.0.0.1/::1 endpoints are accepted, the WebView never calls localhost itself, and generation is non-streamed. Unavailable in the plain web preview.",
   },
   {
     id: "openai",
@@ -194,6 +198,9 @@ export function resolveAiRoute(
   const modelLabel = model || provider.defaultModel || "not configured";
 
   if (!provider.availableNow) {
+    const reason = provider.id === "ollama"
+      ? `Ollama routing is configured for ${task.label.toLowerCase()}, but the native loopback adapter is only available inside the DevLab desktop app, not the web preview. No request was sent.`
+      : `${provider.name} routing is configured for ${task.label.toLowerCase()}, but this provider is a future phase. DevLab has not enabled its native credential store and bounded transport yet, so no request was sent. Switch Settings → Providers back to Gemini for current AI generation.`;
     return {
       task: task.id,
       taskLabel: task.label,
@@ -206,7 +213,7 @@ export function resolveAiRoute(
       availableNow: false,
       credentialStorage: provider.credentialStorage,
       transport: provider.transport,
-      reason: `${provider.name} routing is configured for ${task.label.toLowerCase()}, but this provider is a future phase. DevLab has not enabled its native credential store and bounded transport yet, so no request was sent. Switch Settings → Providers back to Gemini for current AI generation.`,
+      reason,
     };
   }
 
@@ -222,9 +229,11 @@ export function resolveAiRoute(
     availableNow: true,
     credentialStorage: provider.credentialStorage,
     transport: provider.transport,
-    reason: settings.modelRouting === "fixed"
-      ? `Using the selected ${provider.shortName} model for ${task.label.toLowerCase()}.`
-      : `Routing ${task.label.toLowerCase()} through ${provider.shortName}; Gemini fallback candidates are ordered for this task class when live model metadata is available.`,
+    reason: provider.id === "ollama"
+      ? `Routing ${task.label.toLowerCase()} to the local Ollama model "${modelLabel}" through the native loopback adapter; no cloud request is made and there is no fallback to Gemini.`
+      : settings.modelRouting === "fixed"
+        ? `Using the selected ${provider.shortName} model for ${task.label.toLowerCase()}.`
+        : `Routing ${task.label.toLowerCase()} through ${provider.shortName}; Gemini fallback candidates are ordered for this task class when live model metadata is available.`,
   };
 }
 

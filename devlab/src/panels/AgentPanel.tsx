@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 
 import type { AgentContextFile, ChatMessage, OpenGeneratedDrafts, VFile } from "../types";
 import { AgentAuditCard } from "../components/AgentAuditCard";
 import { Markdown } from "../components/CodeBlock";
-import { getApiKey, streamChat, getModel, getPicked, type GenTurn } from "../lib/gemini";
+import { getApiKey, hasGenerationAccess, streamChat, getModel, getPicked, type GenTurn } from "../lib/gemini";
 import { describeAiRoute, resolveAiRoute } from "../lib/modelRouting";
 import {
   AGENT_AUDIT_KIND_FILTERS,
@@ -107,7 +107,7 @@ export function AgentPanel({
     selectedModel: getModel(),
     pickedModel: getPicked(),
   });
-  const hasKey = chatRoute.status === "active" && !!getApiKey();
+  const hasKey = chatRoute.status === "active" && (chatRoute.provider === "ollama" || !!getApiKey());
   const SpeechAPI = getSpeechRecognition();
   const attachedRepoMap = contextFiles.find(isRepoMapContext) ?? null;
   const repoMapPreview = attachedRepoMap ? buildRepoMapContextPreview(attachedRepoMap, repoMapQuery) : null;
@@ -177,7 +177,7 @@ export function AgentPanel({
       setInput("");
       return;
     }
-    if (!getApiKey()) { onNeedKey(); return; }
+    if (!hasGenerationAccess("chat")) { onNeedKey(); return; }
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",

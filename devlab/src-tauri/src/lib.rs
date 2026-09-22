@@ -5,6 +5,7 @@ mod database;
 mod docker;
 mod git;
 mod http;
+mod ollama;
 mod postgres;
 mod terminal;
 mod test_runner;
@@ -27,6 +28,7 @@ use git::{
     git_stage_all, git_stage_paths, git_unstage_all, git_unstage_paths,
 };
 use http::http_request;
+use ollama::{ollama_chat, ollama_list_models};
 use postgres::{
     database_postgres_connect, database_postgres_connections, database_postgres_disconnect,
     database_postgres_execute, database_postgres_forget_password, database_postgres_query,
@@ -78,6 +80,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
             "agent-audit",
             "agent-tools",
             "toolchain",
+            "local-ai",
         ],
     }
 }
@@ -161,6 +164,8 @@ pub fn run() {
             database_postgres_disconnect,
             database_postgres_forget_password,
             http_request,
+            ollama_list_models,
+            ollama_chat,
             test_runner_snapshot,
             test_runner_run,
             toolchain_snapshot,

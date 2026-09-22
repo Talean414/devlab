@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AgentAuditCard } from "../components/AgentAuditCard";
 import { PanelHeader } from "./AgentPanel";
-import { getApiKey, getCurrentAiRoute, streamChat } from "../lib/gemini";
+import { getCurrentAiRoute, hasGenerationAccess, streamChat } from "../lib/gemini";
 import {
   AGENT_AUDIT_METADATA_NOTE,
   formatAgentAuditShortTime,
@@ -414,7 +414,7 @@ export function HealerPanel({
       setError(route.reason);
       return;
     }
-    if (!getApiKey()) {
+    if (!hasGenerationAccess("repair")) {
       onNeedKey();
       return;
     }

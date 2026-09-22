@@ -4,6 +4,7 @@
 import { starterBlueprintInstruction } from "./generationBlueprints";
 import { componentScaffoldInstruction, designSystemInstruction, qualityChecklistInstruction } from "./generationGuidance";
 import { loadSettings } from "./settings";
+import { ollamaChat } from "./ollama";
 import {
   generationGuardrailInstruction,
   resolveAiRoute,
@@ -148,6 +149,18 @@ export function getCurrentAiRoute(task: AiTaskKind = "chat"): AiRoute {
   });
 }
 
+/**
+ * True when text generation can be attempted for this task: the route is active and either the
+ * provider needs no renderer credential (native Ollama adapter) or a Gemini key is present.
+ * Vision keeps requiring Gemini and should keep checking getApiKey() directly.
+ */
+export function hasGenerationAccess(task: AiTaskKind = "chat"): boolean {
+  const route = getCurrentAiRoute(task);
+  if (route.status !== "active") return false;
+  if (route.provider === "ollama") return true;
+  return !!getApiKey();
+}
+
 function readCooldowns(): Record<string, Cooldown> {
   try {
     const parsed = JSON.parse(localStorage.getItem(COOLDOWN_STORAGE) || "{}") as Record<string, Cooldown>;
@@ -260,6 +273,25 @@ export async function* streamChat(
     qualityChecklistInstruction(route.task),
     customPrompt ? `Developer preferences:\n${customPrompt}` : "",
   ].filter(Boolean).join("\n\n");
+  const temperature = clamp(options.temperature ?? settings.temperature, 0, 2);
+  const maxOutputTokens = Math.round(clamp(options.maxOutputTokens ?? settings.maxTokens, 256, 16_384));
+
+  if (route.provider === "ollama") {
+    // Native loopback adapter: one bounded, non-streamed completion from Rust. No Gemini key,
+    // cooldown or fallback logic applies; a failure is reported as-is rather than retried elsewhere.
+    const reply = await ollamaChat({
+      endpoint: settings.customEndpoint,
+      model: route.model,
+      system: systemText,
+      messages: limitHistory(history),
+      temperature,
+      maxOutputTokens,
+    });
+    yield reply.text;
+    if (reply.textTruncated) yield "\n\n… local model reply truncated at DevLab's response bound.";
+    return;
+  }
+
   const body = {
     systemInstruction: {
       parts: [{ text: systemText }],
@@ -268,10 +300,7 @@ export async function* streamChat(
       role: turn.role,
       parts: [{ text: turn.text }],
     })),
-    generationConfig: {
-      temperature: clamp(options.temperature ?? settings.temperature, 0, 2),
-      maxOutputTokens: Math.round(clamp(options.maxOutputTokens ?? settings.maxTokens, 256, 16_384)),
-    },
+    generationConfig: { temperature, maxOutputTokens },
   };
 
   yield* streamAcrossModels(body, route);
@@ -287,6 +316,9 @@ export async function* streamVision(
     pickedModel: getPicked(),
   }, settings);
   if (route.status !== "active") throw new Error(route.reason);
+  if (route.provider === "ollama") {
+    throw new Error("Vision generation is not routed through the local Ollama adapter in this phase. Switch Settings → Providers to Gemini for image input.");
+  }
 
   const parts: Record<string, unknown>[] = images.map((image) => ({
     inline_data: { mime_type: image.mime, data: image.data },
