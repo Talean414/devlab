@@ -158,6 +158,13 @@ export interface VerificationRunOutcome {
   ranAtMs: number;
 }
 
+// Session-only, path-only summary of the last draft policy evaluation at the shared staging gate.
+export interface DraftPolicyGateSummary {
+  summary: string;
+  refused: { path: string; kind: string }[];
+  evaluatedAtMs: number;
+}
+
 export interface ReviewedDraftApplyOutcome {
   path: string;
   action: "Created" | "Updated";

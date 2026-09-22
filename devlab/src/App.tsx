@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import type { AgentContextFile, BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, ChatMessage, OpenGeneratedDrafts, ReviewedDraftApplyOutcome, VerificationHandoffRequest, VerificationRunOutcome, VFile, ViewId } from "./types";
+import { evaluateDrafts, loadDraftPolicy } from "./lib/draftPolicy";
+import type { AgentContextFile, BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, ChatMessage, DraftPolicyGateSummary, OpenGeneratedDrafts, ReviewedDraftApplyOutcome, VerificationHandoffRequest, VerificationRunOutcome, VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import { loadDeploy, loadGit, loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
 import { resolveAiRoute } from "./lib/modelRouting";
@@ -129,6 +130,8 @@ export default function App() {
   // (Self-Healing Tests -> Builder). Neither is persisted; outcomes never contain captured output.
   const [verificationHandoffRequest, setVerificationHandoffRequest] = useState<VerificationHandoffRequest | null>(null);
   const [verificationRunOutcomes, setVerificationRunOutcomes] = useState<VerificationRunOutcome[]>([]);
+  // Session-only, path-only record of the most recent draft policy evaluation at the staging gate.
+  const [lastDraftPolicyEvaluation, setLastDraftPolicyEvaluation] = useState<DraftPolicyGateSummary | null>(null);
   const [pendingRecovery, setPendingRecovery] = useState<SessionRecoverySnapshot | null>(() => loadSessionRecovery());
   const [recoveryReady, setRecoveryReady] = useState(() => !loadSessionRecovery());
 
@@ -243,6 +246,7 @@ export default function App() {
     setReviewedDraftApplyOutcomes([]);
     setVerificationHandoffRequest(null);
     setVerificationRunOutcomes([]);
+    setLastDraftPolicyEvaluation(null);
     setGeneratedDrafts([]);
   }
 
@@ -299,6 +303,19 @@ export default function App() {
 
   const openGeneratedSource: OpenGeneratedDrafts = async (files, summary = "Generated reviewed drafts") => {
     if (files.length === 0) return false;
+    // Renderer-side path policy runs first for every generator. It only inspects paths; Rust validation still follows.
+    const policyResult = evaluateDrafts(files, loadDraftPolicy());
+    if (policyResult.refused.length > 0) {
+      const refusedLines = policyResult.refused.slice(0, 12).map((verdict) => `• ${verdict.path} — ${verdict.reason}`).join("\n");
+      if (policyResult.allowed.length === 0) {
+        alert(`No generated draft can be staged: every path was refused by the reviewed-draft path policy.\n\n${refusedLines}\n\nNothing was staged or written. Adjust the policy in Settings → Agent if this is unexpected.`);
+        return false;
+      }
+      const proceed = confirm(`${policyResult.refused.length} of ${files.length} generated draft path(s) were refused by the reviewed-draft path policy and will be dropped:\n\n${refusedLines}\n\nStage the remaining ${policyResult.allowed.length} allowed draft(s) for Editor review? Nothing is written until you apply each one.`);
+      if (!proceed) return false;
+    }
+    const stagedFiles = policyResult.allowed;
+    setLastDraftPolicyEvaluation({ summary: policyResult.summary, refused: policyResult.refused.map((verdict) => ({ path: verdict.path, kind: verdict.kind })), evaluatedAtMs: Date.now() });
     if (runtime.runtime === "tauri") {
       if (!hasNativeCapability(runtime, "agent-tools")) {
         alert("DevLab cannot stage generated drafts because the native agent-tools capability is unavailable in this build.");
@@ -306,15 +323,15 @@ export default function App() {
       }
       try {
         await recordAgentDraft(
-          summary,
-          files.map((file) => ({ path: file.path, bytes: textBytes(file.content) })),
+          policyResult.refused.length > 0 ? `${summary} (${policyResult.refused.length} path(s) refused by draft policy)` : summary,
+          stagedFiles.map((file) => ({ path: file.path, bytes: textBytes(file.content) })),
         );
       } catch (error) {
         alert(`Could not stage generated drafts for reviewed editor apply. Nothing was opened.\n\n${formatDraftStageError(error)}`);
         return false;
       }
     }
-    setGeneratedDrafts(files);
+    setGeneratedDrafts(stagedFiles);
     navigate("editor");
     return true;
   };
@@ -396,6 +413,7 @@ export default function App() {
         if (hasNativeCapability(runtime, "filesystem")) {
           return <EditorPanel
             incomingDrafts={generatedDrafts}
+            draftPolicyGate={lastDraftPolicyEvaluation}
             onDismissDrafts={() => setGeneratedDrafts([])}
             onDirtyChange={setEditorDirty}
             onDraftApplied={recordReviewedDraftApplyOutcome}
@@ -578,7 +596,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 8P reviewed repair handoff</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 8R draft path policy</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}

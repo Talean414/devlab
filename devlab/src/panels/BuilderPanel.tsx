@@ -557,7 +557,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Agentic Project Builder"
-        subtitle="Phase 8P · reviewed repair handoff"
+        subtitle="Phase 8R · draft path policy"
         badge={settings.autonomy === "auto" ? "Autonomous" : settings.autonomy === "suggest" ? "Suggest mode" : "Ask first"}
         badgeOk={settings.autonomy !== "ask"}
       />

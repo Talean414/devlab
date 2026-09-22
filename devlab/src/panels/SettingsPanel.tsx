@@ -12,6 +12,10 @@ import {
 import { starterBlueprintInstruction } from "../lib/generationBlueprints";
 import { componentScaffoldInstruction, designSystemInstruction, qualityChecklistInstruction, summarizeGenerationGuidance } from "../lib/generationGuidance";
 import {
+  BUILTIN_SECRET_ALLOW_EXCEPTIONS, BUILTIN_SECRET_DENY_PATTERNS, MAX_POLICY_PATTERNS,
+  describeDraftPolicy, evaluateDraftPath, loadDraftPolicy, parsePatternList, saveDraftPolicy,
+} from "../lib/draftPolicy";
+import {
   AI_PROVIDER_PROFILES,
   AI_TASK_PROFILES,
   describeAiRoute,
@@ -43,6 +47,28 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
   const [status, setStatus] = useState<"idle" | "checking" | "ok" | "bad">("idle");
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [autoPicked, setAutoPicked] = useState<string | null>(getPicked());
+  const [draftPolicy, setDraftPolicy] = useState(loadDraftPolicy);
+  const [policyAllowText, setPolicyAllowText] = useState(() => loadDraftPolicy().allow.join("\n"));
+  const [policyDenyText, setPolicyDenyText] = useState(() => loadDraftPolicy().deny.join("\n"));
+  const [policyProbePath, setPolicyProbePath] = useState("src/config/.env");
+  const [policyNotice, setPolicyNotice] = useState("");
+  const policyProbe = policyProbePath.trim() ? evaluateDraftPath(policyProbePath, draftPolicy) : null;
+
+  function savePolicy() {
+    const next = saveDraftPolicy({ allow: parsePatternList(policyAllowText), deny: parsePatternList(policyDenyText) });
+    setDraftPolicy(next);
+    setPolicyAllowText(next.allow.join("\n"));
+    setPolicyDenyText(next.deny.join("\n"));
+    setPolicyNotice(`Saved draft path policy: ${describeDraftPolicy(next)}. Applies at the next reviewed-draft staging; nothing was re-evaluated or written.`);
+  }
+
+  function resetPolicy() {
+    const next = saveDraftPolicy({ allow: [], deny: [] });
+    setDraftPolicy(next);
+    setPolicyAllowText("");
+    setPolicyDenyText("");
+    setPolicyNotice("Cleared user allow/deny patterns. The built-in secret-safe deny list remains enforced.");
+  }
   const providerProfile = AI_PROVIDER_PROFILES.find((profile) => profile.id === s.aiProvider) ?? AI_PROVIDER_PROFILES[0];
   const routePreview = AI_TASK_PROFILES.map((task) => resolveAiRoute(task.id, {
     selectedModel: model,
@@ -225,6 +251,48 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                   on={s.allowGitPush} onChange={(v) => update({ allowGitPush: v })} />
                 <Row label="Trigger deployments" desc="Run deploy commands for Vercel, Render, Railway etc."
                   on={s.allowDeploy} onChange={(v) => update({ allowDeploy: v })} />
+              </Card>
+
+              <Card title="Reviewed-draft path policy" desc="Path-only allow/deny patterns enforced at the shared reviewed-draft staging gate for every generator, before Rust validation and before Editor review. Patterns never read file contents, never write, and cannot relax native path checks.">
+                <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/[0.05] px-3 py-2 text-[11.5px] leading-relaxed text-emerald-100/75">
+                  <div className="flex items-center gap-2 font-semibold text-emerald-100"><Shield className="h-3.5 w-3.5 text-emerald-300" /> Built-in secret-safe deny list (always on)</div>
+                  <div className="mt-1 font-mono text-[10.5px] text-emerald-100/60">{BUILTIN_SECRET_DENY_PATTERNS.filter((pattern) => !pattern.startsWith("**/")).join("  ")}</div>
+                  <div className="mt-1 text-[10.5px] text-emerald-100/55">Exceptions kept allowed: {BUILTIN_SECRET_ALLOW_EXCEPTIONS.filter((pattern) => !pattern.startsWith("**/")).join(", ")}. Generated drafts matching the deny list are refused at staging with a visible reason.</div>
+                </div>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <div className="text-[12px] font-medium text-zinc-100">Deny patterns</div>
+                    <div className="text-[11px] text-zinc-500">One glob per line. Matching draft paths are refused.</div>
+                    <textarea value={policyDenyText} onChange={(e) => setPolicyDenyText(e.target.value)} rows={5} placeholder={"infra/**\n*.lock\ndocs/generated/**"}
+                      className="mt-1.5 w-full resize-none rounded-lg border border-white/10 bg-[#0d1017] p-3 font-mono text-[12px] text-zinc-100 outline-none focus:border-cyan-500/50" />
+                  </div>
+                  <div>
+                    <div className="text-[12px] font-medium text-zinc-100">Allow patterns (optional allow-list mode)</div>
+                    <div className="text-[11px] text-zinc-500">When non-empty, a draft path must match at least one pattern.</div>
+                    <textarea value={policyAllowText} onChange={(e) => setPolicyAllowText(e.target.value)} rows={5} placeholder={"src/**\ntests/**\npackage.json"}
+                      className="mt-1.5 w-full resize-none rounded-lg border border-white/10 bg-[#0d1017] p-3 font-mono text-[12px] text-zinc-100 outline-none focus:border-cyan-500/50" />
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button onClick={savePolicy} className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-cyan-400">
+                    <Save className="h-3.5 w-3.5" /> Save policy
+                  </button>
+                  <button onClick={resetPolicy} className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-white/5">
+                    <RotateCcw className="h-3.5 w-3.5" /> Clear user patterns
+                  </button>
+                  <span className="text-[10.5px] text-zinc-500">Up to {MAX_POLICY_PATTERNS} patterns per list · {describeDraftPolicy(draftPolicy)}</span>
+                </div>
+                <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.02] p-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Test a path against the saved policy</div>
+                  <input value={policyProbePath} onChange={(e) => setPolicyProbePath(e.target.value)} placeholder="src/lib/example.ts"
+                    className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2 font-mono text-[12px] text-zinc-100 outline-none focus:border-cyan-500/50" />
+                  {policyProbe && (
+                    <div className={`mt-2 text-[11.5px] ${policyProbe.kind === "allowed" ? "text-emerald-300" : "text-amber-300"}`}>
+                      {policyProbe.kind === "allowed" ? "Allowed" : "Refused"} · {policyProbe.reason}
+                    </div>
+                  )}
+                </div>
+                {policyNotice && <div className="mt-2 text-[12px] text-emerald-300">{policyNotice}</div>}
               </Card>
 
               <Card title="Custom system prompt" desc="Prepended to every agent conversation. Leave blank for the default.">

@@ -4,7 +4,7 @@ import { PanelHeader } from "./AgentPanel";
 import { loadSettings, getTheme } from "../lib/settings";
 import { testRunnerSnapshot, type TestProfile, type TestRunnerSnapshot } from "../lib/testRunner";
 import { recommendVerificationProfiles, type VerificationProfileRecommendation } from "../lib/verificationGuidance";
-import type { ReviewedDraftApplyOutcome, VFile } from "../types";
+import type { DraftPolicyGateSummary, ReviewedDraftApplyOutcome, VFile } from "../types";
 import {
   applyReviewedDraftToWorkspace,
   closeWorkspace,
@@ -114,11 +114,13 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
 
 export function EditorPanel({
   incomingDrafts = [],
+  draftPolicyGate = null,
   onDismissDrafts,
   onDirtyChange,
   onDraftApplied,
 }: {
   incomingDrafts?: VFile[];
+  draftPolicyGate?: DraftPolicyGateSummary | null;
   onDismissDrafts?: () => void;
   onDirtyChange?: (dirty: boolean) => void;
   onDraftApplied?: (outcome: ReviewedDraftApplyOutcome) => void;
@@ -1310,6 +1312,17 @@ export function EditorPanel({
                     </div>
                   )}
                 </div>
+                {draftPolicyGate && (
+                  <div className={`mt-3 rounded-xl border p-3 text-[11px] ${draftPolicyGate.refused.length > 0 ? "border-amber-500/25 bg-amber-500/[0.05] text-amber-100/80" : "border-white/10 bg-white/[0.02] text-zinc-400"}`}>
+                    <div className="font-semibold">Draft path policy · {draftPolicyGate.summary}</div>
+                    {draftPolicyGate.refused.length > 0 && (
+                      <ul className="mt-1 space-y-0.5 font-mono text-[10.5px]">
+                        {draftPolicyGate.refused.slice(0, 8).map((item) => <li key={`${item.path}-${item.kind}`}>refused · {item.kind} · {item.path}</li>)}
+                      </ul>
+                    )}
+                    <div className="mt-1 text-[10px] opacity-70">Refused paths were dropped before staging and are not in this queue. Policy is path-only and editable in Settings → Agent.</div>
+                  </div>
+                )}
                 <div className="mt-3 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.05] p-3 text-[11px] text-emerald-100/75">
                   <div className="flex items-center gap-2 font-semibold text-emerald-100">
                     <ClipboardList className="h-3.5 w-3.5 text-emerald-300" /> Verification guidance
