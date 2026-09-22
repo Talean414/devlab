@@ -3,8 +3,8 @@ import type { AgentContextFile, ChatMessage, OpenGeneratedDrafts, VFile } from "
 import { Markdown } from "../components/CodeBlock";
 import { getApiKey, streamChat, getModel, type GenTurn } from "../lib/gemini";
 import { recordAgentContext } from "../lib/agentTools";
-import { readWorkspaceFile, type WorkspaceDocument } from "../lib/workspace";
-import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight, Paperclip, RefreshCw, X } from "lucide-react";
+import { listDirectory, readWorkspaceFile, type WorkspaceDocument, type WorkspaceEntry } from "../lib/workspace";
+import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight, ArrowUp, Folder, Paperclip, RefreshCw, X } from "lucide-react";
 
 interface SpeechRecognitionLike {
   continuous: boolean;
@@ -70,6 +70,10 @@ export function AgentPanel({
   const [contextBusy, setContextBusy] = useState(false);
   const [contextError, setContextError] = useState("");
   const [contextNotice, setContextNotice] = useState("");
+  const [contextPickerOpen, setContextPickerOpen] = useState(false);
+  const [pickerDirectory, setPickerDirectory] = useState("");
+  const [pickerEntries, setPickerEntries] = useState<WorkspaceEntry[]>([]);
+  const [pickerLoading, setPickerLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const recRef = useRef<SpeechRecognitionLike | null>(null);
   const hasKey = !!getApiKey();
@@ -175,7 +179,7 @@ export function AgentPanel({
     }
   }
 
-  async function attachWorkspaceFile() {
+  async function openContextPicker() {
     if (!canAttachWorkspace) {
       setContextError("Open DevLab in desktop mode and select a workspace before attaching file context.");
       return;
@@ -184,9 +188,26 @@ export function AgentPanel({
       setContextError(`Attach at most ${MAX_AGENT_CONTEXT_FILES} workspace files at once.`);
       return;
     }
-    const path = prompt("Workspace file path to attach as read-only AI Agent context:");
-    const cleanPath = path?.trim();
-    if (!cleanPath) return;
+    setContextPickerOpen(true);
+    await loadContextDirectory(pickerDirectory);
+  }
+
+  async function loadContextDirectory(directory: string) {
+    setPickerLoading(true);
+    setContextError("");
+    try {
+      const entries = await listDirectory(directory);
+      setPickerDirectory(directory);
+      setPickerEntries(entries.filter((entry) => entry.kind === "directory" || entry.kind === "file"));
+    } catch (error) {
+      setContextError(formatContextError(error));
+    } finally {
+      setPickerLoading(false);
+    }
+  }
+
+  async function attachWorkspacePath(path: string) {
+    const cleanPath = path.trim();
     if (!validDraftPath(cleanPath)) {
       setContextError("Attach a safe workspace-relative file path. Absolute paths, traversal and backslashes are not allowed.");
       return;
@@ -210,6 +231,7 @@ export function AgentPanel({
         ...current.filter((file) => file.path !== contextFile.path),
         contextFile,
       ].slice(-MAX_AGENT_CONTEXT_FILES));
+      setContextPickerOpen(false);
       setContextNotice(`Attached ${contextFile.path} as read-only context. Metadata was recorded in the audit log.`);
     } catch (error) {
       setContextError(formatContextError(error));
@@ -419,7 +441,7 @@ export function AgentPanel({
         )}
         <div className="flex items-end gap-2 rounded-2xl border border-white/10 bg-[#0d1017] p-2 transition focus-within:border-cyan-500/50 focus-within:bg-[#0f131c]">
           <button
-            onClick={() => void attachWorkspaceFile()}
+            onClick={() => { void openContextPicker(); }}
             disabled={!canAttachWorkspace || contextBusy || contextFiles.length >= MAX_AGENT_CONTEXT_FILES}
             title={canAttachWorkspace ? "Attach an existing workspace file as read-only context" : "Native workspace file context is available in desktop mode after selecting a workspace"}
             className="relative flex items-center justify-center rounded-xl px-3 py-2 text-zinc-500 transition hover:bg-white/5 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-35"
@@ -470,6 +492,70 @@ export function AgentPanel({
           · attached files are read-only context and are not written by chat
         </p>
       </div>
+
+      {contextPickerOpen && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+          <div className="flex h-[70vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#0b0e14] shadow-2xl shadow-black/60">
+            <div className="flex items-center gap-3 border-b border-white/10 px-4 py-3">
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-semibold text-white">Attach workspace context</div>
+                <div className="mt-0.5 truncate font-mono text-[11px] text-zinc-500">
+                  {pickerDirectory || "workspace root"}
+                </div>
+              </div>
+              <button
+                onClick={() => setContextPickerOpen(false)}
+                className="rounded-lg p-2 text-zinc-500 hover:bg-white/5 hover:text-white"
+                aria-label="Close context browser"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2 border-b border-white/5 px-4 py-2 text-[11.5px] text-zinc-500">
+              <button
+                onClick={() => { void loadContextDirectory(parentPath(pickerDirectory)); }}
+                disabled={!pickerDirectory || pickerLoading}
+                className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-35"
+              >
+                <ArrowUp className="h-3 w-3" /> Up
+              </button>
+              <span>Choose an existing UTF-8 text file. Contents stay read-only and bounded.</span>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto p-2">
+              {pickerLoading && (
+                <div className="flex items-center justify-center gap-2 py-10 text-[12px] text-zinc-500">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Reading workspace…
+                </div>
+              )}
+              {!pickerLoading && pickerEntries.length === 0 && (
+                <div className="py-10 text-center text-[12px] text-zinc-600">No attachable files in this folder.</div>
+              )}
+              {!pickerLoading && sortedWorkspaceEntries(pickerEntries).map((entry) => (
+                <button
+                  key={entry.path}
+                  onClick={() => {
+                    if (entry.kind === "directory") void loadContextDirectory(entry.path);
+                    else void attachWorkspacePath(entry.path);
+                  }}
+                  disabled={contextBusy}
+                  className="group mb-1 flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[12px] text-zinc-300 hover:bg-white/[0.05] disabled:opacity-40"
+                >
+                  {entry.kind === "directory" ? <Folder className="h-4 w-4 shrink-0 text-cyan-300" /> : <FileCode2 className="h-4 w-4 shrink-0 text-zinc-500 group-hover:text-violet-300" />}
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-mono">{entry.path || entry.name}</div>
+                    <div className="mt-0.5 text-[10.5px] text-zinc-600">
+                      {entry.kind === "directory" ? "folder" : `${entry.size ?? 0} bytes · read-only context`}
+                    </div>
+                  </div>
+                  {entry.kind === "file" && <span className="text-[10.5px] text-violet-300 opacity-0 group-hover:opacity-100">Attach</span>}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -508,6 +594,19 @@ export function PanelHeader({
   );
 }
 
+
+function parentPath(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  parts.pop();
+  return parts.join("/");
+}
+
+function sortedWorkspaceEntries(entries: WorkspaceEntry[]): WorkspaceEntry[] {
+  return [...entries].sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === "directory" ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+}
 
 function contextFileFromDocument(document: WorkspaceDocument, maxBytes: number): AgentContextFile {
   const content = boundTextByBytes(document.content, maxBytes);
