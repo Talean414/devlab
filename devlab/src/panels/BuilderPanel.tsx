@@ -4,10 +4,12 @@ import { Markdown } from "../components/CodeBlock";
 import { getApiKey, getCurrentAiRoute, streamChat, type GenTurn } from "../lib/gemini";
 import { loadSettings } from "../lib/settings";
 import { projectTemplates } from "../data/templates";
+import { testRunnerSnapshot, type TestRunnerSnapshot } from "../lib/testRunner";
+import { recommendVerificationProfiles, type VerificationProfileRecommendation } from "../lib/verificationGuidance";
 import type { BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, OpenGeneratedDrafts, ReviewedDraftApplyOutcome, VFile } from "../types";
 import {
   Wand2, Loader2, CheckCircle2, FileCode2, TerminalSquare,
-  Sparkles, RotateCcw, FolderPlus, ArrowRight, ClipboardList, Copy, ListChecks,
+  Sparkles, RotateCcw, FolderPlus, ArrowRight, ClipboardList, Copy, ListChecks, ShieldCheck, RefreshCw,
 } from "lucide-react";
 
 const MAX_PLAN_FILES = 12;
@@ -91,6 +93,8 @@ export function BuilderPanel({
   setTaskStagingLedger,
   applyOutcomes,
   setApplyOutcomes,
+  canDiscoverVerification,
+  onOpenVerification,
 }: {
   onNeedKey: () => void;
   onOpenFiles: OpenGeneratedDrafts;
@@ -118,6 +122,8 @@ export function BuilderPanel({
   setTaskStagingLedger: Dispatch<SetStateAction<BuilderTaskStagingRecord[]>>;
   applyOutcomes: ReviewedDraftApplyOutcome[];
   setApplyOutcomes: Dispatch<SetStateAction<ReviewedDraftApplyOutcome[]>>;
+  canDiscoverVerification: boolean;
+  onOpenVerification: () => void;
 }) {
   const outRef = useRef<HTMLDivElement>(null);
   const [specNotice, setSpecNotice] = useState("");
@@ -127,19 +133,26 @@ export function BuilderPanel({
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [stagingTaskId, setStagingTaskId] = useState<string | null>(null);
   const [taskStagingNotice, setTaskStagingNotice] = useState("");
+  const [verificationSnapshot, setVerificationSnapshot] = useState<TestRunnerSnapshot | null>(null);
+  const [verificationUnavailable, setVerificationUnavailable] = useState("");
+  const [verificationLoading, setVerificationLoading] = useState(false);
+  const [verificationNotice, setVerificationNotice] = useState("");
   const settings = loadSettings();
   const specPreview = plan ? buildSpecMetadataPreview(plan, brief) : null;
   const taskPlanPreview = plan ? buildTaskPlanPreview(plan, builtFiles) : null;
   const taskApplyProgress = taskPlanPreview ? buildTaskApplyProgress(taskPlanPreview, builtFiles, applyOutcomes) : null;
   const taskHandoffPreview = taskPlanPreview && plan ? buildTaskHandoffPreview(taskPlanPreview, builtFiles, plan.summary, taskStagingLedger, taskApplyProgress ?? undefined) : null;
   const taskStagingLedgerPreview = buildTaskStagingLedgerPreview(taskStagingLedger);
+  const verificationHandoff = taskPlanPreview && taskApplyProgress
+    ? buildTaskVerificationHandoff(taskPlanPreview, taskApplyProgress, applyOutcomes, verificationSnapshot, verificationUnavailable)
+    : null;
 
   async function generatePlan(text: string) {
     if (!text.trim()) return;
     const route = getCurrentAiRoute("planning");
     if (route.status !== "active") { setError(route.reason); return; }
     if (!getApiKey()) { onNeedKey(); return; }
-    setBusy(true); setError(""); setRaw(""); setPlan(null); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setTaskHandoffNotice(""); setTaskStagingNotice(""); setTaskStagingLedger([]); setApplyOutcomes([]); setActiveTaskId(null); setPhase("planning");
+    setBusy(true); setError(""); setRaw(""); setPlan(null); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setTaskHandoffNotice(""); setTaskStagingNotice(""); setTaskStagingLedger([]); setApplyOutcomes([]); setVerificationNotice(""); setActiveTaskId(null); setPhase("planning");
 
     const templateList = projectTemplates.map((t) => `${t.id} (${t.stack}, ${t.lang})`).join(", ");
     const prompt = `You are DevLab's project architect. The developer wants to build:
@@ -425,6 +438,45 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     }
   }
 
+  async function refreshVerificationHandoff() {
+    setError("");
+    setVerificationNotice("");
+    if (!canDiscoverVerification) {
+      setVerificationUnavailable("The native test-runner capability is unavailable in this build, so backend-owned profiles cannot be discovered.");
+      setVerificationNotice("Profile discovery is unavailable. A metadata-only verification handoff is still available.");
+      return;
+    }
+    setVerificationLoading(true);
+    try {
+      const snapshot = await testRunnerSnapshot();
+      setVerificationSnapshot(snapshot);
+      setVerificationUnavailable("");
+      setVerificationNotice(`Discovered ${snapshot.profiles.length} backend-owned verification profile${snapshot.profiles.length === 1 ? "" : "s"} (read-only). Nothing was executed.`);
+    } catch (err) {
+      setVerificationSnapshot(null);
+      setVerificationUnavailable(formatError(err));
+      setVerificationNotice("Could not discover native test profiles. A metadata-only verification handoff is still available.");
+    } finally {
+      setVerificationLoading(false);
+    }
+  }
+
+  async function copyVerificationHandoff() {
+    if (!verificationHandoff) return;
+    setError("");
+    setVerificationNotice("");
+    if (!navigator.clipboard?.writeText) {
+      setError("Clipboard access is unavailable in this environment. Nothing was copied.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(verificationHandoff.exportText);
+      setVerificationNotice(`Copied metadata-only verification handoff for ${verificationHandoff.appliedTaskCount} task batch${verificationHandoff.appliedTaskCount === 1 ? "" : "es"} with applied targets. Nothing was executed.`);
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
   async function copyTaskStagingLedger() {
     setError("");
     setTaskHandoffNotice("");
@@ -474,14 +526,14 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
 
   function reset() {
     setPhase("brief"); setBrief(""); setPlan(null); setRaw("");
-    setBuiltFiles([]); setError(""); setStageNotice(""); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setTaskHandoffNotice(""); setTaskStagingNotice(""); setTaskStagingLedger([]); setApplyOutcomes([]); setActiveTaskId(null);
+    setBuiltFiles([]); setError(""); setStageNotice(""); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setTaskHandoffNotice(""); setTaskStagingNotice(""); setTaskStagingLedger([]); setApplyOutcomes([]); setVerificationNotice(""); setActiveTaskId(null);
   }
 
   return (
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Agentic Project Builder"
-        subtitle="Phase 8M · task apply progress"
+        subtitle="Phase 8N · verification handoff"
         badge={settings.autonomy === "auto" ? "Autonomous" : settings.autonomy === "suggest" ? "Suggest mode" : "Ask first"}
         badgeOk={settings.autonomy !== "ask"}
       />
@@ -900,6 +952,82 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                     <span className="text-[10.5px] text-emerald-100/50">Staging is not apply; Editor reviewed-draft apply remains the only write path.</span>
                   </div>
                 </details>
+
+                {verificationHandoff && (
+                  <details className="mt-3 rounded-lg border border-violet-500/20 bg-violet-500/[0.04] p-3 text-[11.5px] text-violet-100/70" open={verificationHandoff.appliedTaskCount > 0}>
+                    <summary className="flex cursor-pointer select-none flex-wrap items-center justify-between gap-2 text-violet-100">
+                      <span className="inline-flex items-center gap-2 font-semibold">
+                        <ShieldCheck className="h-3.5 w-3.5 text-violet-300" />
+                        Verification handoff · {verificationHandoff.summary}
+                      </span>
+                      <span className="text-[10.5px] text-violet-100/50">Discovery only; nothing runs from Builder</span>
+                    </summary>
+                    <p className="mt-2 leading-relaxed text-violet-100/60">
+                      Matches backend-owned test profiles discovered by the native read-only snapshot to the reviewed file targets you have already applied in the Editor. Profiles run only when you start them explicitly in Self-Healing Tests. This handoff never claims a check has passed.
+                    </p>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={() => { void refreshVerificationHandoff(); }}
+                        disabled={verificationLoading}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-violet-400/30 bg-violet-400/10 px-3 py-1.5 text-xs font-semibold text-violet-100 hover:bg-violet-400/20 disabled:opacity-40"
+                      >
+                        {verificationLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                        {verificationSnapshot ? "Refresh profiles" : "Discover profiles"}
+                      </button>
+                      <button
+                        onClick={() => { void copyVerificationHandoff(); }}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-violet-400/30 bg-violet-400/10 px-3 py-1.5 text-xs font-semibold text-violet-100 hover:bg-violet-400/20"
+                      >
+                        <Copy className="h-3.5 w-3.5" /> Copy verification handoff
+                      </button>
+                      <button
+                        onClick={onOpenVerification}
+                        disabled={!canDiscoverVerification}
+                        title={canDiscoverVerification ? "Open Self-Healing Tests. Profiles run only when you click Run there." : "The native test-runner capability is unavailable in this build."}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-1.5 text-xs font-semibold text-violet-100 hover:bg-white/5 disabled:opacity-40"
+                      >
+                        <ArrowRight className="h-3.5 w-3.5" /> Open Self-Healing Tests
+                      </button>
+                    </div>
+                    {verificationHandoff.unavailableReason && (
+                      <p className="mt-2 text-[10.5px] text-amber-200/80">Profile discovery unavailable: {verificationHandoff.unavailableReason}</p>
+                    )}
+                    {verificationHandoff.warnings.length > 0 && (
+                      <ul className="mt-2 space-y-0.5 text-[10.5px] text-amber-200/70">
+                        {verificationHandoff.warnings.map((warning) => <li key={warning}>- {warning}</li>)}
+                      </ul>
+                    )}
+                    {verificationHandoff.appliedTaskCount === 0 ? (
+                      <p className="mt-2 text-violet-100/45">No reviewed file targets have been applied in the Editor yet, so there is nothing to verify. Apply drafts first; discovery can still be refreshed at any time.</p>
+                    ) : (
+                      <ul className="mt-2 space-y-1.5">
+                        {verificationHandoff.tasks.map((task) => (
+                          <li key={`${task.taskId}-verify`} className="rounded-md border border-white/10 bg-black/15 px-2.5 py-1.5">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="rounded-md bg-violet-400/10 px-2 py-0.5 font-mono text-[10.5px] font-semibold text-violet-200 ring-1 ring-violet-400/20">{task.taskId}</span>
+                              <span className="font-semibold text-violet-50">{task.title}</span>
+                              <span className="text-violet-100/50">{task.appliedPaths.length} applied target{task.appliedPaths.length === 1 ? "" : "s"}{task.stalePaths.length > 0 ? ` · ${task.stalePaths.length} changed since apply` : ""}</span>
+                            </div>
+                            <div className="mt-1 font-mono text-[10.5px] text-violet-100/55">{task.appliedPaths.join(", ")}</div>
+                            {task.recommendedProfiles.length > 0 ? (
+                              <ul className="mt-1 space-y-0.5">
+                                {task.recommendedProfiles.map((profile) => (
+                                  <li key={`${task.taskId}-${profile.id}`} className="flex flex-wrap items-center gap-2 text-[10.5px]">
+                                    <span className="rounded bg-black/25 px-1.5 py-0.5 font-mono text-violet-100/80" title={profile.reason}>{profile.command}</span>
+                                    <span className="text-violet-100/45">{profile.label} · matches {profile.matchedDraftPaths.length} target{profile.matchedDraftPaths.length === 1 ? "" : "s"} · not run</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <p className="mt-1 text-[10.5px] text-violet-100/45">{verificationSnapshot ? "No discovered profile matches these targets; verify manually after review." : "Discover profiles to see backend-owned matches for these targets."}</p>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {verificationNotice && <div className="mt-2 text-[12px] text-emerald-300">{verificationNotice}</div>}
+                  </details>
+                )}
               </div>
             )}
 
@@ -1291,6 +1419,106 @@ function buildTaskApplyProgress(taskPlan: TaskPlanPreview, builtFiles: VFile[], 
     }
   }
   return { tasks, appliedTargetCount, staleTargetCount, nextTaskId, guidance };
+}
+
+interface TaskVerificationHandoffTask {
+  taskId: string;
+  title: string;
+  appliedPaths: string[];
+  stalePaths: string[];
+  latestRevision: string;
+  recommendedProfiles: VerificationProfileRecommendation[];
+}
+
+interface TaskVerificationHandoff {
+  summary: string;
+  appliedTaskCount: number;
+  appliedTargetCount: number;
+  detectedProfileCount: number;
+  unavailableReason: string;
+  warnings: string[];
+  tasks: TaskVerificationHandoffTask[];
+  exportText: string;
+}
+
+function buildTaskVerificationHandoff(
+  taskPlan: TaskPlanPreview,
+  applyProgress: TaskApplyProgress,
+  outcomes: ReviewedDraftApplyOutcome[],
+  snapshot: TestRunnerSnapshot | null,
+  unavailableReason: string,
+): TaskVerificationHandoff {
+  const outcomeByPath = new Map<string, ReviewedDraftApplyOutcome>();
+  for (const outcome of outcomes) {
+    const existing = outcomeByPath.get(outcome.path);
+    if (!existing || outcome.appliedAtMs > existing.appliedAtMs) outcomeByPath.set(outcome.path, outcome);
+  }
+  const profiles = snapshot?.profiles ?? [];
+  const tasks = taskPlan.tasks
+    .map((task): TaskVerificationHandoffTask | null => {
+      const status = applyProgress.tasks.find((item) => item.taskId === task.id);
+      if (!status || status.appliedTargets.length === 0) return null;
+      const latest = status.appliedTargets
+        .map((path) => outcomeByPath.get(path))
+        .filter((outcome): outcome is ReviewedDraftApplyOutcome => Boolean(outcome))
+        .sort((a, b) => b.appliedAtMs - a.appliedAtMs)[0];
+      return {
+        taskId: task.id,
+        title: task.title,
+        appliedPaths: status.appliedTargets,
+        stalePaths: status.staleTargets,
+        latestRevision: latest ? latest.revision.slice(0, 12) : "",
+        recommendedProfiles: selectTaskVerificationProfiles(profiles, status.appliedTargets),
+      };
+    })
+    .filter((task): task is TaskVerificationHandoffTask => Boolean(task));
+  const appliedTaskCount = tasks.length;
+  const appliedTargetCount = applyProgress.appliedTargetCount;
+  const detectedProfileCount = profiles.length;
+  const warnings = (snapshot?.warnings ?? []).slice(0, 6).map((warning) => boundSpecText(warning, 300));
+  const summary = `${appliedTaskCount} batch${appliedTaskCount === 1 ? "" : "es"} with applied targets · ${appliedTargetCount} applied target${appliedTargetCount === 1 ? "" : "s"} · ${snapshot ? `${detectedProfileCount} discovered profile${detectedProfileCount === 1 ? "" : "s"}` : "profiles not discovered"}`;
+  const exportText = [
+    "DevLab Builder task verification handoff",
+    `Generated: ${new Date().toISOString()}`,
+    "Source: session-only Editor apply metadata plus a read-only native test-runner profile snapshot",
+    "Safety: discovery-only metadata; no test, check or shell command was executed, no output was captured, no file was read or written, nothing was persisted. Nothing here claims a check passed.",
+    "",
+    "## Summary",
+    `- ${summary}`,
+    `- Applied targets with a newer in-memory draft: ${applyProgress.staleTargetCount}`,
+    ...(unavailableReason ? [`- Profile discovery unavailable: ${boundSpecText(unavailableReason, 300)}`] : []),
+    ...(warnings.length > 0 ? warnings.map((warning) => `- Discovery warning: ${warning}`) : []),
+    ...(snapshot ? [`- Backend-owned profile bounds: ${snapshot.timeoutSecs}s timeout, ${formatByteCount(snapshot.maxOutputBytes)} captured output`] : []),
+    "",
+    "## Task batches with applied targets",
+    ...(tasks.length > 0
+      ? tasks.flatMap((task) => [
+        `### ${task.taskId} — ${task.title}`,
+        `Applied targets: ${task.appliedPaths.join(", ")}`,
+        `Changed since apply: ${task.stalePaths.length > 0 ? task.stalePaths.join(", ") : "none"}`,
+        `Latest applied revision: ${task.latestRevision || "unknown"}`,
+        "Recommended backend-owned profiles (not run):",
+        ...(task.recommendedProfiles.length > 0
+          ? task.recommendedProfiles.map((profile) => `- ${profile.id} — ${profile.label}: ${profile.command} (matches ${profile.matchedDraftPaths.length} target${profile.matchedDraftPaths.length === 1 ? "" : "s"})`)
+          : [snapshot ? "- No discovered profile matches these targets; verify manually." : "- Profiles not discovered yet."]),
+        "",
+      ])
+      : ["- No reviewed file targets have been applied in the Editor in this session."]),
+    "## Next steps",
+    "- Open Self-Healing Tests and run a recommended backend-owned profile explicitly.",
+    "- Inspect real stdout/stderr; generate a repair draft only from a real failing run.",
+    "- Restage and recompare any target marked changed since apply before applying it again.",
+    "- Do not treat this handoff as proof that verification has run.",
+  ].join("\n");
+  return { summary, appliedTaskCount, appliedTargetCount, detectedProfileCount, unavailableReason, warnings, tasks, exportText };
+}
+
+function selectTaskVerificationProfiles(profiles: TestRunnerSnapshot["profiles"], appliedPaths: string[]): VerificationProfileRecommendation[] {
+  if (profiles.length === 0 || appliedPaths.length === 0) return [];
+  const ranked = recommendVerificationProfiles(profiles, appliedPaths);
+  // Per-task handoffs prefer profiles that match at least one applied target; fall back to the ranked list only when nothing matches.
+  const matched = ranked.filter((profile) => profile.matchedDraftPaths.length > 0);
+  return (matched.length > 0 ? matched : ranked).slice(0, 3);
 }
 
 interface TaskStagingLedgerPreview {
