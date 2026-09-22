@@ -88,6 +88,8 @@ export function AgentPanel({
   const [contextError, setContextError] = useState("");
   const [contextNotice, setContextNotice] = useState("");
   const [contextPickerOpen, setContextPickerOpen] = useState(false);
+  const [repoMapQuery, setRepoMapQuery] = useState("");
+  const [repoMapCopyNotice, setRepoMapCopyNotice] = useState("");
   const [pickerDirectory, setPickerDirectory] = useState("");
   const [pickerEntries, setPickerEntries] = useState<WorkspaceEntry[]>([]);
   const [pickerLoading, setPickerLoading] = useState(false);
@@ -107,6 +109,8 @@ export function AgentPanel({
   });
   const hasKey = chatRoute.status === "active" && !!getApiKey();
   const SpeechAPI = getSpeechRecognition();
+  const attachedRepoMap = contextFiles.find(isRepoMapContext) ?? null;
+  const repoMapPreview = attachedRepoMap ? buildRepoMapContextPreview(attachedRepoMap, repoMapQuery) : null;
 
   function toggleVoice() {
     if (!SpeechAPI) return;
@@ -291,6 +295,8 @@ export function AgentPanel({
     try {
       const repoMapContext = await buildRepoMapContext(Math.min(MAX_AGENT_CONTEXT_CHARS, remaining));
       setContextFiles([...contextWithoutExistingMap, repoMapContext].slice(-MAX_AGENT_CONTEXT_FILES));
+      setRepoMapQuery("");
+      setRepoMapCopyNotice("");
       setContextNotice("Attached a bounded repository map as generated read-only metadata. It is not a real file, is not written to disk and is not recorded as file-content audit data.");
     } catch (error) {
       setContextError(`Could not build repository map: ${formatContextError(error)}`);
@@ -374,14 +380,36 @@ export function AgentPanel({
 
   function removeContextFile(path: string) {
     setContextFiles((current) => current.filter((file) => file.path !== path));
+    if (path === REPO_MAP_CONTEXT_PATH) {
+      setRepoMapQuery("");
+      setRepoMapCopyNotice("");
+    }
     setContextNotice("");
     setContextError("");
   }
 
   function clearContextFiles() {
     setContextFiles([]);
+    setRepoMapQuery("");
+    setRepoMapCopyNotice("");
     setContextNotice("");
     setContextError("");
+  }
+
+  async function copyRepoMapPreview() {
+    if (!repoMapPreview) return;
+    setRepoMapCopyNotice("");
+    setContextError("");
+    if (!navigator.clipboard?.writeText) {
+      setContextError("Clipboard access is unavailable in this environment. Repository map metadata was not copied.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(repoMapPreview.exportText);
+      setRepoMapCopyNotice(`Copied ${repoMapPreview.visibleLines.length} visible repository-map metadata line${repoMapPreview.visibleLines.length === 1 ? "" : "s"}.`);
+    } catch (error) {
+      setContextError(`Could not copy repository map metadata: ${formatContextError(error)}`);
+    }
   }
 
   async function stageDraftsFromMessage(message: ChatMessage, drafts: VFile[]) {
@@ -718,6 +746,40 @@ export function AgentPanel({
                 <button onClick={clearContextFiles} className="text-zinc-500 hover:text-zinc-200">Clear</button>
               </div>
             )}
+            {repoMapPreview && (
+              <details className="mt-2 rounded-lg border border-cyan-500/15 bg-cyan-500/[0.04] p-2" open>
+                <summary className="cursor-pointer select-none text-[11px] font-semibold text-cyan-100">
+                  Repository map preview · {repoMapPreview.summary}
+                </summary>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <input
+                    value={repoMapQuery}
+                    onChange={(event) => { setRepoMapQuery(event.target.value); setRepoMapCopyNotice(""); }}
+                    placeholder="Filter map metadata paths, languages or skipped reasons"
+                    className="min-w-[16rem] flex-1 rounded-lg border border-white/10 bg-black/20 px-2 py-1.5 text-[11px] text-zinc-300 outline-none placeholder:text-zinc-600 focus:border-cyan-500/40"
+                  />
+                  {repoMapQuery.trim() && (
+                    <button onClick={() => { setRepoMapQuery(""); setRepoMapCopyNotice(""); }} className="rounded-lg border border-white/10 px-2 py-1.5 text-zinc-500 hover:bg-white/5 hover:text-zinc-200">
+                      Clear filter
+                    </button>
+                  )}
+                  <button onClick={() => { void copyRepoMapPreview(); }} className="rounded-lg border border-cyan-500/20 px-2 py-1.5 text-cyan-200 hover:bg-cyan-500/10">
+                    Copy visible map metadata
+                  </button>
+                </div>
+                <div className="mt-2 max-h-40 overflow-auto rounded-md bg-black/20 p-2 font-mono text-[10.5px] leading-relaxed text-cyan-50/75">
+                  {repoMapPreview.visibleLines.length === 0 ? (
+                    <div className="font-sans text-[11px] text-zinc-500">No repository-map metadata lines match this filter.</div>
+                  ) : repoMapPreview.visibleLines.map((line, index) => (
+                    <div key={`${line}-${index}`} className="whitespace-pre-wrap">{line}</div>
+                  ))}
+                </div>
+                <p className="mt-2 text-[10.5px] leading-relaxed text-cyan-100/55">
+                  This inspector filters the already-attached metadata-only map in memory. It does not read file contents, build an index, persist state, execute commands or write workspace files.
+                </p>
+                {repoMapCopyNotice && <div className="mt-1 text-[10.5px] text-emerald-300">{repoMapCopyNotice}</div>}
+              </details>
+            )}
             {contextNotice && <div className="mt-1 text-emerald-300">{contextNotice}</div>}
             {contextError && <div className="mt-1 text-rose-300">{contextError}</div>}
           </div>
@@ -925,6 +987,57 @@ async function buildRepoMapContext(maxBytes: number): Promise<AgentContextFile> 
     truncated: textBytes(content) < textBytes(rendered) || snapshot.truncated,
     source: "repo-map",
   };
+}
+
+
+interface RepoMapContextPreview {
+  summary: string;
+  visibleLines: string[];
+  exportText: string;
+}
+
+function buildRepoMapContextPreview(file: AgentContextFile, query: string): RepoMapContextPreview {
+  const lines = file.content.split("\n").map((line) => line.trimEnd());
+  const summary = summarizeRepoMapContent(lines, file);
+  const normalized = query.trim().toLowerCase();
+  const interesting = lines.filter((line) => isRepoMapPreviewLine(line));
+  const visibleLines = (normalized
+    ? lines.filter((line) => line.toLowerCase().includes(normalized))
+    : interesting
+  ).slice(0, 80);
+  const exportText = [
+    "DevLab repository map visible metadata",
+    `Source: ${file.path}`,
+    `Revision: ${file.revision}`,
+    `Size: ${file.size} bytes${file.truncated ? " · truncated" : ""}`,
+    normalized ? `Filter: ${query.trim()}` : "Filter: none",
+    "Safety: metadata-only attached repo map; no file contents were read by this preview.",
+    "",
+    ...visibleLines,
+  ].join("\n");
+  return { summary, visibleLines, exportText };
+}
+
+function summarizeRepoMapContent(lines: string[], file: AgentContextFile): string {
+  const filesLine = lines.find((line) => line.startsWith("Files:"));
+  const limitsLine = lines.find((line) => line.startsWith("Limits:"));
+  const truncatedLine = lines.find((line) => line.startsWith("Truncated:"));
+  return [
+    filesLine?.replace("Files: ", "") || `${file.size} bytes`,
+    truncatedLine?.replace("Truncated: ", "truncated ") || (file.truncated ? "truncated" : "not truncated"),
+    limitsLine?.replace("Limits: ", "limits "),
+  ].filter(Boolean).join(" · ");
+}
+
+function isRepoMapPreviewLine(line: string): boolean {
+  if (!line.trim()) return false;
+  if (line.startsWith("#")) return true;
+  if (line.startsWith("Generated:")) return true;
+  if (line.startsWith("Files:")) return true;
+  if (line.startsWith("Limits:")) return true;
+  if (line.startsWith("Truncated:")) return true;
+  if (line.startsWith("- ")) return true;
+  return false;
 }
 
 function isRepoMapContext(file: AgentContextFile): boolean {
