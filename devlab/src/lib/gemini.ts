@@ -2,7 +2,7 @@
 // Nothing is hardcoded or sent anywhere except Google's official endpoint.
 
 import { starterBlueprintInstruction } from "./generationBlueprints";
-import { componentScaffoldInstruction } from "./generationGuidance";
+import { componentScaffoldInstruction, designSystemInstruction } from "./generationGuidance";
 import { loadSettings } from "./settings";
 import {
   generationGuardrailInstruction,
@@ -256,6 +256,7 @@ export async function* streamChat(
     generationGuardrailInstruction(route.task),
     starterBlueprintInstruction(route.task),
     componentScaffoldInstruction(route.task),
+    designSystemInstruction(route.task),
     customPrompt ? `Developer preferences:\n${customPrompt}` : "",
   ].filter(Boolean).join("\n\n");
   const body = {
@@ -297,6 +298,7 @@ export async function* streamVision(
     generationGuardrailInstruction("vision"),
     starterBlueprintInstruction("vision"),
     componentScaffoldInstruction("vision"),
+    designSystemInstruction("vision"),
   ].filter(Boolean).join("\n\n");
 
   const body = {
