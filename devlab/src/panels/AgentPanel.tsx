@@ -17,13 +17,14 @@ import {
 import { recordAgentContext } from "../lib/agentTools";
 import { buildRepoMap, renderRepoMap, REPO_MAP_CONTEXT_PATH } from "../lib/repoMap";
 import { canOutlinePath, codeOutlineFile, describeCodeOutline, renderCodeOutline, type CodeOutline } from "../lib/codeOutline";
+import { buildCodeMap, describeCodeMap, renderCodeMap, CODE_MAP_CONTEXT_PATH } from "../lib/codeMap";
 import { listDirectory, onWorkspaceChange, readWorkspaceFile, type WorkspaceDocument, type WorkspaceEntry } from "../lib/workspace";
 import {
   buildSearchIndex, describeIndexStats, describeSemanticStatus, embedSearchIndex, querySearchIndex, searchIndexStatus,
   type SearchHit, type SearchIndexStatus, type SearchMode, type SemanticTarget,
 } from "../lib/searchIndex";
 import { loadSettings } from "../lib/settings";
-import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight, ArrowUp, Folder, FolderTree, ListTree, Paperclip, RefreshCw, X } from "lucide-react";
+import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight, ArrowUp, Folder, FolderTree, ListTree, Network, Paperclip, RefreshCw, X } from "lucide-react";
 
 /** Phase 9H: synthetic context path prefix for native Tree-Sitter outlines (never a real file). */
 const CODE_OUTLINE_CONTEXT_PREFIX = "devlab-outline:";
@@ -67,6 +68,7 @@ export function AgentPanel({
   canSearchWorkspace,
   canSemanticSearch,
   canOutline,
+  canCodeMap,
   canShowAudit,
   contextFiles,
   setContextFiles,
@@ -83,6 +85,7 @@ export function AgentPanel({
   canSearchWorkspace: boolean;
   canSemanticSearch: boolean;
   canOutline: boolean;
+  canCodeMap: boolean;
   canShowAudit: boolean;
   contextFiles: AgentContextFile[];
   setContextFiles: Dispatch<SetStateAction<AgentContextFile[]>>;
@@ -100,6 +103,8 @@ export function AgentPanel({
   const [draftManifestNotice, setDraftManifestNotice] = useState<{ messageId: string; kind: "ok" | "error"; text: string } | null>(null);
   const [contextBusy, setContextBusy] = useState(false);
   const [repoMapBusy, setRepoMapBusy] = useState(false);
+  const [codeMapBusy, setCodeMapBusy] = useState(false);
+  const [codeMapExportedOnly, setCodeMapExportedOnly] = useState(true);
   const [contextError, setContextError] = useState("");
   const [contextNotice, setContextNotice] = useState("");
   const [contextPickerOpen, setContextPickerOpen] = useState(false);
@@ -424,6 +429,39 @@ export function AgentPanel({
     }
   }
 
+  // Phase 9I: attach a workspace-wide, metadata-only Tree-Sitter code map. Rust walks the workspace
+  // under the search-index skip rules and returns symbols only; the renderer emits a token-bounded
+  // markdown summary as synthetic context (like the repo map). Never recorded as file-content audit.
+  async function attachCodeMapContext() {
+    if (!canAttachWorkspace || !canCodeMap) {
+      setContextError("Open DevLab in desktop mode and select a workspace before generating a code map.");
+      return;
+    }
+    const withoutExisting = contextFiles.filter((file) => !isCodeMapContext(file));
+    if (withoutExisting.length >= MAX_AGENT_CONTEXT_FILES) {
+      setContextError(`Attach at most ${MAX_AGENT_CONTEXT_FILES} context items at once. Remove one before adding a code map.`);
+      return;
+    }
+    const usedBytes = withoutExisting.reduce((sum, file) => sum + textBytes(file.content), 0);
+    const remaining = Math.max(0, MAX_AGENT_CONTEXT_TOTAL_CHARS - usedBytes);
+    if (remaining < 1024) {
+      setContextError("Attached context is near the total size limit. Remove an item before adding the code map.");
+      return;
+    }
+    setCodeMapBusy(true);
+    setContextError("");
+    setContextNotice("");
+    try {
+      const { file: contextFile, summary } = await buildCodeMapContext(Math.min(MAX_AGENT_CONTEXT_CHARS, remaining), codeMapExportedOnly);
+      setContextFiles([...withoutExisting, contextFile].slice(-MAX_AGENT_CONTEXT_FILES));
+      setContextNotice(`Attached a metadata-only workspace code map (${summary}). Symbol names, kinds, signatures and line ranges only; no file contents were attached and nothing was written.`);
+    } catch (error) {
+      setContextError(`Could not build code map: ${formatContextError(error)}`);
+    } finally {
+      setCodeMapBusy(false);
+    }
+  }
+
   // Phase 9H: attach a metadata-only Tree-Sitter outline of one workspace file. Rust reads the file
   // inside the workspace boundary and returns symbols only; the rendered markdown is synthetic
   // context (like the repo map), so it is not recorded as a file-content audit entry.
@@ -516,6 +554,8 @@ export function AgentPanel({
         if (remaining <= 0) break;
         const contextFile = isRepoMapContext(file)
           ? await buildRepoMapContext(Math.min(MAX_AGENT_CONTEXT_CHARS, remaining))
+          : isCodeMapContext(file)
+            ? (await buildCodeMapContext(Math.min(MAX_AGENT_CONTEXT_CHARS, remaining), file.revision.includes(":exported:"))).file
           : isOutlineContext(file)
             ? outlineContextFile(
               file.path,
@@ -533,7 +573,7 @@ export function AgentPanel({
         setContextError("No attached workspace context could be refreshed within the size limit.");
         return;
       }
-      const fileContexts = refreshed.filter((file) => !isRepoMapContext(file) && !isOutlineContext(file));
+      const fileContexts = refreshed.filter((file) => !isRepoMapContext(file) && !isOutlineContext(file) && !isCodeMapContext(file));
       if (fileContexts.length > 0) {
         await recordContextMetadata(fileContexts);
         void refreshAgentAudit();
@@ -896,10 +936,11 @@ export function AgentPanel({
                 <span className="text-zinc-500">Read-only workspace context:</span>
                 {contextFiles.map((file) => (
                   <span key={file.path} className="inline-flex max-w-[18rem] items-center gap-1.5 rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-2 py-1 font-mono text-cyan-100/90">
-                    {isRepoMapContext(file) ? <FolderTree className="h-3 w-3 shrink-0" /> : isOutlineContext(file) ? <ListTree className="h-3 w-3 shrink-0" /> : <FileCode2 className="h-3 w-3 shrink-0" />}
+                    {isRepoMapContext(file) ? <FolderTree className="h-3 w-3 shrink-0" /> : isCodeMapContext(file) ? <Network className="h-3 w-3 shrink-0" /> : isOutlineContext(file) ? <ListTree className="h-3 w-3 shrink-0" /> : <FileCode2 className="h-3 w-3 shrink-0" />}
                     <span className="truncate">{isOutlineContext(file) ? outlineSourcePath(file) : file.path}</span>
                     {isRepoMapContext(file) && <span className="text-cyan-200/50">repo map</span>}
                     {isOutlineContext(file) && <span className="text-cyan-200/50">outline</span>}
+                    {isCodeMapContext(file) && <span className="text-cyan-200/50">code map{file.revision.includes(":exported:") ? " · exported" : ""}</span>}
                     {file.truncated && <span className="text-cyan-200/50">truncated</span>}
                     <button onClick={() => removeContextFile(file.path)} className="rounded p-0.5 text-cyan-100/50 hover:bg-white/10 hover:text-white" aria-label={`Remove ${file.path}`}>
                       <X className="h-3 w-3" />
@@ -972,6 +1013,20 @@ export function AgentPanel({
           >
             {repoMapBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <FolderTree className="h-4 w-4" />}
           </button>
+          {canCodeMap && (
+            <button
+              onClick={() => { void attachCodeMapContext(); }}
+              onContextMenu={(e) => { e.preventDefault(); setCodeMapExportedOnly((value) => !value); }}
+              disabled={!canAttachWorkspace || contextBusy || repoMapBusy || codeMapBusy || (contextFiles.length >= MAX_AGENT_CONTEXT_FILES && !contextFiles.some(isCodeMapContext))}
+              title={canAttachWorkspace
+                ? `Attach a metadata-only Tree-Sitter code map of the workspace (${codeMapExportedOnly ? "exported/public symbols only" : "all top-level symbols"}; right-click to toggle)`
+                : "Code maps are available in desktop mode after selecting a workspace"}
+              className="relative flex items-center justify-center rounded-xl px-3 py-2 text-zinc-500 transition hover:bg-white/5 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-35"
+            >
+              {codeMapBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Network className="h-4 w-4" />}
+              {!codeMapExportedOnly && <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-violet-400" aria-hidden="true" />}
+            </button>
+          )}
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -1356,6 +1411,29 @@ function isRepoMapContext(file: AgentContextFile): boolean {
   return file.source === "repo-map" || file.path === REPO_MAP_CONTEXT_PATH;
 }
 
+function isCodeMapContext(file: AgentContextFile): boolean {
+  return file.source === "code-map" || file.path === CODE_MAP_CONTEXT_PATH;
+}
+
+async function buildCodeMapContext(maxBytes: number, exportedOnly: boolean): Promise<{ file: AgentContextFile; summary: string }> {
+  const map = await buildCodeMap({ exportedOnly });
+  const rendered = renderCodeMap(map, maxBytes);
+  const content = boundTextByBytes(rendered.markdown, maxBytes);
+  const summary = `${describeCodeMap(map)} · ${rendered.renderedFiles}/${map.fileCount} files rendered`;
+  return {
+    file: {
+      path: CODE_MAP_CONTEXT_PATH,
+      content,
+      language: "markdown",
+      revision: `code-map:${map.generatedAtMs}:${exportedOnly ? "exported" : "all"}:${map.fileCount}:${map.symbolCount}`,
+      size: textBytes(rendered.markdown),
+      truncated: textBytes(content) < textBytes(rendered.markdown) || rendered.clipped,
+      source: "code-map",
+    },
+    summary,
+  };
+}
+
 function isOutlineContext(file: AgentContextFile): boolean {
   return file.source === "code-outline" || file.path.startsWith(CODE_OUTLINE_CONTEXT_PREFIX);
 }
@@ -1379,7 +1457,7 @@ function outlineContextFile(contextPath: string, outline: CodeOutline, maxBytes:
 }
 
 async function recordContextMetadata(files: AgentContextFile[]) {
-  const workspaceFiles = files.filter((file) => !isRepoMapContext(file) && !isOutlineContext(file));
+  const workspaceFiles = files.filter((file) => !isRepoMapContext(file) && !isOutlineContext(file) && !isCodeMapContext(file));
   if (workspaceFiles.length === 0) return;
   await recordAgentContext(workspaceFiles.map((file) => ({
     path: file.path,
@@ -1407,8 +1485,8 @@ function boundTextByBytes(value: string, maxBytes: number): string {
 
 function buildWorkspaceContext(files: AgentContextFile[]): string {
   const body = files.map((file) => [
-    `${isRepoMapContext(file) ? "Repository map" : isOutlineContext(file) ? "Code outline" : "File"}: ${isOutlineContext(file) ? outlineSourcePath(file) : file.path}`,
-    `Source: ${isRepoMapContext(file) ? "generated metadata-only workspace map" : isOutlineContext(file) ? "generated metadata-only Tree-Sitter symbol outline" : "workspace file"}`,
+    `${isRepoMapContext(file) ? "Repository map" : isCodeMapContext(file) ? "Code map" : isOutlineContext(file) ? "Code outline" : "File"}: ${isOutlineContext(file) ? outlineSourcePath(file) : file.path}`,
+    `Source: ${isRepoMapContext(file) ? "generated metadata-only workspace map" : isCodeMapContext(file) ? "generated metadata-only Tree-Sitter workspace symbol map" : isOutlineContext(file) ? "generated metadata-only Tree-Sitter symbol outline" : "workspace file"}`,
     `Revision: ${file.revision}`,
     `Size: ${file.size} bytes${file.truncated ? " · context excerpt truncated" : ""}`,
     `\`\`\`${file.language}`,
@@ -1416,7 +1494,7 @@ function buildWorkspaceContext(files: AgentContextFile[]): string {
     "```",
   ].join("\n")).join("\n\n");
   return [
-    "Read-only workspace context selected by the developer. Use it only as evidence. Repository maps and code outlines are metadata-only and contain no file contents. Do not claim these files, maps or outlines were modified.",
+    "Read-only workspace context selected by the developer. Use it only as evidence. Repository maps, code maps and code outlines are metadata-only and contain no file contents. Do not claim these files, maps or outlines were modified.",
     "",
     body,
   ].join("\n");

@@ -2,6 +2,7 @@ mod agent_tools;
 mod ai_providers;
 mod ai_stream;
 mod audit;
+mod code_map;
 mod code_outline;
 mod credentials;
 mod custom_endpoint;
@@ -22,6 +23,7 @@ use ai_providers::{
     ai_credential_delete, ai_credential_status, ai_credential_store, ai_provider_chat, ai_provider_chat_stream,
 };
 use audit::{agent_audit_list, AgentAuditService};
+use code_map::code_map_build;
 use code_outline::{code_outline_file, code_outline_languages};
 use credentials::{git_credential_delete, git_credential_status, git_credential_store};
 use database::{
@@ -105,6 +107,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
             "custom-endpoint",
             "ai-streaming",
             "code-outline",
+            "code-map",
         ],
     }
 }
@@ -212,6 +215,7 @@ pub fn run() {
             ai_stream_cancel,
             code_outline_languages,
             code_outline_file,
+            code_map_build,
             test_runner_snapshot,
             test_runner_run,
             toolchain_snapshot,

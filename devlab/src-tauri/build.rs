@@ -80,6 +80,7 @@ const APP_COMMANDS: &[&str] = &[
     "ai_stream_cancel",
     "code_outline_languages",
     "code_outline_file",
+    "code_map_build",
     "test_runner_snapshot",
     "test_runner_run",
     "toolchain_snapshot",

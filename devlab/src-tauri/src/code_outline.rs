@@ -80,13 +80,13 @@ pub struct CodeOutlineLanguage {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeOutlineSymbol {
-    kind: &'static str,
-    name: String,
-    signature: String,
-    start_line: u32,
-    end_line: u32,
-    depth: u8,
-    exported: bool,
+    pub(crate) kind: &'static str,
+    pub(crate) name: String,
+    pub(crate) signature: String,
+    pub(crate) start_line: u32,
+    pub(crate) end_line: u32,
+    pub(crate) depth: u8,
+    pub(crate) exported: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -130,6 +130,11 @@ pub(crate) fn extension_of(path: &str) -> String {
         Some((stem, ext)) if !stem.is_empty() => ext.to_ascii_lowercase(),
         _ => String::new(),
     }
+}
+
+/// Grammar id (`typescript`, `rust`, …) for a path or file name, if a grammar is compiled in.
+pub(crate) fn grammar_id_for(path: &str) -> Option<&'static str> {
+    grammar_for(path).map(|grammar| grammar.id)
 }
 
 fn grammar_for(path: &str) -> Option<&'static Grammar> {
@@ -392,10 +397,10 @@ fn is_function_value(kind: Option<&str>) -> bool {
 }
 
 pub(crate) struct ParsedOutline {
-    symbols: Vec<CodeOutlineSymbol>,
-    truncated: bool,
-    has_syntax_errors: bool,
-    parse_ms: u64,
+    pub(crate) symbols: Vec<CodeOutlineSymbol>,
+    pub(crate) truncated: bool,
+    pub(crate) has_syntax_errors: bool,
+    pub(crate) parse_ms: u64,
 }
 
 fn language_of(grammar: &'static Grammar) -> Language {

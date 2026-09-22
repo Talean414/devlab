@@ -87,6 +87,7 @@
     "allow-ai-stream-cancel",
     "allow-code-outline-languages",
     "allow-code-outline-file",
+    "allow-code-map-build",
     "allow-test-runner-snapshot",
     "allow-test-runner-run",
     "allow-toolchain-snapshot"
