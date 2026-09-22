@@ -67,6 +67,10 @@
     "allow-http-request",
     "allow-ollama-list-models",
     "allow-ollama-chat",
+    "allow-ai-credential-status",
+    "allow-ai-credential-store",
+    "allow-ai-credential-delete",
+    "allow-ai-provider-chat",
     "allow-test-runner-snapshot",
     "allow-test-runner-run",
     "allow-toolchain-snapshot"

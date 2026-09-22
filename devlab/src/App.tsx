@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { evaluateDrafts, loadDraftPolicy } from "./lib/draftPolicy";
 import { MAX_HANDOFF_HISTORY } from "./lib/taskTimeline";
+import { refreshCredentialCache } from "./lib/aiProviders";
 import type { AgentContextFile, BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, ChatMessage, DraftPolicyGateSummary, OpenGeneratedDrafts, ReviewedDraftApplyOutcome, VerificationHandoffRequest, VerificationRunOutcome, VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import { loadDeploy, loadGit, loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
@@ -166,7 +167,12 @@ export default function App() {
 
   useEffect(() => {
     let mounted = true;
-    detectRuntime().then((info) => { if (mounted) setRuntime(info); });
+    detectRuntime().then((info) => {
+      if (!mounted) return;
+      setRuntime(info);
+      // Learn which cloud provider keys exist (booleans only) so routing checks stay honest.
+      if (hasNativeCapability(info, "ai-providers")) void refreshCredentialCache();
+    });
     return () => { mounted = false; };
   }, []);
 
@@ -602,7 +608,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 9A native Ollama adapter</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 9B native cloud provider adapters</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}

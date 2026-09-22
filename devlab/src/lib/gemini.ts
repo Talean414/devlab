@@ -5,6 +5,7 @@ import { starterBlueprintInstruction } from "./generationBlueprints";
 import { componentScaffoldInstruction, designSystemInstruction, qualityChecklistInstruction } from "./generationGuidance";
 import { loadSettings } from "./settings";
 import { ollamaChat } from "./ollama";
+import { aiProviderChat, credentialKnownConfigured, isCloudAiProvider } from "./aiProviders";
 import {
   generationGuardrailInstruction,
   resolveAiRoute,
@@ -158,6 +159,9 @@ export function hasGenerationAccess(task: AiTaskKind = "chat"): boolean {
   const route = getCurrentAiRoute(task);
   if (route.status !== "active") return false;
   if (route.provider === "ollama") return true;
+  // Cloud adapters: the key lives in the OS store; the renderer only knows whether one is configured.
+  // Unknown (cache not yet populated) is treated as available so Rust gives the authoritative answer.
+  if (isCloudAiProvider(route.provider)) return credentialKnownConfigured(route.provider) !== false;
   return !!getApiKey();
 }
 
@@ -292,6 +296,21 @@ export async function* streamChat(
     return;
   }
 
+  if (isCloudAiProvider(route.provider)) {
+    // Native HTTPS adapter to a fixed provider host; the key never enters the renderer.
+    const reply = await aiProviderChat({
+      provider: route.provider,
+      model: route.model,
+      system: systemText,
+      messages: limitHistory(history),
+      temperature,
+      maxOutputTokens,
+    });
+    yield reply.text;
+    if (reply.textTruncated) yield "\n\n… provider reply truncated at DevLab's response bound.";
+    return;
+  }
+
   const body = {
     systemInstruction: {
       parts: [{ text: systemText }],
@@ -316,8 +335,8 @@ export async function* streamVision(
     pickedModel: getPicked(),
   }, settings);
   if (route.status !== "active") throw new Error(route.reason);
-  if (route.provider === "ollama") {
-    throw new Error("Vision generation is not routed through the local Ollama adapter in this phase. Switch Settings → Providers to Gemini for image input.");
+  if (route.provider !== "gemini") {
+    throw new Error(`Vision generation is not routed through the ${route.providerName} adapter in this phase. Switch Settings → Providers to Gemini for image input.`);
   }
 
   const parts: Record<string, unknown>[] = images.map((image) => ({

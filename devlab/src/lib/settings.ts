@@ -49,6 +49,8 @@ export interface DevLabSettings {
   aiProvider: AiProviderId;
   modelRouting: ModelRoutingMode;
   deepseekModel: string;
+  openaiModel: string;
+  anthropicModel: string;
   ollamaModel: string;
   customModel: string;
   customEndpoint: string;
@@ -97,6 +99,8 @@ export const DEFAULT_SETTINGS: DevLabSettings = {
   aiProvider: "gemini",
   modelRouting: "auto",
   deepseekModel: "deepseek-chat",
+  openaiModel: "gpt-4.1-mini",
+  anthropicModel: "claude-sonnet-4-5",
   ollamaModel: "llama3.1",
   customModel: "",
   customEndpoint: "",

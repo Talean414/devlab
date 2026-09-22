@@ -118,13 +118,13 @@ export const AI_PROVIDER_PROFILES: AiProviderProfile[] = [
     id: "deepseek",
     name: "DeepSeek",
     shortName: "DeepSeek",
-    statusLabel: "Future native adapter",
-    availableNow: false,
-    credentialStorage: "Planned OS credential store entry, never renderer-readable",
-    transport: "Planned Rust-owned HTTPS provider adapter",
+    statusLabel: "Available in native DevLab",
+    availableNow: NATIVE_RUNTIME,
+    credentialStorage: "OS credential store entry written through Rust; never returned to the WebView",
+    transport: "Rust-owned HTTPS adapter to the fixed host api.deepseek.com (bounded prompt and reply, 120 s non-streamed bound)",
     defaultModel: "deepseek-chat",
     modelExamples: ["deepseek-chat", "deepseek-reasoner"],
-    note: "Roadmap provider for DeepSeek V3/R1 style routing. It is intentionally unavailable until native credential storage and bounded transport exist.",
+    note: "Phase 9B native adapter. Requires an API key stored in Settings → Providers; unavailable in the plain web preview.",
   },
   {
     id: "ollama",
@@ -142,25 +142,25 @@ export const AI_PROVIDER_PROFILES: AiProviderProfile[] = [
     id: "openai",
     name: "OpenAI",
     shortName: "OpenAI",
-    statusLabel: "Future native adapter",
-    availableNow: false,
-    credentialStorage: "Planned OS credential store entry, never renderer-readable",
-    transport: "Planned Rust-owned HTTPS provider adapter",
+    statusLabel: "Available in native DevLab",
+    availableNow: NATIVE_RUNTIME,
+    credentialStorage: "OS credential store entry written through Rust; never returned to the WebView",
+    transport: "Rust-owned HTTPS adapter to the fixed host api.openai.com (bounded prompt and reply, 120 s non-streamed bound)",
     defaultModel: "gpt-4.1-mini",
     modelExamples: ["gpt-4.1", "gpt-4.1-mini"],
-    note: "Future external provider profile. Selecting it records non-secret preferences only.",
+    note: "Phase 9B native adapter. Requires an API key stored in Settings → Providers; unavailable in the plain web preview.",
   },
   {
     id: "anthropic",
     name: "Anthropic Claude",
     shortName: "Claude",
-    statusLabel: "Future native adapter",
-    availableNow: false,
-    credentialStorage: "Planned OS credential store entry, never renderer-readable",
-    transport: "Planned Rust-owned HTTPS provider adapter",
+    statusLabel: "Available in native DevLab",
+    availableNow: NATIVE_RUNTIME,
+    credentialStorage: "OS credential store entry written through Rust; never returned to the WebView",
+    transport: "Rust-owned HTTPS adapter to the fixed host api.anthropic.com (bounded prompt and reply, 120 s non-streamed bound)",
     defaultModel: "claude-sonnet-4-5",
     modelExamples: ["claude-sonnet-4-5", "claude-haiku-4-5"],
-    note: "Future external provider profile. Selecting it records non-secret preferences only.",
+    note: "Phase 9B native adapter. Requires an API key stored in Settings → Providers; unavailable in the plain web preview.",
   },
   {
     id: "custom",
@@ -198,8 +198,8 @@ export function resolveAiRoute(
   const modelLabel = model || provider.defaultModel || "not configured";
 
   if (!provider.availableNow) {
-    const reason = provider.id === "ollama"
-      ? `Ollama routing is configured for ${task.label.toLowerCase()}, but the native loopback adapter is only available inside the DevLab desktop app, not the web preview. No request was sent.`
+    const reason = provider.id === "ollama" || provider.id === "deepseek" || provider.id === "openai" || provider.id === "anthropic"
+      ? `${provider.name} routing is configured for ${task.label.toLowerCase()}, but its native adapter is only available inside the DevLab desktop app, not the web preview. No request was sent.`
       : `${provider.name} routing is configured for ${task.label.toLowerCase()}, but this provider is a future phase. DevLab has not enabled its native credential store and bounded transport yet, so no request was sent. Switch Settings → Providers back to Gemini for current AI generation.`;
     return {
       task: task.id,
@@ -231,7 +231,9 @@ export function resolveAiRoute(
     transport: provider.transport,
     reason: provider.id === "ollama"
       ? `Routing ${task.label.toLowerCase()} to the local Ollama model "${modelLabel}" through the native loopback adapter; no cloud request is made and there is no fallback to Gemini.`
-      : settings.modelRouting === "fixed"
+      : provider.id === "deepseek" || provider.id === "openai" || provider.id === "anthropic"
+        ? `Routing ${task.label.toLowerCase()} to ${provider.shortName} model "${modelLabel}" through the native HTTPS adapter; the key stays in the OS credential store and there is no fallback to Gemini.`
+        : settings.modelRouting === "fixed"
         ? `Using the selected ${provider.shortName} model for ${task.label.toLowerCase()}.`
         : `Routing ${task.label.toLowerCase()} through ${provider.shortName}; Gemini fallback candidates are ordered for this task class when live model metadata is available.`,
   };
@@ -309,12 +311,13 @@ function modelForProvider(
         : (selection.pickedModel || selection.selectedModel);
     case "deepseek":
       return settings.deepseekModel || getProviderProfile(provider).defaultModel;
+    case "openai":
+      return settings.openaiModel || getProviderProfile(provider).defaultModel;
+    case "anthropic":
+      return settings.anthropicModel || getProviderProfile(provider).defaultModel;
     case "ollama":
       return settings.ollamaModel || getProviderProfile(provider).defaultModel;
     case "custom":
       return settings.customModel || getProviderProfile(provider).defaultModel;
-    case "openai":
-    case "anthropic":
-      return getProviderProfile(provider).defaultModel;
   }
 }

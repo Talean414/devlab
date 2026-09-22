@@ -16,6 +16,10 @@ import {
   describeDraftPolicy, evaluateDraftPath, loadDraftPolicy, parsePatternList, saveDraftPolicy,
 } from "../lib/draftPolicy";
 import {
+  aiCredentialDelete, aiCredentialStatus, aiCredentialStore, cloudAdapterAvailable, isCloudAiProvider,
+  rememberCredentialConfigured, type AiCredentialStatus, type CloudAiProvider,
+} from "../lib/aiProviders";
+import {
   OLLAMA_DEFAULT_ENDPOINT, describeOllamaEndpoint, formatOllamaSize, listOllamaModels, ollamaAdapterAvailable,
   type OllamaModelInfo,
 } from "../lib/ollama";
@@ -60,6 +64,62 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
   const [ollamaBusy, setOllamaBusy] = useState(false);
   const [ollamaNotice, setOllamaNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const ollamaEndpointCheck = describeOllamaEndpoint(s.customEndpoint);
+  const cloudProvider: CloudAiProvider | null = isCloudAiProvider(s.aiProvider) ? s.aiProvider : null;
+  const [cloudKeyInput, setCloudKeyInput] = useState("");
+  const [cloudKeyShow, setCloudKeyShow] = useState(false);
+  const [cloudStatus, setCloudStatus] = useState<AiCredentialStatus | null>(null);
+  const [cloudBusy, setCloudBusy] = useState(false);
+  const [cloudNotice, setCloudNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+
+  useEffect(() => {
+    setCloudKeyInput("");
+    setCloudNotice(null);
+    setCloudStatus(null);
+    if (!cloudProvider || !cloudAdapterAvailable()) return;
+    let cancelled = false;
+    aiCredentialStatus(cloudProvider)
+      .then((status) => { if (!cancelled) { setCloudStatus(status); rememberCredentialConfigured(cloudProvider, status.configured); } })
+      .catch((error) => { if (!cancelled) setCloudNotice({ kind: "error", text: nativeErrorText(error) }); });
+    return () => { cancelled = true; };
+  }, [cloudProvider]);
+
+  async function storeCloudKey() {
+    if (!cloudProvider) return;
+    setCloudNotice(null);
+    if (!cloudAdapterAvailable()) {
+      setCloudNotice({ kind: "error", text: "Provider keys can only be stored inside the DevLab desktop app, where the OS credential store is available." });
+      return;
+    }
+    setCloudBusy(true);
+    try {
+      const status = await aiCredentialStore(cloudProvider, cloudKeyInput);
+      setCloudStatus(status);
+      rememberCredentialConfigured(cloudProvider, status.configured);
+      setCloudKeyInput("");
+      setCloudKeyShow(false);
+      setCloudNotice({ kind: "ok", text: `Key stored in the ${status.backend}. DevLab never reads it back into the interface; Rust attaches it only to requests for ${status.host}.` });
+    } catch (error) {
+      setCloudNotice({ kind: "error", text: nativeErrorText(error) });
+    } finally {
+      setCloudBusy(false);
+    }
+  }
+
+  async function deleteCloudKey() {
+    if (!cloudProvider) return;
+    setCloudNotice(null);
+    setCloudBusy(true);
+    try {
+      const status = await aiCredentialDelete(cloudProvider);
+      setCloudStatus(status);
+      rememberCredentialConfigured(cloudProvider, status.configured);
+      setCloudNotice({ kind: "ok", text: `Removed the stored key from the ${status.backend}.` });
+    } catch (error) {
+      setCloudNotice({ kind: "error", text: nativeErrorText(error) });
+    } finally {
+      setCloudBusy(false);
+    }
+  }
 
   async function detectOllamaModels() {
     setOllamaNotice(null);
@@ -347,12 +407,13 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                 <Shield className="mt-0.5 h-4 w-4 shrink-0" />
                 <div>
                   <strong>Security:</strong> the Gemini key is currently held in WebView localStorage and sent
-                  only to Google's official endpoint. Git tokens are never stored here; Source Control saves them
-                  through the operating system's protected credential store.
+                  only to Google's official endpoint. DeepSeek, OpenAI and Anthropic keys are written through Rust into the
+                  operating system's protected credential store and never returned to this interface; Ollama needs no key.
+                  Git tokens likewise live only in the OS credential store.
                 </div>
               </div>
 
-              <Card title="AI provider routing" desc="Gemini is the active provider today; future providers store only non-secret profile metadata until native adapters exist.">
+              <Card title="AI provider routing" desc="Gemini, Ollama (local), DeepSeek, OpenAI and Anthropic route through native adapters inside the desktop app; the custom endpoint profile stores non-secret metadata only until its adapter exists.">
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                   {AI_PROVIDER_PROFILES.map((profile) => (
                     <button key={profile.id} onClick={() => update({ aiProvider: profile.id as AiProviderId })}
@@ -389,14 +450,58 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                   </dl>
                 </div>
 
-                {s.aiProvider === "deepseek" && (
-                  <label className="mt-3 block text-[12px] text-zinc-400">
-                    DeepSeek model id
-                    <input value={s.deepseekModel} onChange={(e) => update({ deepseekModel: e.target.value })}
-                      placeholder="deepseek-chat or deepseek-reasoner"
-                      className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
-                    <span className="mt-1 block text-[11px] text-amber-300/80">Stored as non-secret roadmap metadata only; no DeepSeek request is sent yet.</span>
-                  </label>
+                {cloudProvider && (
+                  <div className="mt-3 space-y-3">
+                    <label className="block text-[12px] text-zinc-400">
+                      {providerProfile.shortName} model id
+                      <input
+                        value={cloudProvider === "deepseek" ? s.deepseekModel : cloudProvider === "openai" ? s.openaiModel : s.anthropicModel}
+                        onChange={(e) => update(cloudProvider === "deepseek" ? { deepseekModel: e.target.value } : cloudProvider === "openai" ? { openaiModel: e.target.value } : { anthropicModel: e.target.value })}
+                        placeholder={providerProfile.modelExamples.join(", ")}
+                        className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                      <span className="mt-1 block text-[11px] text-zinc-500">Non-secret preference. Requests go only to {providerProfile.transport.match(/fixed host ([^ ]+)/)?.[1] ?? "the provider's fixed host"}; the model id is validated by Rust before sending.</span>
+                    </label>
+                    <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3">
+                      <div className="flex items-center justify-between gap-2 text-[12px]">
+                        <span className="inline-flex items-center gap-1.5 font-semibold text-zinc-200"><KeyRound className="h-3.5 w-3.5 text-cyan-300" /> {providerProfile.shortName} API key</span>
+                        <span className={`text-[11px] ${cloudStatus?.configured ? "text-emerald-300" : "text-zinc-500"}`}>
+                          {!cloudAdapterAvailable() ? "desktop app only" : cloudStatus ? (cloudStatus.configured ? `stored in ${cloudStatus.backend}` : "not stored") : "checking…"}
+                        </span>
+                      </div>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <div className="relative min-w-[220px] flex-1">
+                          <input
+                            type={cloudKeyShow ? "text" : "password"}
+                            value={cloudKeyInput}
+                            onChange={(e) => setCloudKeyInput(e.target.value)}
+                            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void storeCloudKey(); } }}
+                            autoComplete="off"
+                            spellCheck={false}
+                            placeholder={cloudStatus?.configured ? "Enter a new key to replace the stored one" : "Paste the API key"}
+                            className="w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2 pr-9 font-mono text-[12.5px] text-zinc-100 outline-none focus:border-cyan-500/50"
+                          />
+                          <button type="button" onClick={() => setCloudKeyShow((v) => !v)} className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-200" aria-label={cloudKeyShow ? "Hide key" : "Show key"}>
+                            {cloudKeyShow ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                          </button>
+                        </div>
+                        <button type="button" onClick={() => { void storeCloudKey(); }} disabled={cloudBusy || !cloudKeyInput.trim()}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/20 disabled:opacity-40">
+                          <Save className="h-3.5 w-3.5" /> Store in OS credential store
+                        </button>
+                        <button type="button" onClick={() => { void deleteCloudKey(); }} disabled={cloudBusy || !cloudStatus?.configured}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-white/5 disabled:opacity-40">
+                          <Trash2 className="h-3.5 w-3.5" /> Remove
+                        </button>
+                      </div>
+                      <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+                        The key is written once through Rust into the operating-system credential store and is never returned to this interface, logged, or persisted in localStorage or recovery snapshots. Rust attaches it only to HTTPS requests for {cloudStatus?.host ?? "the provider's fixed host"}.
+                      </p>
+                      {cloudNotice && <div className={`mt-2 text-[11.5px] ${cloudNotice.kind === "ok" ? "text-emerald-300" : "text-rose-300"}`}>{cloudNotice.text}</div>}
+                    </div>
+                    <p className="text-[11px] text-zinc-500">
+                      Chat, planning, coding, architecture, migration and repair run through the native adapter with a 120 s non-streamed bound per reply and no fallback to Gemini. Vision stays on Gemini.
+                    </p>
+                  </div>
                 )}
                 {s.aiProvider === "ollama" && (
                   <div className="mt-3 space-y-2">
@@ -684,6 +789,13 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
       </div>
     </div>
   );
+}
+
+function nativeErrorText(error: unknown): string {
+  if (error && typeof error === "object" && "message" in error && typeof (error as { message: unknown }).message === "string") {
+    return (error as { message: string }).message;
+  }
+  return String(error);
 }
 
 function Card({ title, desc, children }: { title: string; desc: string; children: React.ReactNode }) {

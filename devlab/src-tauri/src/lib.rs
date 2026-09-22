@@ -1,4 +1,5 @@
 mod agent_tools;
+mod ai_providers;
 mod audit;
 mod credentials;
 mod database;
@@ -13,6 +14,7 @@ mod toolchain;
 mod workspace;
 
 use agent_tools::{agent_tools_record_context, agent_tools_record_draft};
+use ai_providers::{ai_credential_delete, ai_credential_status, ai_credential_store, ai_provider_chat};
 use audit::{agent_audit_list, AgentAuditService};
 use credentials::{git_credential_delete, git_credential_status, git_credential_store};
 use database::{
@@ -81,6 +83,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
             "agent-tools",
             "toolchain",
             "local-ai",
+            "ai-providers",
         ],
     }
 }
@@ -166,6 +169,10 @@ pub fn run() {
             http_request,
             ollama_list_models,
             ollama_chat,
+            ai_credential_status,
+            ai_credential_store,
+            ai_credential_delete,
+            ai_provider_chat,
             test_runner_snapshot,
             test_runner_run,
             toolchain_snapshot,
