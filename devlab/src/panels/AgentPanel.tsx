@@ -511,6 +511,20 @@ export function AgentPanel({
                     </div>
                     <div className="mt-1 truncate font-mono text-[10.5px] text-zinc-500">{event.target}</div>
                     <div className="mt-1 text-zinc-300/80">{event.summary}</div>
+                    <details className="mt-1.5 rounded-lg border border-white/5 bg-white/[0.02] px-2 py-1 text-[10.5px] text-zinc-500">
+                      <summary className="cursor-pointer select-none text-zinc-400 hover:text-zinc-200">Metadata details</summary>
+                      <dl className="mt-1.5 grid gap-x-3 gap-y-1 sm:grid-cols-[5.5rem_1fr]">
+                        <dt>Audit ID</dt><dd className="font-mono text-zinc-300">{event.id}</dd>
+                        <dt>Timestamp</dt><dd className="font-mono text-zinc-300">{auditFullTime(event.timestampMs)}</dd>
+                        <dt>Workspace</dt><dd className="truncate font-mono text-zinc-300">{event.workspaceName ?? "workspace not recorded"}</dd>
+                        <dt>Kind</dt><dd className="font-mono text-zinc-300">{event.kind}</dd>
+                        <dt>Action</dt><dd className="font-mono text-zinc-300">{event.action}</dd>
+                        <dt>Outcome</dt><dd className="font-mono text-zinc-300">{event.outcome}</dd>
+                        <dt>Target</dt><dd className="break-all font-mono text-zinc-300">{event.target}</dd>
+                        <dt>Summary</dt><dd className="break-words text-zinc-300">{event.summary}</dd>
+                      </dl>
+                      <div className="mt-1.5 text-zinc-600">Metadata only — file contents, captured outputs and credentials are not included.</div>
+                    </details>
                   </div>
                 ))}
                 {!auditError && visibleAuditEvents.length > 0 && auditEvents.length > visibleAuditEvents.length && (
@@ -723,6 +737,17 @@ function isAgentRelevantAudit(event: AgentAuditEvent): boolean {
 
 function auditTime(timestampMs: number): string {
   return new Date(timestampMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function auditFullTime(timestampMs: number): string {
+  return new Date(timestampMs).toLocaleString([], {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }
 
 function auditTone(outcome: string): string {

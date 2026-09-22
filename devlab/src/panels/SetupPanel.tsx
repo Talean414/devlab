@@ -97,13 +97,13 @@ const PHASES: readonly MigrationPhase[] = [
     n: 5,
     title: "Docker, databases and native HTTP",
     status: "complete",
-    detail: "Docker, SQLite, PostgreSQL and native HTTP are complete. Phase 6 now has bounded test execution, reviewed repair drafts, explicit reviewed-draft application, native audit metadata, permission-gated multi-file draft staging, reviewed draft diff inspection, unified generated-draft staging across generators, AI Agent reviewed draft extraction, read-only workspace file context, audited context metadata, refreshable Agent context revisions, a native context file browser and searchable Agent audit activity; broader agent patch tools are next.",
+    detail: "Docker, SQLite, PostgreSQL and native HTTP are complete. Phase 6 now has bounded test execution, reviewed repair drafts, explicit reviewed-draft application, native audit metadata, permission-gated multi-file draft staging, reviewed draft diff inspection, unified generated-draft staging across generators, AI Agent reviewed draft extraction, read-only workspace file context, audited context metadata, refreshable Agent context revisions, a native context file browser and searchable Agent audit activity with metadata details; broader agent patch tools are next.",
   },
   {
     n: 6,
     title: "Agent tool execution",
     status: "active",
-    detail: "Bounded native test execution, reviewed in-memory repair drafts, explicit draft application, native audit metadata, permission-gated multi-file draft staging, draft diff inspection, unified generator staging, AI Agent reviewed draft extraction, read-only workspace context, audited context metadata, explicit context refresh, a native context browser and searchable Agent audit visibility are implemented first. Broader agent patch tools and Ollama support follow.",
+    detail: "Bounded native test execution, reviewed in-memory repair drafts, explicit draft application, native audit metadata, permission-gated multi-file draft staging, draft diff inspection, unified generator staging, AI Agent reviewed draft extraction, read-only workspace context, audited context metadata, explicit context refresh, a native context browser and searchable Agent audit visibility with event metadata details are implemented first. Broader agent patch tools and Ollama support follow.",
   },
   {
     n: 7,
