@@ -145,6 +145,7 @@ export function EditorPanel({
   const [verificationNotice, setVerificationNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const [diffChangeCount, setDiffChangeCount] = useState<number | null>(null);
   const [diffNavigationNotice, setDiffNavigationNotice] = useState("");
+  const [draftReviewShortcutNotice, setDraftReviewShortcutNotice] = useState("");
   const ignoredEvents = useRef(new Map<string, number>());
   const eventTimer = useRef<number | null>(null);
   const reviewedDiffEditorRef = useRef<MonacoDiffEditor | null>(null);
@@ -224,6 +225,7 @@ export function EditorPanel({
       setVerificationNotice(null);
       setDiffChangeCount(null);
       setDiffNavigationNotice("");
+      setDraftReviewShortcutNotice("");
       return;
     }
     setDraftReviewFilter("all");
@@ -236,6 +238,7 @@ export function EditorPanel({
     setVerificationNotice(null);
     setDiffChangeCount(null);
     setDiffNavigationNotice("");
+    setDraftReviewShortcutNotice("");
     setDraftReviewOpen(true);
   }, [incomingDrafts]);
 
@@ -261,25 +264,71 @@ export function EditorPanel({
     refreshReviewedDiffChangeCount(editor);
   }, [refreshReviewedDiffChangeCount]);
 
-  const navigateReviewedDiffChange = useCallback((target: DiffNavigationTarget) => {
+  const navigateReviewedDiffChange = useCallback((target: DiffNavigationTarget): boolean => {
     const editor = reviewedDiffEditorRef.current;
     if (!editor) {
       setDiffNavigationNotice("Diff navigation is still initializing. The reviewed draft remains read-only.");
-      return;
+      return false;
     }
     const lineChanges = editor.getLineChanges();
     if (lineChanges) setDiffChangeCount(lineChanges.length);
     if (lineChanges && lineChanges.length === 0) {
       setDiffNavigationNotice("No Monaco change blocks are available for this reviewed draft.");
-      return;
+      return false;
     }
     editor.goToDiff(target);
     setDiffNavigationNotice(`${target === "next" ? "Next" : "Previous"} change selected in the read-only diff. Apply still requires the explicit reviewed-draft button.`);
+    return true;
   }, []);
+
+  const moveSelectedDraftInFilteredQueue = useCallback((direction: DiffNavigationTarget) => {
+    if (filteredDraftEntries.length === 0) {
+      setDraftReviewShortcutNotice("No reviewed drafts match the current filter. Change filters to continue reviewing.");
+      return;
+    }
+    const currentPosition = filteredDraftEntries.findIndex((file) => file.index === draftIndex);
+    const nextPosition = currentPosition >= 0
+      ? (currentPosition + (direction === "next" ? 1 : -1) + filteredDraftEntries.length) % filteredDraftEntries.length
+      : 0;
+    const nextDraft = filteredDraftEntries[nextPosition];
+    if (!nextDraft) return;
+    setDraftIndex(nextDraft.index);
+    setDraftReviewShortcutNotice(`${direction === "next" ? "Next" : "Previous"} reviewed draft selected in the ${activeDraftReviewFilter?.label ?? "current"} filter. Apply still requires the explicit reviewed-draft button.`);
+  }, [activeDraftReviewFilter?.label, draftIndex, filteredDraftEntries]);
+
+  useEffect(() => {
+    if (!draftReviewOpen) return;
+    function handleReviewedDraftShortcuts(event: KeyboardEvent) {
+      if (!event.altKey || event.ctrlKey || event.metaKey || isReviewShortcutTextEntryTarget(event.target)) return;
+      const key = event.key.toLowerCase();
+      if (key === "n") {
+        event.preventDefault();
+        const moved = navigateReviewedDiffChange("next");
+        setDraftReviewShortcutNotice(moved
+          ? "Keyboard shortcut Alt+N moved to the next read-only diff change. Apply still requires the explicit reviewed-draft button."
+          : "Keyboard shortcut Alt+N requested the next read-only diff change. See the diff notice above; apply still requires the explicit reviewed-draft button.");
+      } else if (key === "p") {
+        event.preventDefault();
+        const moved = navigateReviewedDiffChange("previous");
+        setDraftReviewShortcutNotice(moved
+          ? "Keyboard shortcut Alt+P moved to the previous read-only diff change. Apply still requires the explicit reviewed-draft button."
+          : "Keyboard shortcut Alt+P requested the previous read-only diff change. See the diff notice above; apply still requires the explicit reviewed-draft button.");
+      } else if (key === "j") {
+        event.preventDefault();
+        moveSelectedDraftInFilteredQueue("next");
+      } else if (key === "k") {
+        event.preventDefault();
+        moveSelectedDraftInFilteredQueue("previous");
+      }
+    }
+    window.addEventListener("keydown", handleReviewedDraftShortcuts);
+    return () => window.removeEventListener("keydown", handleReviewedDraftShortcuts);
+  }, [draftReviewOpen, moveSelectedDraftInFilteredQueue, navigateReviewedDiffChange]);
 
   useEffect(() => {
     setDiffChangeCount(null);
     setDiffNavigationNotice("");
+    setDraftReviewShortcutNotice("");
   }, [selectedDraftKey]);
 
   useEffect(() => () => {
@@ -1239,6 +1288,14 @@ export function EditorPanel({
                   <p className="mt-2 text-[10px] leading-relaxed text-zinc-600">
                     Filters are session-only UI state. They hide or show draft rows for review but do not change generated content, write files, run commands or alter apply requirements.
                   </p>
+                  <div className="mt-2 rounded-lg border border-white/10 bg-white/[0.025] px-2 py-1.5 text-[10px] leading-relaxed text-zinc-500">
+                    Keyboard shortcuts: <span className="font-mono text-zinc-300">Alt+N/P</span> move between read-only diff changes; <span className="font-mono text-zinc-300">Alt+J/K</span> move through visible drafts in this filter. Shortcuts are ignored while typing notes and never apply files.
+                  </div>
+                  {draftReviewShortcutNotice && (
+                    <div className="mt-2 text-[10px] leading-relaxed text-violet-200/75">
+                      {draftReviewShortcutNotice}
+                    </div>
+                  )}
                 </div>
                 <div className="mt-3 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.05] p-3 text-[11px] text-emerald-100/75">
                   <div className="flex items-center gap-2 font-semibold text-emerald-100">
@@ -1979,6 +2036,12 @@ function draftStatusClass(status?: DraftInspectionStatus): string {
     default:
       return "bg-white/[0.02]";
   }
+}
+
+function isReviewShortcutTextEntryTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tagName = target.tagName.toLowerCase();
+  return target.isContentEditable || tagName === "input" || tagName === "textarea" || tagName === "select";
 }
 
 function draftReviewAnnotationStatusLabel(status: ReviewedDraftAnnotationStatus): string {
