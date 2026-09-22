@@ -86,6 +86,23 @@ const EXTENSION_LABELS: Record<string, string> = {
   prisma: "Prisma",
 };
 
+const SOURCE_DIRECTORY_SEGMENTS = new Set([
+  "src", "app", "pages", "components", "views", "screens", "routes", "lib", "hooks", "stores", "styles",
+]);
+
+const BACKEND_DIRECTORY_SEGMENTS = new Set([
+  "api", "server", "services", "controllers", "handlers", "routes", "middleware", "workers", "jobs", "cmd", "internal",
+]);
+
+const TEST_DIRECTORY_SEGMENTS = new Set([
+  "test", "tests", "__tests__", "spec", "specs", "e2e", "integration", "unit", "fixtures",
+]);
+
+const DATA_DIRECTORY_SEGMENTS = new Set([
+  "db", "database", "migrations", "prisma", "schema", "schemas", "models", "entities", "repositories",
+]);
+
+
 export async function buildRepoMap(
   limits: Partial<RepoMapLimits> = {},
 ): Promise<RepoMapSnapshot> {
@@ -198,6 +215,9 @@ export function renderRepoMap(snapshot: RepoMapSnapshot): string {
     for (const file of snapshot.importantFiles) lines.push(`- ${file.path} (${formatBytes(file.size ?? 0)})`);
   }
 
+  lines.push("", "## Context focus suggestions");
+  for (const suggestion of repoMapFocusSuggestions(snapshot)) lines.push(suggestion);
+
   lines.push("", "## Workspace tree", "- .");
   for (const entry of snapshot.entries) {
     const indent = "  ".repeat(Math.min(entry.depth + 1, snapshot.limits.maxDepth + 2));
@@ -230,6 +250,101 @@ export function renderRepoMap(snapshot: RepoMapSnapshot): string {
     "",
     "[DevLab repo map truncated to the configured context-character budget.]",
   ].join("\n");
+}
+
+function repoMapFocusSuggestions(snapshot: RepoMapSnapshot): string[] {
+  const suggestions: string[] = [
+    "- Metadata-only: these are path and size hints, not file-content evidence. Attach specific files before reasoning about implementation details.",
+  ];
+  const manifests = snapshot.importantFiles
+    .filter((file) => isManifestOrConfig(file))
+    .slice(0, 8)
+    .map((file) => file.path);
+  if (manifests.length > 0) {
+    suggestions.push(`- Start with manifests/configs for stack orientation: ${formatPathList(manifests)}.`);
+  }
+
+  const sourceDirs = focusDirectories(snapshot, SOURCE_DIRECTORY_SEGMENTS, 10);
+  if (sourceDirs.length > 0) suggestions.push(`- Source/UI directories visible: ${formatPathList(sourceDirs)}.`);
+
+  const backendDirs = focusDirectories(snapshot, BACKEND_DIRECTORY_SEGMENTS, 10);
+  if (backendDirs.length > 0) suggestions.push(`- Backend/service directories visible: ${formatPathList(backendDirs)}.`);
+
+  const testDirs = focusDirectories(snapshot, TEST_DIRECTORY_SEGMENTS, 8);
+  const testFiles = focusFiles(snapshot, isTestLikeFile, 8);
+  if (testDirs.length > 0 || testFiles.length > 0) {
+    suggestions.push(`- Test/check metadata visible: ${formatPathList([...testDirs, ...testFiles].slice(0, 10))}.`);
+  }
+
+  const dataDirs = focusDirectories(snapshot, DATA_DIRECTORY_SEGMENTS, 8);
+  const dataFiles = focusFiles(snapshot, isDataLikeFile, 8);
+  if (dataDirs.length > 0 || dataFiles.length > 0) {
+    suggestions.push(`- Data/schema/migration metadata visible: ${formatPathList([...dataDirs, ...dataFiles].slice(0, 10))}.`);
+  }
+
+  const topTypes = snapshot.languageCounts.slice(0, 5).map((item) => EXTENSION_LABELS[item.extension] ?? item.extension.toUpperCase());
+  if (topTypes.length > 0) suggestions.push(`- Dominant listed file types: ${topTypes.join(", ")}. Use this only for routing context; inspect files for actual APIs.`);
+
+  if (snapshot.truncated) {
+    suggestions.push("- Map is truncated; refresh with narrower context or attach known files if a relevant path is missing from the visible metadata.");
+  }
+
+  return suggestions;
+}
+
+function focusDirectories(snapshot: RepoMapSnapshot, segments: Set<string>, limit: number): string[] {
+  const seen = new Set<string>();
+  const matches: string[] = [];
+  for (const entry of snapshot.entries) {
+    if (entry.kind !== "directory") continue;
+    if (!pathHasSegment(entry.path, segments)) continue;
+    if (seen.has(entry.path)) continue;
+    seen.add(entry.path);
+    matches.push(`${entry.path}/`);
+    if (matches.length >= limit) break;
+  }
+  return matches;
+}
+
+function focusFiles(snapshot: RepoMapSnapshot, predicate: (entry: RepoMapEntry) => boolean, limit: number): string[] {
+  const matches: string[] = [];
+  for (const entry of snapshot.entries) {
+    if (entry.kind !== "file") continue;
+    if (!predicate(entry)) continue;
+    matches.push(entry.path);
+    if (matches.length >= limit) break;
+  }
+  return matches;
+}
+
+function pathHasSegment(path: string, segments: Set<string>): boolean {
+  return path.split("/").some((segment) => segments.has(segment.toLowerCase()));
+}
+
+function isManifestOrConfig(file: RepoMapEntry): boolean {
+  return IMPORTANT_FILE_NAMES.has(file.name) || /(^|\/)(vite|next|nuxt|svelte|astro|tailwind|eslint|biome|tsconfig|package|cargo|go\.mod|pyproject|docker-compose)/i.test(file.path);
+}
+
+function isTestLikeFile(file: RepoMapEntry): boolean {
+  const lower = file.path.toLowerCase();
+  return /(^|\/)(test|tests|__tests__|spec|specs|e2e|integration|unit)(\/|$)/.test(lower)
+    || /\.(test|spec)\.[cm]?[jt]sx?$/.test(lower)
+    || lower.endsWith("pytest.ini")
+    || lower.endsWith("playwright.config.ts")
+    || lower.endsWith("vitest.config.ts");
+}
+
+function isDataLikeFile(file: RepoMapEntry): boolean {
+  const lower = file.path.toLowerCase();
+  return pathHasSegment(lower, DATA_DIRECTORY_SEGMENTS)
+    || lower.endsWith("schema.prisma")
+    || lower.endsWith(".sql")
+    || lower.includes("migration");
+}
+
+function formatPathList(paths: string[]): string {
+  if (paths.length === 0) return "none within current bounds";
+  return paths.join(", ");
 }
 
 function normalizeLimits(limits: Partial<RepoMapLimits>): RepoMapLimits {
