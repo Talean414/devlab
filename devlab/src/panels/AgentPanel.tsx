@@ -345,9 +345,9 @@ export function AgentPanel({
     }
   }
 
-  async function copyDraftManifest(message: ChatMessage, drafts: VFile[]) {
+  async function copyDraftManifest(message: ChatMessage, report: AgentDraftExtractionReport) {
     setDraftManifestNotice(null);
-    if (drafts.length === 0) {
+    if (report.totalFences === 0) {
       setDraftManifestNotice({ messageId: message.id, kind: "error", text: "No reviewed-draft metadata is available to copy." });
       return;
     }
@@ -356,8 +356,13 @@ export function AgentPanel({
       return;
     }
     try {
-      await navigator.clipboard.writeText(buildAgentDraftManifestExport(drafts, message));
-      setDraftManifestNotice({ messageId: message.id, kind: "ok", text: `Copied metadata for ${drafts.length} reviewed draft${drafts.length === 1 ? "" : "s"}.` });
+      await navigator.clipboard.writeText(buildAgentDraftManifestExport(report, message));
+      const draftCount = report.drafts.length;
+      setDraftManifestNotice({
+        messageId: message.id,
+        kind: "ok",
+        text: `Copied metadata for ${draftCount} reviewed draft${draftCount === 1 ? "" : "s"}${report.skipped.length > 0 ? ` plus ${report.skipped.length} extraction diagnostic${report.skipped.length === 1 ? "" : "s"}` : ""}.`,
+      });
     } catch (error) {
       setDraftManifestNotice({ messageId: message.id, kind: "error", text: `Could not copy draft metadata: ${formatContextError(error)}` });
     }
@@ -428,8 +433,11 @@ export function AgentPanel({
         )}
 
         {messages.map((m) => {
-          const draftFiles = m.role === "model" ? extractAgentDrafts(m.content) : [];
-          const draftSummary = draftFiles.length > 0 ? summarizeAgentDrafts(draftFiles) : null;
+          const draftReport = m.role === "model" ? extractAgentDraftReport(m.content) : null;
+          const draftFiles = draftReport?.drafts ?? [];
+          const draftSummary = draftReport && draftFiles.length > 0 ? summarizeAgentDrafts(draftFiles) : null;
+          const draftDiagnostics = draftReport ? summarizeDraftIssues(draftReport) : [];
+          const shouldShowDraftReport = !!draftSummary || !!(draftReport && hasSignificantDraftDiagnostics(draftReport));
           return (
           <div
             key={m.id}
@@ -452,41 +460,62 @@ export function AgentPanel({
               ) : m.content ? (
                 <>
                   <Markdown text={m.content} />
-                  {draftSummary && (
+                  {shouldShowDraftReport && draftReport && (
                     <div className="mt-3 rounded-xl border border-violet-500/20 bg-violet-500/[0.06] p-3 text-[11.5px] text-violet-100/80">
                       <div className="flex items-center gap-2">
                         <FileCode2 className="h-3.5 w-3.5 text-violet-300" />
                         <span className="min-w-0 flex-1">
-                          {draftSummary.fileCount} labeled file draft{draftSummary.fileCount === 1 ? "" : "s"} detected · {formatBytes(draftSummary.totalBytes)} total. Nothing has been written.
+                          {draftSummary
+                            ? `${draftSummary.fileCount} labeled file draft${draftSummary.fileCount === 1 ? "" : "s"} detected · ${formatBytes(draftSummary.totalBytes)} total. Nothing has been written.`
+                            : `No stageable reviewed drafts detected. ${draftDiagnostics.length} extraction diagnostic${draftDiagnostics.length === 1 ? "" : "s"} available.`}
                         </span>
                         <button
-                          onClick={() => void copyDraftManifest(m, draftFiles)}
+                          onClick={() => void copyDraftManifest(m, draftReport)}
                           className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-[11px] font-semibold text-violet-100 hover:bg-white/[0.08]"
                           title="Copy metadata-only draft manifest"
                         >
                           Copy manifest
                         </button>
-                        <button
-                          onClick={() => void stageDraftsFromMessage(m, draftFiles)}
-                          disabled={!!stagingMessageId}
-                          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-violet-400/40 bg-violet-400/10 px-2.5 py-1.5 text-[11px] font-semibold text-violet-100 hover:bg-violet-400/20 disabled:opacity-40"
-                        >
-                          {stagingMessageId === m.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArrowRight className="h-3 w-3" />}
-                          Open reviewed drafts
-                        </button>
+                        {draftSummary && (
+                          <button
+                            onClick={() => void stageDraftsFromMessage(m, draftFiles)}
+                            disabled={!!stagingMessageId}
+                            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-violet-400/40 bg-violet-400/10 px-2.5 py-1.5 text-[11px] font-semibold text-violet-100 hover:bg-violet-400/20 disabled:opacity-40"
+                          >
+                            {stagingMessageId === m.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArrowRight className="h-3 w-3" />}
+                            Open reviewed drafts
+                          </button>
+                        )}
                       </div>
                       <details className="mt-2 rounded-lg border border-violet-400/10 bg-black/10 px-2 py-1.5">
                         <summary className="cursor-pointer select-none text-[11px] font-semibold text-violet-100/80 hover:text-violet-50">Draft manifest metadata</summary>
-                        <div className="mt-2 space-y-1.5">
-                          {draftSummary.files.map((file) => (
-                            <div key={file.path} className="grid gap-1 rounded-md border border-white/5 bg-black/15 px-2 py-1.5 text-[10.5px] sm:grid-cols-[1fr_auto_auto_auto]">
-                              <span className="truncate font-mono text-violet-100/80">{file.path}</span>
-                              <span className="font-mono text-violet-100/50">{file.language}</span>
-                              <span className="font-mono text-violet-100/50">{formatBytes(file.bytes)}</span>
-                              <span className="font-mono text-violet-100/50">{file.lines} line{file.lines === 1 ? "" : "s"}</span>
-                            </div>
-                          ))}
+                        {draftSummary && (
+                          <div className="mt-2 space-y-1.5">
+                            {draftSummary.files.map((file) => (
+                              <div key={file.path} className="grid gap-1 rounded-md border border-white/5 bg-black/15 px-2 py-1.5 text-[10.5px] sm:grid-cols-[1fr_auto_auto_auto]">
+                                <span className="truncate font-mono text-violet-100/80">{file.path}</span>
+                                <span className="font-mono text-violet-100/50">{file.language}</span>
+                                <span className="font-mono text-violet-100/50">{formatBytes(file.bytes)}</span>
+                                <span className="font-mono text-violet-100/50">{file.lines} line{file.lines === 1 ? "" : "s"}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <div className="mt-2 rounded-md border border-white/5 bg-black/15 px-2 py-1.5 text-[10.5px] text-violet-100/55">
+                          Scanned {draftReport.totalFences} fenced block{draftReport.totalFences === 1 ? "" : "s"}; accepted {draftReport.drafts.length}; ignored {draftReport.skipped.length}.
+                          {draftReport.stoppedByFileLimit && ` File limit ${MAX_AGENT_DRAFT_FILES} reached.`}
+                          {draftReport.stoppedByByteLimit && ` Byte limit ${formatBytes(MAX_AGENT_DRAFT_BYTES)} reached.`}
                         </div>
+                        {draftDiagnostics.length > 0 && (
+                          <div className="mt-2 space-y-1">
+                            {draftDiagnostics.map((diagnostic) => (
+                              <div key={diagnostic.reason} className="flex items-center justify-between gap-3 rounded-md border border-white/5 bg-black/15 px-2 py-1 text-[10.5px] text-violet-100/60">
+                                <span>{diagnostic.label}</span>
+                                <span className="font-mono">{diagnostic.count}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                         <p className="mt-2 text-[10.5px] leading-relaxed text-violet-100/55">
                           Metadata only. Draft contents stay in memory until you open Editor review; workspace writes still require explicit per-file Apply.
                         </p>
@@ -877,6 +906,30 @@ interface AgentDraftSummary {
   files: AgentDraftManifestItem[];
 }
 
+type AgentDraftSkipReason = "empty" | "missing-path" | "unsafe-path" | "duplicate-path" | "file-limit" | "byte-limit";
+
+interface AgentDraftExtractionIssue {
+  reason: AgentDraftSkipReason;
+  label: string;
+  path?: string;
+  bytes?: number;
+}
+
+interface AgentDraftExtractionReport {
+  drafts: VFile[];
+  totalFences: number;
+  totalDraftBytes: number;
+  skipped: AgentDraftExtractionIssue[];
+  stoppedByFileLimit: boolean;
+  stoppedByByteLimit: boolean;
+}
+
+interface AgentDraftDiagnosticSummary {
+  reason: AgentDraftSkipReason;
+  label: string;
+  count: number;
+}
+
 function summarizeAgentDrafts(drafts: VFile[]): AgentDraftSummary {
   const files = drafts.map((draft) => ({
     path: draft.path,
@@ -891,8 +944,29 @@ function summarizeAgentDrafts(drafts: VFile[]): AgentDraftSummary {
   };
 }
 
-function buildAgentDraftManifestExport(drafts: VFile[], message: ChatMessage): string {
-  const summary = summarizeAgentDrafts(drafts);
+function summarizeDraftIssues(report: AgentDraftExtractionReport): AgentDraftDiagnosticSummary[] {
+  const counts = new Map<AgentDraftSkipReason, number>();
+  for (const issue of report.skipped) counts.set(issue.reason, (counts.get(issue.reason) ?? 0) + 1);
+  return Array.from(counts, ([reason, count]) => ({ reason, count, label: draftIssueLabel(reason) }));
+}
+
+function hasSignificantDraftDiagnostics(report: AgentDraftExtractionReport): boolean {
+  return report.skipped.some((issue) => !["missing-path", "empty"].includes(issue.reason));
+}
+
+function draftIssueLabel(reason: AgentDraftSkipReason): string {
+  switch (reason) {
+    case "empty": return "Empty fenced block ignored";
+    case "missing-path": return "Fenced block without file path ignored";
+    case "unsafe-path": return "Unsafe workspace path ignored";
+    case "duplicate-path": return "Duplicate workspace path ignored";
+    case "file-limit": return "Draft file-count limit ignored extra block";
+    case "byte-limit": return "Draft byte limit ignored extra block";
+  }
+}
+
+function buildAgentDraftManifestExport(report: AgentDraftExtractionReport, message: ChatMessage): string {
+  const summary = summarizeAgentDrafts(report.drafts);
   return JSON.stringify({
     label: "DevLab AI Agent reviewed-draft manifest",
     generatedAt: new Date().toISOString(),
@@ -903,6 +977,14 @@ function buildAgentDraftManifestExport(drafts: VFile[], message: ChatMessage): s
       maxFiles: MAX_AGENT_DRAFT_FILES,
       maxTotalBytes: MAX_AGENT_DRAFT_BYTES,
       maxPathBytes: MAX_AGENT_DRAFT_PATH_BYTES,
+    },
+    extraction: {
+      totalFences: report.totalFences,
+      acceptedFiles: report.drafts.length,
+      skippedBlocks: report.skipped.length,
+      skippedByReason: Object.fromEntries(summarizeDraftIssues(report).map((item) => [item.reason, item.count])),
+      stoppedByFileLimit: report.stoppedByFileLimit,
+      stoppedByByteLimit: report.stoppedByByteLimit,
     },
     fileCount: summary.fileCount,
     totalBytes: summary.totalBytes,
@@ -916,29 +998,57 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(2)} MiB`;
 }
 
-function extractAgentDrafts(markdown: string): VFile[] {
+function extractAgentDraftReport(markdown: string): AgentDraftExtractionReport {
   const drafts: VFile[] = [];
+  const skipped: AgentDraftExtractionIssue[] = [];
   const seen = new Set<string>();
   const encoder = new TextEncoder();
-  let totalBytes = 0;
+  let totalDraftBytes = 0;
   let lastFenceEnd = 0;
+  let totalFences = 0;
+  let stoppedByFileLimit = false;
+  let stoppedByByteLimit = false;
   const fence = /```([^\n`]*)\n([\s\S]*?)```/g;
   let match: RegExpExecArray | null;
-  while ((match = fence.exec(markdown)) && drafts.length < MAX_AGENT_DRAFT_FILES) {
+  while ((match = fence.exec(markdown))) {
+    totalFences += 1;
     const info = match[1]?.trim() ?? "";
     const content = trimFenceContent(match[2] ?? "");
     const before = markdown.slice(lastFenceEnd, match.index);
     lastFenceEnd = fence.lastIndex;
-    if (!content.trim()) continue;
+    if (!content.trim()) {
+      skipped.push({ reason: "empty", label: draftIssueLabel("empty") });
+      continue;
+    }
     const path = extractDraftPath(info, before);
-    if (!path || !validDraftPath(path) || seen.has(path)) continue;
+    if (!path) {
+      skipped.push({ reason: "missing-path", label: draftIssueLabel("missing-path") });
+      continue;
+    }
+    if (!validDraftPath(path)) {
+      skipped.push({ reason: "unsafe-path", label: draftIssueLabel("unsafe-path"), path });
+      continue;
+    }
+    if (seen.has(path)) {
+      skipped.push({ reason: "duplicate-path", label: draftIssueLabel("duplicate-path"), path });
+      continue;
+    }
     const bytes = encoder.encode(content).length;
-    if (totalBytes + bytes > MAX_AGENT_DRAFT_BYTES) break;
+    if (drafts.length >= MAX_AGENT_DRAFT_FILES) {
+      stoppedByFileLimit = true;
+      skipped.push({ reason: "file-limit", label: draftIssueLabel("file-limit"), path, bytes });
+      continue;
+    }
+    if (totalDraftBytes + bytes > MAX_AGENT_DRAFT_BYTES) {
+      stoppedByByteLimit = true;
+      skipped.push({ reason: "byte-limit", label: draftIssueLabel("byte-limit"), path, bytes });
+      continue;
+    }
     seen.add(path);
-    totalBytes += bytes;
+    totalDraftBytes += bytes;
     drafts.push({ path, content, language: languageForDraftPath(path, info) });
   }
-  return drafts;
+  return { drafts, totalFences, totalDraftBytes, skipped, stoppedByFileLimit, stoppedByByteLimit };
 }
 
 function extractDraftPath(info: string, beforeFence: string): string | null {
