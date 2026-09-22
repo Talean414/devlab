@@ -38,6 +38,13 @@ const MAX_AGENT_DRAFT_PATH_BYTES = 512;
 const MAX_AGENT_CONTEXT_FILES = 4;
 const MAX_AGENT_CONTEXT_CHARS = 16 * 1024;
 const MAX_AGENT_CONTEXT_TOTAL_CHARS = 48 * 1024;
+type AgentAuditKindFilter = "all" | "agent-context" | "multi-file-draft" | "reviewed-draft";
+const AGENT_AUDIT_FILTERS: { value: AgentAuditKindFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "agent-context", label: "Context" },
+  { value: "multi-file-draft", label: "Draft staging" },
+  { value: "reviewed-draft", label: "Reviewed writes" },
+];
 
 export function AgentPanel({
   onNeedKey,
@@ -81,6 +88,8 @@ export function AgentPanel({
   const [auditEvents, setAuditEvents] = useState<AgentAuditEvent[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState("");
+  const [auditKindFilter, setAuditKindFilter] = useState<AgentAuditKindFilter>("all");
+  const [auditQuery, setAuditQuery] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const recRef = useRef<SpeechRecognitionLike | null>(null);
   const hasKey = !!getApiKey();
@@ -125,8 +134,8 @@ export function AgentPanel({
     setAuditLoading(true);
     setAuditError("");
     try {
-      const events = await listAgentAudit(20);
-      setAuditEvents(events.filter(isAgentRelevantAudit).slice(0, 8));
+      const events = await listAgentAudit(50);
+      setAuditEvents(events.filter(isAgentRelevantAudit).slice(0, 24));
     } catch (error) {
       setAuditError(formatContextError(error));
     } finally {
@@ -327,6 +336,9 @@ export function AgentPanel({
     }
   }
 
+  const visibleAuditEvents = filterAgentAuditEvents(auditEvents, auditKindFilter, auditQuery).slice(0, 8);
+  const hasAuditFilters = auditKindFilter !== "all" || auditQuery.trim().length > 0;
+
   return (
     <div className="flex h-full flex-col">
       <PanelHeader
@@ -460,19 +472,50 @@ export function AgentPanel({
             </div>
             {auditOpen && (
               <div className="mt-2 space-y-1.5">
+                <div className="grid gap-2 sm:grid-cols-[9rem_1fr_auto]">
+                  <select
+                    value={auditKindFilter}
+                    onChange={(event) => setAuditKindFilter(event.target.value as AgentAuditKindFilter)}
+                    className="rounded-lg border border-white/10 bg-black/20 px-2 py-1.5 text-[11px] text-zinc-300 outline-none focus:border-cyan-500/40"
+                    aria-label="Filter Agent audit activity"
+                  >
+                    {AGENT_AUDIT_FILTERS.map((filter) => <option key={filter.value} value={filter.value}>{filter.label}</option>)}
+                  </select>
+                  <input
+                    value={auditQuery}
+                    onChange={(event) => setAuditQuery(event.target.value)}
+                    placeholder="Search target, summary or outcome"
+                    className="rounded-lg border border-white/10 bg-black/20 px-2 py-1.5 text-[11px] text-zinc-300 outline-none placeholder:text-zinc-600 focus:border-cyan-500/40"
+                  />
+                  {hasAuditFilters && (
+                    <button
+                      onClick={() => { setAuditKindFilter("all"); setAuditQuery(""); }}
+                      className="rounded-lg border border-white/10 px-2 py-1.5 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
                 {auditError && <div className="text-rose-300">{auditError}</div>}
                 {!auditError && auditEvents.length === 0 && <div className="text-zinc-600">No Agent audit events yet.</div>}
-                {!auditError && auditEvents.map((event) => (
+                {!auditError && auditEvents.length > 0 && visibleAuditEvents.length === 0 && (
+                  <div className="text-zinc-600">No matching Agent audit events.</div>
+                )}
+                {!auditError && visibleAuditEvents.map((event) => (
                   <div key={event.id} className="rounded-lg border border-white/10 bg-black/15 p-2">
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-[10.5px] text-zinc-500">{auditTime(event.timestampMs)}</span>
                       <span className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[10.5px] text-cyan-200">{event.kind}</span>
+                      <span className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[10.5px] text-zinc-400">{event.action}</span>
                       <span className={`ml-auto font-semibold ${auditTone(event.outcome)}`}>{event.outcome}</span>
                     </div>
                     <div className="mt-1 truncate font-mono text-[10.5px] text-zinc-500">{event.target}</div>
                     <div className="mt-1 text-zinc-300/80">{event.summary}</div>
                   </div>
                 ))}
+                {!auditError && visibleAuditEvents.length > 0 && auditEvents.length > visibleAuditEvents.length && (
+                  <div className="text-[10.5px] text-zinc-600">Showing {visibleAuditEvents.length} filtered metadata events from the latest {auditEvents.length} Agent-relevant audit records.</div>
+                )}
               </div>
             )}
           </div>
@@ -663,6 +706,16 @@ export function PanelHeader({
   );
 }
 
+
+function filterAgentAuditEvents(events: AgentAuditEvent[], kindFilter: AgentAuditKindFilter, query: string): AgentAuditEvent[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  return events.filter((event) => {
+    if (kindFilter !== "all" && event.kind !== kindFilter) return false;
+    if (!normalizedQuery) return true;
+    return [event.kind, event.action, event.target, event.outcome, event.summary]
+      .some((value) => value.toLowerCase().includes(normalizedQuery));
+  });
+}
 
 function isAgentRelevantAudit(event: AgentAuditEvent): boolean {
   return event.kind === "agent-context" || event.kind === "multi-file-draft" || event.kind === "reviewed-draft";
