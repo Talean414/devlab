@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import type { ChatMessage, OpenGeneratedDrafts, VFile } from "../types";
+import type { AgentContextFile, ChatMessage, OpenGeneratedDrafts, VFile } from "../types";
 import { Markdown } from "../components/CodeBlock";
 import { getApiKey, streamChat, getModel, type GenTurn } from "../lib/gemini";
-import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight } from "lucide-react";
+import { readWorkspaceFile } from "../lib/workspace";
+import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight, Paperclip, X } from "lucide-react";
 
 interface SpeechRecognitionLike {
   continuous: boolean;
@@ -32,10 +33,16 @@ const AGENT_DRAFT_FORMAT_HINT = `DevLab can stage complete generated files for r
 const MAX_AGENT_DRAFT_FILES = 12;
 const MAX_AGENT_DRAFT_BYTES = 512 * 1024;
 const MAX_AGENT_DRAFT_PATH_BYTES = 512;
+const MAX_AGENT_CONTEXT_FILES = 4;
+const MAX_AGENT_CONTEXT_CHARS = 16 * 1024;
+const MAX_AGENT_CONTEXT_TOTAL_CHARS = 48 * 1024;
 
 export function AgentPanel({
   onNeedKey,
   onOpenFiles,
+  canAttachWorkspace,
+  contextFiles,
+  setContextFiles,
   messages,
   setMessages,
   input,
@@ -45,6 +52,9 @@ export function AgentPanel({
 }: {
   onNeedKey: () => void;
   onOpenFiles: OpenGeneratedDrafts;
+  canAttachWorkspace: boolean;
+  contextFiles: AgentContextFile[];
+  setContextFiles: Dispatch<SetStateAction<AgentContextFile[]>>;
   messages: ChatMessage[];
   setMessages: Dispatch<SetStateAction<ChatMessage[]>>;
   input: string;
@@ -56,6 +66,8 @@ export function AgentPanel({
   const [stagingMessageId, setStagingMessageId] = useState<string | null>(null);
   const [stageNotice, setStageNotice] = useState("");
   const [stageError, setStageError] = useState("");
+  const [contextBusy, setContextBusy] = useState(false);
+  const [contextError, setContextError] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const recRef = useRef<SpeechRecognitionLike | null>(null);
   const hasKey = !!getApiKey();
@@ -109,8 +121,12 @@ export function AgentPanel({
     setInput("");
     setBusy(true);
 
+    const contextTurn = contextFiles.length > 0
+      ? [{ role: "user" as const, text: buildWorkspaceContext(contextFiles) }]
+      : [];
     const history: GenTurn[] = [
       { role: "user", text: AGENT_DRAFT_FORMAT_HINT },
+      ...contextTurn,
       ...[...messages, userMsg]
         .filter((m) => m.role !== "system")
         .map((m) => ({ role: m.role === "model" ? "model" as const : "user" as const, text: m.content })),
@@ -157,6 +173,59 @@ export function AgentPanel({
     }
   }
 
+  async function attachWorkspaceFile() {
+    if (!canAttachWorkspace) {
+      setContextError("Open DevLab in desktop mode and select a workspace before attaching file context.");
+      return;
+    }
+    if (contextFiles.length >= MAX_AGENT_CONTEXT_FILES) {
+      setContextError(`Attach at most ${MAX_AGENT_CONTEXT_FILES} workspace files at once.`);
+      return;
+    }
+    const path = prompt("Workspace file path to attach as read-only AI Agent context:");
+    const cleanPath = path?.trim();
+    if (!cleanPath) return;
+    if (!validDraftPath(cleanPath)) {
+      setContextError("Attach a safe workspace-relative file path. Absolute paths, traversal and backslashes are not allowed.");
+      return;
+    }
+    setContextBusy(true);
+    setContextError("");
+    try {
+      const document = await readWorkspaceFile(cleanPath);
+      const totalWithoutExisting = contextFiles
+        .filter((file) => file.path !== document.path)
+        .reduce((sum, file) => sum + file.content.length, 0);
+      const remaining = Math.max(0, MAX_AGENT_CONTEXT_TOTAL_CHARS - totalWithoutExisting);
+      if (remaining === 0) {
+        setContextError("Attached workspace context is at the total size limit. Remove a file before attaching another.");
+        return;
+      }
+      const limit = Math.min(MAX_AGENT_CONTEXT_CHARS, remaining);
+      const content = document.content.length > limit ? document.content.slice(0, limit) : document.content;
+      const contextFile: AgentContextFile = {
+        path: document.path,
+        content,
+        language: languageForPath(document.path),
+        revision: document.revision,
+        size: document.size,
+        truncated: content.length < document.content.length,
+      };
+      setContextFiles((current) => [
+        ...current.filter((file) => file.path !== contextFile.path),
+        contextFile,
+      ].slice(-MAX_AGENT_CONTEXT_FILES));
+    } catch (error) {
+      setContextError(formatContextError(error));
+    } finally {
+      setContextBusy(false);
+    }
+  }
+
+  function removeContextFile(path: string) {
+    setContextFiles((current) => current.filter((file) => file.path !== path));
+  }
+
   async function stageDraftsFromMessage(message: ChatMessage, drafts: VFile[]) {
     if (drafts.length === 0 || stagingMessageId) return;
     setStageNotice("");
@@ -192,7 +261,7 @@ export function AgentPanel({
             <h3 className="text-xl font-semibold text-white">Your autonomous coding agent</h3>
             <p className="mx-auto mt-2 max-w-md text-sm text-zinc-400">
               Ask it to scaffold projects, write CI pipelines, debug code or explain anything.
-              When a reply contains complete fenced files labeled with <span className="font-mono text-zinc-300">file=src/path</span>, DevLab can stage them for reviewed editor apply.
+              Attach read-only workspace files for context, then stage labeled complete file blocks through reviewed editor apply.
             </p>
             <div className="mt-7 grid gap-2.5 sm:grid-cols-2">
               {SUGGESTIONS.map((s) => (
@@ -285,7 +354,36 @@ export function AgentPanel({
       </div>
 
       <div className="border-t border-white/5 p-4">
+        {(contextFiles.length > 0 || contextError) && (
+          <div className="mb-2 rounded-xl border border-white/10 bg-white/[0.025] p-2.5 text-[11.5px]">
+            {contextFiles.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-zinc-500">Read-only workspace context:</span>
+                {contextFiles.map((file) => (
+                  <span key={file.path} className="inline-flex max-w-[18rem] items-center gap-1.5 rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-2 py-1 font-mono text-cyan-100/90">
+                    <FileCode2 className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{file.path}</span>
+                    {file.truncated && <span className="text-cyan-200/50">truncated</span>}
+                    <button onClick={() => removeContextFile(file.path)} className="rounded p-0.5 text-cyan-100/50 hover:bg-white/10 hover:text-white" aria-label={`Remove ${file.path}`}>
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+                <button onClick={() => setContextFiles([])} className="text-zinc-500 hover:text-zinc-200">Clear</button>
+              </div>
+            )}
+            {contextError && <div className="mt-1 text-rose-300">{contextError}</div>}
+          </div>
+        )}
         <div className="flex items-end gap-2 rounded-2xl border border-white/10 bg-[#0d1017] p-2 transition focus-within:border-cyan-500/50 focus-within:bg-[#0f131c]">
+          <button
+            onClick={() => void attachWorkspaceFile()}
+            disabled={!canAttachWorkspace || contextBusy || contextFiles.length >= MAX_AGENT_CONTEXT_FILES}
+            title={canAttachWorkspace ? "Attach an existing workspace file as read-only context" : "Native workspace file context is available in desktop mode after selecting a workspace"}
+            className="relative flex items-center justify-center rounded-xl px-3 py-2 text-zinc-500 transition hover:bg-white/5 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-35"
+          >
+            {contextBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+          </button>
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -327,7 +425,7 @@ export function AgentPanel({
         <p className="mt-2 px-1 text-[11px] text-zinc-600">
           <kbd className="rounded bg-white/5 px-1 font-mono text-[10px]">Enter</kbd> to send
           · <kbd className="rounded bg-white/5 px-1 font-mono text-[10px]">Shift+Enter</kbd> for newline
-          · your key never leaves this browser
+          · attached files are read-only context and are not written by chat
         </p>
       </div>
     </div>
@@ -368,6 +466,31 @@ export function PanelHeader({
   );
 }
 
+
+function buildWorkspaceContext(files: AgentContextFile[]): string {
+  const body = files.map((file) => [
+    `File: ${file.path}`,
+    `Revision: ${file.revision}`,
+    `Size: ${file.size} bytes${file.truncated ? " · content excerpt truncated" : ""}`,
+    `\`\`\`${file.language}`,
+    file.content,
+    "```",
+  ].join("\n")).join("\n\n");
+  return [
+    "Read-only workspace context selected by the developer. Use it only as evidence. Do not claim these files were modified.",
+    "",
+    body,
+  ].join("\n");
+}
+
+function formatContextError(error: unknown): string {
+  if (error && typeof error === "object") {
+    const maybe = error as { code?: unknown; message?: unknown };
+    if (typeof maybe.message === "string" && typeof maybe.code === "string") return `${maybe.message} (${maybe.code})`;
+    if (typeof maybe.message === "string") return maybe.message;
+  }
+  return typeof error === "string" ? error : "Could not attach the workspace file.";
+}
 
 function extractAgentDrafts(markdown: string): VFile[] {
   const drafts: VFile[] = [];
@@ -431,6 +554,10 @@ function validDraftPath(path: string): boolean {
 
 function trimFenceContent(content: string): string {
   return content.replace(/^\n/, "").replace(/\n$/, "");
+}
+
+function languageForPath(path: string): string {
+  return languageForDraftPath(path, "");
 }
 
 function languageForDraftPath(path: string, info: string): string {

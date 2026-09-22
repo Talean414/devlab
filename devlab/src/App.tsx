@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import type { BuilderPhase, BuilderPlan, ChatMessage, OpenGeneratedDrafts, VFile, ViewId } from "./types";
+import type { AgentContextFile, BuilderPhase, BuilderPlan, ChatMessage, OpenGeneratedDrafts, VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import { loadDeploy, loadGit, loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
 import {
@@ -100,6 +100,7 @@ export default function App() {
   const [agentMessages, setAgentMessages] = useState<ChatMessage[]>([]);
   const [agentInput, setAgentInput] = useState("");
   const [agentBusy, setAgentBusy] = useState(false);
+  const [agentContextFiles, setAgentContextFiles] = useState<AgentContextFile[]>([]);
   const [builderPhase, setBuilderPhase] = useState<BuilderPhase>("brief");
   const [builderBrief, setBuilderBrief] = useState("");
   const [builderRaw, setBuilderRaw] = useState("");
@@ -205,6 +206,7 @@ export default function App() {
     setAgentMessages([]);
     setAgentInput("");
     setAgentBusy(false);
+    setAgentContextFiles([]);
     setBuilderPhase("brief");
     setBuilderBrief("");
     setBuilderRaw("");
@@ -229,6 +231,7 @@ export default function App() {
     setAgentMessages(snapshot.agent?.messages ?? []);
     setAgentInput(snapshot.agent?.input ?? "");
     setAgentBusy(false);
+    setAgentContextFiles([]);
     setBuilderPhase(snapshot.builder?.phase ?? "brief");
     setBuilderBrief(snapshot.builder?.brief ?? "");
     setBuilderRaw(snapshot.builder?.raw ?? "");
@@ -296,6 +299,9 @@ export default function App() {
         key={keyVersion}
         onNeedKey={() => setShowModal(true)}
         onOpenFiles={openGeneratedSource}
+        canAttachWorkspace={hasNativeCapability(runtime, "filesystem")}
+        contextFiles={agentContextFiles}
+        setContextFiles={setAgentContextFiles}
         messages={agentMessages}
         setMessages={setAgentMessages}
         input={agentInput}
@@ -504,7 +510,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 6H Agent reviewed drafts</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 6I Agent file context</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}

@@ -28,6 +28,15 @@ export interface ChatMessage {
   ts: number;
 }
 
+export interface AgentContextFile {
+  path: string;
+  content: string;
+  language: string;
+  revision: string;
+  size: number;
+  truncated: boolean;
+}
+
 
 export type BuilderPhase = "brief" | "planning" | "review" | "done";
 
