@@ -6,10 +6,10 @@ import { loadSettings } from "../lib/settings";
 import { projectTemplates } from "../data/templates";
 import { testRunnerSnapshot, type TestRunnerSnapshot } from "../lib/testRunner";
 import { recommendVerificationProfiles, type VerificationProfileRecommendation } from "../lib/verificationGuidance";
-import type { BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, OpenGeneratedDrafts, ReviewedDraftApplyOutcome, VFile } from "../types";
+import type { BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, OpenGeneratedDrafts, ReviewedDraftApplyOutcome, VerificationHandoffRequest, VerificationRunOutcome, VFile } from "../types";
 import {
   Wand2, Loader2, CheckCircle2, FileCode2, TerminalSquare,
-  Sparkles, RotateCcw, FolderPlus, ArrowRight, ClipboardList, Copy, ListChecks, ShieldCheck, RefreshCw,
+  Sparkles, RotateCcw, FolderPlus, ArrowRight, ClipboardList, Copy, ListChecks, ShieldCheck, RefreshCw, Play,
 } from "lucide-react";
 
 const MAX_PLAN_FILES = 12;
@@ -95,6 +95,8 @@ export function BuilderPanel({
   setApplyOutcomes,
   canDiscoverVerification,
   onOpenVerification,
+  onRequestVerification,
+  verificationOutcomes,
 }: {
   onNeedKey: () => void;
   onOpenFiles: OpenGeneratedDrafts;
@@ -124,6 +126,8 @@ export function BuilderPanel({
   setApplyOutcomes: Dispatch<SetStateAction<ReviewedDraftApplyOutcome[]>>;
   canDiscoverVerification: boolean;
   onOpenVerification: () => void;
+  onRequestVerification: (request: VerificationHandoffRequest) => void;
+  verificationOutcomes: VerificationRunOutcome[];
 }) {
   const outRef = useRef<HTMLDivElement>(null);
   const [specNotice, setSpecNotice] = useState("");
@@ -144,7 +148,7 @@ export function BuilderPanel({
   const taskHandoffPreview = taskPlanPreview && plan ? buildTaskHandoffPreview(taskPlanPreview, builtFiles, plan.summary, taskStagingLedger, taskApplyProgress ?? undefined) : null;
   const taskStagingLedgerPreview = buildTaskStagingLedgerPreview(taskStagingLedger);
   const verificationHandoff = taskPlanPreview && taskApplyProgress
-    ? buildTaskVerificationHandoff(taskPlanPreview, taskApplyProgress, applyOutcomes, verificationSnapshot, verificationUnavailable)
+    ? buildTaskVerificationHandoff(taskPlanPreview, taskApplyProgress, applyOutcomes, verificationSnapshot, verificationUnavailable, verificationOutcomes)
     : null;
 
   async function generatePlan(text: string) {
@@ -461,6 +465,21 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     }
   }
 
+  function sendVerificationHandoff(taskId: string) {
+    if (!verificationHandoff) return;
+    const task = verificationHandoff.tasks.find((item) => item.taskId === taskId);
+    if (!task) return;
+    setError("");
+    setVerificationNotice("");
+    onRequestVerification({
+      taskId: task.taskId,
+      taskTitle: task.title,
+      appliedPaths: task.appliedPaths,
+      recommendedProfileIds: task.recommendedProfiles.map((profile) => profile.id),
+      requestedAtMs: Date.now(),
+    });
+  }
+
   async function copyVerificationHandoff() {
     if (!verificationHandoff) return;
     setError("");
@@ -533,7 +552,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Agentic Project Builder"
-        subtitle="Phase 8N · verification handoff"
+        subtitle="Phase 8O · verification loop"
         badge={settings.autonomy === "auto" ? "Autonomous" : settings.autonomy === "suggest" ? "Suggest mode" : "Ask first"}
         badgeOk={settings.autonomy !== "ask"}
       />
@@ -963,7 +982,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                       <span className="text-[10.5px] text-violet-100/50">Discovery only; nothing runs from Builder</span>
                     </summary>
                     <p className="mt-2 leading-relaxed text-violet-100/60">
-                      Matches backend-owned test profiles discovered by the native read-only snapshot to the reviewed file targets you have already applied in the Editor. Profiles run only when you start them explicitly in Self-Healing Tests. This handoff never claims a check has passed.
+                      Matches backend-owned test profiles discovered by the native read-only snapshot to the reviewed file targets you have already applied in the Editor. Sending a batch only pre-selects the matching profile in Self-Healing Tests; a profile runs only when you click Run there, and the run's status, exit code and timing come back here as metadata. Captured output never leaves Self-Healing Tests.
                     </p>
                     <div className="mt-2 flex flex-wrap items-center gap-2">
                       <button
@@ -1009,6 +1028,13 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                               <span className="text-violet-100/50">{task.appliedPaths.length} applied target{task.appliedPaths.length === 1 ? "" : "s"}{task.stalePaths.length > 0 ? ` · ${task.stalePaths.length} changed since apply` : ""}</span>
                             </div>
                             <div className="mt-1 font-mono text-[10.5px] text-violet-100/55">{task.appliedPaths.join(", ")}</div>
+                            {task.lastRun && (
+                              <div className={`mt-1 inline-flex flex-wrap items-center gap-2 rounded-md border px-2 py-0.5 text-[10.5px] ${task.lastRun.status === "passed" ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : task.lastRun.status === "failed" ? "border-rose-400/30 bg-rose-400/10 text-rose-200" : "border-amber-400/30 bg-amber-400/10 text-amber-200"}`}>
+                                <span className="font-semibold">Last real run: {task.lastRun.status}</span>
+                                <span className="font-mono">{task.lastRun.command}</span>
+                                <span>exit {task.lastRun.exitCode ?? "—"} · {task.lastRun.elapsedMs} ms · {formatStagingTime(task.lastRun.ranAtMs)}{task.lastRun.staleAfterRun ? " · targets changed since this run" : ""}</span>
+                              </div>
+                            )}
                             {task.recommendedProfiles.length > 0 ? (
                               <ul className="mt-1 space-y-0.5">
                                 {task.recommendedProfiles.map((profile) => (
@@ -1021,6 +1047,16 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                             ) : (
                               <p className="mt-1 text-[10.5px] text-violet-100/45">{verificationSnapshot ? "No discovered profile matches these targets; verify manually after review." : "Discover profiles to see backend-owned matches for these targets."}</p>
                             )}
+                            <div className="mt-1.5">
+                              <button
+                                onClick={() => sendVerificationHandoff(task.taskId)}
+                                disabled={!canDiscoverVerification || task.recommendedProfiles.length === 0}
+                                title={!canDiscoverVerification ? "The native test-runner capability is unavailable in this build." : task.recommendedProfiles.length === 0 ? "Discover profiles first so a matching backend-owned profile can be pre-selected." : "Open Self-Healing Tests with the top matching profile pre-selected. Nothing runs until you click Run tests there."}
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-violet-400/30 bg-violet-400/10 px-2.5 py-1 text-[11px] font-semibold text-violet-100 hover:bg-violet-400/20 disabled:opacity-40"
+                              >
+                                <Play className="h-3 w-3" /> Send to Self-Healing Tests (pre-select only)
+                              </button>
+                            </div>
                           </li>
                         ))}
                       </ul>
@@ -1421,19 +1457,32 @@ function buildTaskApplyProgress(taskPlan: TaskPlanPreview, builtFiles: VFile[], 
   return { tasks, appliedTargetCount, staleTargetCount, nextTaskId, guidance };
 }
 
+interface TaskVerificationLastRun {
+  profileId: string;
+  command: string;
+  status: VerificationRunOutcome["status"];
+  exitCode: number | null;
+  elapsedMs: number;
+  ranAtMs: number;
+  staleAfterRun: boolean;
+}
+
 interface TaskVerificationHandoffTask {
   taskId: string;
   title: string;
   appliedPaths: string[];
   stalePaths: string[];
   latestRevision: string;
+  latestAppliedAtMs: number;
   recommendedProfiles: VerificationProfileRecommendation[];
+  lastRun: TaskVerificationLastRun | null;
 }
 
 interface TaskVerificationHandoff {
   summary: string;
   appliedTaskCount: number;
   appliedTargetCount: number;
+  runCounts: { passed: number; failed: number; timeout: number };
   detectedProfileCount: number;
   unavailableReason: string;
   warnings: string[];
@@ -1447,6 +1496,7 @@ function buildTaskVerificationHandoff(
   outcomes: ReviewedDraftApplyOutcome[],
   snapshot: TestRunnerSnapshot | null,
   unavailableReason: string,
+  runOutcomes: VerificationRunOutcome[] = [],
 ): TaskVerificationHandoff {
   const outcomeByPath = new Map<string, ReviewedDraftApplyOutcome>();
   for (const outcome of outcomes) {
@@ -1462,13 +1512,31 @@ function buildTaskVerificationHandoff(
         .map((path) => outcomeByPath.get(path))
         .filter((outcome): outcome is ReviewedDraftApplyOutcome => Boolean(outcome))
         .sort((a, b) => b.appliedAtMs - a.appliedAtMs)[0];
+      const latestAppliedAtMs = latest?.appliedAtMs ?? 0;
+      const lastOutcome = runOutcomes
+        .filter((outcome) => outcome.taskId === task.id)
+        .sort((a, b) => b.ranAtMs - a.ranAtMs)[0];
+      const lastRun: TaskVerificationLastRun | null = lastOutcome
+        ? {
+          profileId: lastOutcome.profileId,
+          command: lastOutcome.command,
+          status: lastOutcome.status,
+          exitCode: lastOutcome.exitCode,
+          elapsedMs: lastOutcome.elapsedMs,
+          ranAtMs: lastOutcome.ranAtMs,
+          // A run is only evidence for the applied state it observed: any later apply or draft change supersedes it.
+          staleAfterRun: status.staleTargets.length > 0 || latestAppliedAtMs > lastOutcome.ranAtMs,
+        }
+        : null;
       return {
         taskId: task.id,
         title: task.title,
         appliedPaths: status.appliedTargets,
         stalePaths: status.staleTargets,
         latestRevision: latest ? latest.revision.slice(0, 12) : "",
+        latestAppliedAtMs,
         recommendedProfiles: selectTaskVerificationProfiles(profiles, status.appliedTargets),
+        lastRun,
       };
     })
     .filter((task): task is TaskVerificationHandoffTask => Boolean(task));
@@ -1476,12 +1544,19 @@ function buildTaskVerificationHandoff(
   const appliedTargetCount = applyProgress.appliedTargetCount;
   const detectedProfileCount = profiles.length;
   const warnings = (snapshot?.warnings ?? []).slice(0, 6).map((warning) => boundSpecText(warning, 300));
-  const summary = `${appliedTaskCount} batch${appliedTaskCount === 1 ? "" : "es"} with applied targets · ${appliedTargetCount} applied target${appliedTargetCount === 1 ? "" : "s"} · ${snapshot ? `${detectedProfileCount} discovered profile${detectedProfileCount === 1 ? "" : "s"}` : "profiles not discovered"}`;
+  const runCounts = tasks.reduce(
+    (counts, task) => {
+      if (task.lastRun && !task.lastRun.staleAfterRun) counts[task.lastRun.status] += 1;
+      return counts;
+    },
+    { passed: 0, failed: 0, timeout: 0 },
+  );
+  const summary = `${appliedTaskCount} batch${appliedTaskCount === 1 ? "" : "es"} with applied targets · ${appliedTargetCount} applied target${appliedTargetCount === 1 ? "" : "s"} · ${snapshot ? `${detectedProfileCount} discovered profile${detectedProfileCount === 1 ? "" : "s"}` : "profiles not discovered"} · real runs: ${runCounts.passed} passed, ${runCounts.failed} failed, ${runCounts.timeout} timed out`;
   const exportText = [
     "DevLab Builder task verification handoff",
     `Generated: ${new Date().toISOString()}`,
-    "Source: session-only Editor apply metadata plus a read-only native test-runner profile snapshot",
-    "Safety: discovery-only metadata; no test, check or shell command was executed, no output was captured, no file was read or written, nothing was persisted. Nothing here claims a check passed.",
+    "Source: session-only Editor apply metadata, a read-only native test-runner profile snapshot and metadata-only outcomes of runs the user started explicitly in Self-Healing Tests",
+    "Safety: copying or sending this handoff executes nothing; only runs the user started explicitly in Self-Healing Tests are listed, by status/exit code/timing metadata without captured output. No file was read or written and nothing was persisted.",
     "",
     "## Summary",
     `- ${summary}`,
@@ -1497,7 +1572,8 @@ function buildTaskVerificationHandoff(
         `Applied targets: ${task.appliedPaths.join(", ")}`,
         `Changed since apply: ${task.stalePaths.length > 0 ? task.stalePaths.join(", ") : "none"}`,
         `Latest applied revision: ${task.latestRevision || "unknown"}`,
-        "Recommended backend-owned profiles (not run):",
+        `Last real run: ${task.lastRun ? `${task.lastRun.status} — ${task.lastRun.command} (exit ${task.lastRun.exitCode ?? "none"}, ${task.lastRun.elapsedMs} ms, ${new Date(task.lastRun.ranAtMs).toISOString()})${task.lastRun.staleAfterRun ? " — superseded: targets were applied or changed after this run" : ""}` : "none in this session"}`,
+        "Recommended backend-owned profiles (not run by this handoff):",
         ...(task.recommendedProfiles.length > 0
           ? task.recommendedProfiles.map((profile) => `- ${profile.id} — ${profile.label}: ${profile.command} (matches ${profile.matchedDraftPaths.length} target${profile.matchedDraftPaths.length === 1 ? "" : "s"})`)
           : [snapshot ? "- No discovered profile matches these targets; verify manually." : "- Profiles not discovered yet."]),
@@ -1505,12 +1581,13 @@ function buildTaskVerificationHandoff(
       ])
       : ["- No reviewed file targets have been applied in the Editor in this session."]),
     "## Next steps",
-    "- Open Self-Healing Tests and run a recommended backend-owned profile explicitly.",
+    "- Open Self-Healing Tests (or use Send, which only pre-selects) and run a recommended backend-owned profile explicitly.",
+    "- A run listed above is evidence only for the applied state it observed; rerun after any further apply.",
     "- Inspect real stdout/stderr; generate a repair draft only from a real failing run.",
     "- Restage and recompare any target marked changed since apply before applying it again.",
-    "- Do not treat this handoff as proof that verification has run.",
+    "- Do not treat this handoff as proof that verification has run; only the listed real runs did.",
   ].join("\n");
-  return { summary, appliedTaskCount, appliedTargetCount, detectedProfileCount, unavailableReason, warnings, tasks, exportText };
+  return { summary, appliedTaskCount, appliedTargetCount, runCounts, detectedProfileCount, unavailableReason, warnings, tasks, exportText };
 }
 
 function selectTaskVerificationProfiles(profiles: TestRunnerSnapshot["profiles"], appliedPaths: string[]): VerificationProfileRecommendation[] {

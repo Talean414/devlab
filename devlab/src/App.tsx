@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import type { AgentContextFile, BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, ChatMessage, OpenGeneratedDrafts, ReviewedDraftApplyOutcome, VFile, ViewId } from "./types";
+import type { AgentContextFile, BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, ChatMessage, OpenGeneratedDrafts, ReviewedDraftApplyOutcome, VerificationHandoffRequest, VerificationRunOutcome, VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import { loadDeploy, loadGit, loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
 import { resolveAiRoute } from "./lib/modelRouting";
@@ -69,6 +69,8 @@ interface NavItem { id: ViewId; icon: typeof Sparkles; label: string; shortcut?:
 
 // Bound for the session-only reviewed-draft apply outcome ledger shared with Project Builder.
 const MAX_APPLY_OUTCOMES = 48;
+// Bound for the session-only verification run outcome ledger shared between Self-Healing Tests and Builder.
+const MAX_VERIFICATION_OUTCOMES = 48;
 
 const NAV: NavItem[] = [
   { id: "welcome",  icon: Sparkles,     label: "Home" },
@@ -123,6 +125,10 @@ export default function App() {
   const [builderTaskStagingLedger, setBuilderTaskStagingLedger] = useState<BuilderTaskStagingRecord[]>([]);
   // Session-only metadata outcomes reported by Editor reviewed-draft apply; never persisted, no file contents.
   const [reviewedDraftApplyOutcomes, setReviewedDraftApplyOutcomes] = useState<ReviewedDraftApplyOutcome[]>([]);
+  // Session-only verification handoff request (Builder -> Self-Healing Tests) and metadata-only run outcomes
+  // (Self-Healing Tests -> Builder). Neither is persisted; outcomes never contain captured output.
+  const [verificationHandoffRequest, setVerificationHandoffRequest] = useState<VerificationHandoffRequest | null>(null);
+  const [verificationRunOutcomes, setVerificationRunOutcomes] = useState<VerificationRunOutcome[]>([]);
   const [pendingRecovery, setPendingRecovery] = useState<SessionRecoverySnapshot | null>(() => loadSessionRecovery());
   const [recoveryReady, setRecoveryReady] = useState(() => !loadSessionRecovery());
 
@@ -235,7 +241,18 @@ export default function App() {
     setBuilderStageNotice("");
     setBuilderTaskStagingLedger([]);
     setReviewedDraftApplyOutcomes([]);
+    setVerificationHandoffRequest(null);
+    setVerificationRunOutcomes([]);
     setGeneratedDrafts([]);
+  }
+
+  function recordVerificationRunOutcome(outcome: VerificationRunOutcome) {
+    setVerificationRunOutcomes((current) => [outcome, ...current].slice(0, MAX_VERIFICATION_OUTCOMES));
+  }
+
+  function requestVerificationHandoff(request: VerificationHandoffRequest) {
+    setVerificationHandoffRequest(request);
+    navigate("healer");
   }
 
   function recordReviewedDraftApplyOutcome(outcome: ReviewedDraftApplyOutcome) {
@@ -367,6 +384,8 @@ export default function App() {
             setApplyOutcomes={setReviewedDraftApplyOutcomes}
             canDiscoverVerification={hasNativeCapability(runtime, "test-runner")}
             onOpenVerification={() => navigate("healer")}
+            onRequestVerification={requestVerificationHandoff}
+            verificationOutcomes={verificationRunOutcomes}
           />
         </Suspense>
         : nativeFeature(
@@ -390,7 +409,13 @@ export default function App() {
       }
       case "healer":   return hasNativeCapability(runtime, "test-runner")
         ? <Suspense fallback={<NativePanelLoading label="Loading native test runner…" />}>
-          <HealerPanel onOpenFiles={openGeneratedSource} onNeedKey={() => setShowModal(true)} />
+          <HealerPanel
+            onOpenFiles={openGeneratedSource}
+            onNeedKey={() => setShowModal(true)}
+            handoffRequest={verificationHandoffRequest}
+            onDismissHandoff={() => setVerificationHandoffRequest(null)}
+            onRunRecorded={recordVerificationRunOutcome}
+          />
         </Suspense>
         : nativeFeature(
           "Self-Healing Tests", "test-runner", "Phase 6D · audited tests and reviewed draft application",
@@ -553,7 +578,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 8N verification handoff</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 8O verification loop</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}

@@ -9,7 +9,7 @@ import {
   type AgentAuditEvent,
 } from "../lib/agentAudit";
 import { readWorkspaceFile } from "../lib/workspace";
-import type { OpenGeneratedDrafts } from "../types";
+import type { OpenGeneratedDrafts, VerificationHandoffRequest, VerificationRunOutcome } from "../types";
 import {
   testRunnerRun,
   testRunnerSnapshot,
@@ -279,9 +279,15 @@ function ResultIcon({ status }: { status?: TestRunResult["status"] }) {
 export function HealerPanel({
   onOpenFiles,
   onNeedKey,
+  handoffRequest = null,
+  onDismissHandoff,
+  onRunRecorded,
 }: {
   onOpenFiles: OpenGeneratedDrafts;
   onNeedKey: () => void;
+  handoffRequest?: VerificationHandoffRequest | null;
+  onDismissHandoff?: () => void;
+  onRunRecorded?: (outcome: VerificationRunOutcome) => void;
 }) {
   const [snapshot, setSnapshot] = useState<TestRunnerSnapshot | null>(null);
   const [selectedId, setSelectedId] = useState("");
@@ -297,6 +303,24 @@ export function HealerPanel({
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState("");
   const [auditLastRefreshedMs, setAuditLastRefreshedMs] = useState<number | null>(null);
+  const [handoffAppliedAtMs, setHandoffAppliedAtMs] = useState<number | null>(null);
+
+  // Builder handoff pre-selection: pick the first recommended profile that still exists in the fresh
+  // native snapshot. This only changes the highlighted profile; Run remains an explicit click.
+  const handoffMatch = useMemo(() => {
+    if (!handoffRequest || !snapshot) return null;
+    for (const profileId of handoffRequest.recommendedProfileIds) {
+      const profile = snapshot.profiles.find((item) => item.id === profileId);
+      if (profile) return profile;
+    }
+    return null;
+  }, [handoffRequest, snapshot]);
+
+  useEffect(() => {
+    if (!handoffRequest || !snapshot || handoffAppliedAtMs === handoffRequest.requestedAtMs) return;
+    setHandoffAppliedAtMs(handoffRequest.requestedAtMs);
+    if (handoffMatch) setSelectedId(handoffMatch.id);
+  }, [handoffRequest, snapshot, handoffMatch, handoffAppliedAtMs]);
 
   const selected = useMemo(
     () => snapshot?.profiles.find((profile) => profile.id === selectedId) ?? snapshot?.profiles[0],
@@ -342,6 +366,19 @@ export function HealerPanel({
     try {
       const next = await testRunnerRun(profile.id);
       setResult(next);
+      // Metadata-only outcome for the session ledger shared with Project Builder; stdout/stderr are never passed.
+      onRunRecorded?.({
+        taskId: handoffRequest?.taskId ?? null,
+        profileId: next.profile.id,
+        profileLabel: next.profile.label,
+        command: next.profile.command,
+        status: next.status,
+        exitCode: next.exitCode,
+        elapsedMs: next.elapsedMs,
+        timedOut: next.timedOut,
+        outputTruncated: next.outputTruncated,
+        ranAtMs: Date.now(),
+      });
       void refreshAudit();
       setRepairDraft(null);
       setRepairNotice("");
@@ -601,6 +638,37 @@ ${document.content}
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto p-5">
+            {handoffRequest && (
+              <div className="mb-4 rounded-xl border border-violet-500/25 bg-violet-500/[0.06] p-3 text-[12px] leading-relaxed text-violet-100/85">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2 font-semibold text-violet-100">
+                      <ArrowRight className="h-4 w-4 text-violet-300" />
+                      Builder verification handoff · <span className="font-mono text-[11px]">{handoffRequest.taskId}</span> {handoffRequest.taskTitle}
+                    </div>
+                    <p className="mt-1 text-violet-100/70">
+                      {handoffMatch
+                        ? <>Pre-selected <span className="font-mono">{handoffMatch.command}</span> because it matches this batch's applied targets. Nothing has run; click <span className="font-semibold">Run tests</span> to execute it.</>
+                        : snapshot
+                          ? "None of the recommended profiles exist in the current native snapshot. Choose a discovered profile manually; nothing has run."
+                          : "Waiting for native profile discovery before pre-selecting a recommended profile."}
+                    </p>
+                    <p className="mt-1 font-mono text-[10.5px] text-violet-100/50">
+                      Applied targets: {handoffRequest.appliedPaths.join(", ") || "none"}
+                    </p>
+                    <p className="mt-1 text-[10.5px] text-violet-100/50">
+                      The run result's status, exit code and timing metadata will be reported back to the Builder task ledger for {handoffRequest.taskId}; captured output stays in this panel.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => { onDismissHandoff?.(); }}
+                    className="shrink-0 rounded-lg border border-white/10 px-2.5 py-1 text-[11px] text-violet-100/80 hover:bg-white/5"
+                  >
+                    Dismiss handoff
+                  </button>
+                </div>
+              </div>
+            )}
             {error && (
               <div className="mb-4 rounded-xl border border-rose-500/30 bg-rose-500/[0.06] p-4 text-[12.5px] leading-relaxed text-rose-100/90">
                 <div className="mb-2 flex items-center gap-2 font-semibold text-rose-200">

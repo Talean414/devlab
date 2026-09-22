@@ -128,6 +128,31 @@ export interface BuilderTaskStagingRecord {
 
 // Session-only, metadata-only outcome reported by the Editor after one explicit reviewed-draft apply.
 // It carries no file contents and is intentionally excluded from recovery snapshots.
+// Session-only request from Project Builder asking Self-Healing Tests to pre-select a discovered
+// backend-owned profile for one task batch. It never triggers execution; the user must still click Run.
+export interface VerificationHandoffRequest {
+  taskId: string;
+  taskTitle: string;
+  appliedPaths: string[];
+  recommendedProfileIds: string[];
+  requestedAtMs: number;
+}
+
+// Session-only, metadata-only outcome of one real backend-owned test run reported by Self-Healing Tests.
+// It intentionally omits stdout/stderr and is excluded from recovery snapshots.
+export interface VerificationRunOutcome {
+  taskId: string | null;
+  profileId: string;
+  profileLabel: string;
+  command: string;
+  status: "passed" | "failed" | "timeout";
+  exitCode: number | null;
+  elapsedMs: number;
+  timedOut: boolean;
+  outputTruncated: boolean;
+  ranAtMs: number;
+}
+
 export interface ReviewedDraftApplyOutcome {
   path: string;
   action: "Created" | "Updated";
