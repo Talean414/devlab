@@ -60,6 +60,7 @@ interface DraftInspection {
   removed: number;
   preview: string;
   truncated: boolean;
+  inspectedAtMs?: number;
   existingRevision?: string;
   existingSize?: number;
 }
@@ -143,6 +144,14 @@ export function EditorPanel({
     [incomingDrafts, appliedDraftKeys],
   );
   const selectedDraftMetadata = selectedDraft ? draftReviewSummary.files[draftIndex] : undefined;
+  const selectedDraftApplyBlockReason = selectedDraft
+    ? reviewedDraftApplyBlockReason({
+      working,
+      hasWorkspace: Boolean(workspace),
+      applied: selectedDraftApplied,
+      inspection: draftInspection?.key === selectedDraftKey ? draftInspection : null,
+    })
+    : "No reviewed draft is selected.";
 
   useEffect(() => {
     if (incomingDrafts.length === 0) {
@@ -178,6 +187,7 @@ export function EditorPanel({
         removed: 0,
         preview: "",
         truncated: false,
+        inspectedAtMs: Date.now(),
       });
       return;
     }
@@ -191,6 +201,7 @@ export function EditorPanel({
         removed: 0,
         preview: buildDraftDiff(null, selectedDraft.content).preview,
         truncated: false,
+        inspectedAtMs: Date.now(),
       });
       return;
     }
@@ -221,6 +232,7 @@ export function EditorPanel({
           removed: diff.removed,
           preview: diff.preview,
           truncated: diff.truncated,
+          inspectedAtMs: Date.now(),
           existingRevision: existing.revision,
           existingSize: existing.size,
         });
@@ -238,6 +250,7 @@ export function EditorPanel({
             removed: 0,
             preview: diff.preview,
             truncated: diff.truncated,
+            inspectedAtMs: Date.now(),
           });
           return;
         }
@@ -250,6 +263,7 @@ export function EditorPanel({
           removed: 0,
           preview: "",
           truncated: false,
+          inspectedAtMs: Date.now(),
         });
       });
 
@@ -557,6 +571,13 @@ export function EditorPanel({
       setDraftReviewCopyNotice({ kind: "error", text: copyError });
       setError(copyError);
     }
+  }
+
+  function recompareSelectedDraft() {
+    if (!selectedDraft) return;
+    setDraftInspection(null);
+    setNotice(`Rechecking ${selectedDraft.path} against the selected workspace before apply.`);
+    setRefreshVersion((version) => version + 1);
   }
 
   async function reloadDocument(path: string) {
@@ -1019,6 +1040,14 @@ export function EditorPanel({
                     {draftInspection?.key === selectedDraftKey ? draftStatusLabel(draftInspection) : "Inspecting draft…"} · {selectedDraft.language} · {selectedDraftMetadata ? `${formatBytes(selectedDraftMetadata.bytes)} · ${selectedDraftMetadata.lines} line${selectedDraftMetadata.lines === 1 ? "" : "s"}` : "metadata pending"}
                   </div>
                 </div>
+                <button
+                  onClick={recompareSelectedDraft}
+                  disabled={working || !workspace || !selectedDraft}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-[11px] font-semibold text-zinc-400 hover:bg-white/5 hover:text-zinc-100 disabled:opacity-40"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  Recompare
+                </button>
                 <button onClick={() => setDraftReviewOpen(false)} className="rounded-lg p-2 text-zinc-500 hover:bg-white/5 hover:text-white" aria-label="Close draft review">
                   <X className="h-4 w-4" />
                 </button>
@@ -1033,6 +1062,11 @@ export function EditorPanel({
                     {draftInspection?.existingRevision && (
                       <div className="mt-1 font-mono text-[10.5px] text-zinc-500">
                         Existing revision {draftInspection.existingRevision.slice(0, 12)} · {draftInspection.existingSize} bytes
+                      </div>
+                    )}
+                    {draftInspection?.key === selectedDraftKey && draftInspection.inspectedAtMs && (
+                      <div className="mt-1 font-mono text-[10.5px] text-zinc-500">
+                        Compared {formatReviewTime(draftInspection.inspectedAtMs)}. Use Recompare if the workspace changed before applying.
                       </div>
                     )}
                   </div>
@@ -1066,10 +1100,14 @@ export function EditorPanel({
                   <div className="mt-1 font-mono text-[10.5px] text-amber-100/50">
                     Review progress: {draftReviewSummary.appliedCount}/{draftReviewSummary.fileCount} applied · {draftReviewSummary.pendingCount} pending · metadata only in copied summaries.
                   </div>
+                  {selectedDraftApplyBlockReason && !selectedDraftApplied && (
+                    <div className="mt-1 text-[10.5px] text-amber-100/60">{selectedDraftApplyBlockReason}</div>
+                  )}
                 </div>
                 <button
                   onClick={() => void applyDraftToWorkspace(selectedDraft)}
-                  disabled={working || !workspace || selectedDraftApplied}
+                  disabled={Boolean(selectedDraftApplyBlockReason)}
+                  title={selectedDraftApplyBlockReason || "Apply this reviewed draft to the selected workspace"}
                   className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-violet-500 px-3 py-2 text-[12px] font-semibold text-white hover:bg-violet-400 disabled:opacity-40"
                 >
                   {selectedDraftApplied ? <CheckCircle2 className="h-3.5 w-3.5" /> : working ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
@@ -1151,6 +1189,29 @@ function formatBytes(bytes: number): string {
 
 function languageForDraftPath(path: string): string {
   return LANGUAGE_BY_EXTENSION[path.toLowerCase().split(".").pop() ?? ""] ?? "plaintext";
+}
+
+function reviewedDraftApplyBlockReason({
+  working,
+  hasWorkspace,
+  applied,
+  inspection,
+}: {
+  working: boolean;
+  hasWorkspace: boolean;
+  applied: boolean;
+  inspection: DraftInspection | null;
+}): string {
+  if (working) return "Another workspace operation is still running.";
+  if (!hasWorkspace) return "Select a workspace before applying reviewed drafts.";
+  if (applied) return "This reviewed draft has already been applied in this review session.";
+  if (!inspection || inspection.status === "loading") return "Wait for the workspace comparison to finish before applying.";
+  if (inspection.status === "error") return "Resolve or recompare the draft before applying.";
+  return "";
+}
+
+function formatReviewTime(timestampMs: number): string {
+  return new Date(timestampMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 function normalizeDraftPath(path: string): string {
