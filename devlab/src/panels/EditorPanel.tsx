@@ -55,6 +55,13 @@ interface OpenDocument extends WorkspaceDocument {
 
 type DraftInspectionStatus = "loading" | "new" | "update" | "unchanged" | "unavailable" | "error";
 type DiffNavigationTarget = "next" | "previous";
+type ReviewedDraftAnnotationStatus = "unreviewed" | "reviewed" | "needs-changes";
+
+interface ReviewedDraftAnnotation {
+  status: ReviewedDraftAnnotationStatus;
+  note: string;
+  updatedAtMs: number;
+}
 
 interface DraftInspection {
   key: string;
@@ -129,6 +136,7 @@ export function EditorPanel({
   const [draftInspection, setDraftInspection] = useState<DraftInspection | null>(null);
   const [appliedDraftKeys, setAppliedDraftKeys] = useState<string[]>([]);
   const [appliedDraftRecords, setAppliedDraftRecords] = useState<Record<string, ReviewedDraftApplicationRecord>>({});
+  const [draftReviewAnnotations, setDraftReviewAnnotations] = useState<Record<string, ReviewedDraftAnnotation>>({});
   const [draftReviewCopyNotice, setDraftReviewCopyNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const [verificationLoading, setVerificationLoading] = useState(false);
   const [verificationPlan, setVerificationPlan] = useState<ReviewedDraftVerificationPlan | null>(null);
@@ -154,11 +162,14 @@ export function EditorPanel({
   const selectedDraftKey = selectedDraft ? draftKey(selectedDraft, draftIndex) : "";
   const selectedDraftApplied = selectedDraftKey ? appliedDraftKeys.includes(selectedDraftKey) : false;
   const draftReviewSummary = useMemo(
-    () => summarizeReviewedDrafts(incomingDrafts, appliedDraftKeys, appliedDraftRecords),
-    [incomingDrafts, appliedDraftKeys, appliedDraftRecords],
+    () => summarizeReviewedDrafts(incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations),
+    [incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations],
   );
   const selectedDraftMetadata = selectedDraft ? draftReviewSummary.files[draftIndex] : undefined;
   const selectedDraftApplication = selectedDraftKey ? appliedDraftRecords[selectedDraftKey] : undefined;
+  const selectedDraftAnnotation = selectedDraftKey ? draftReviewAnnotations[selectedDraftKey] : undefined;
+  const selectedDraftAnnotationStatus = selectedDraftAnnotation?.status ?? "unreviewed";
+  const selectedDraftAnnotationNote = selectedDraftAnnotation?.note ?? "";
   const selectedDraftApplyBlockReason = selectedDraft
     ? reviewedDraftApplyBlockReason({
       working,
@@ -194,6 +205,7 @@ export function EditorPanel({
       setDraftIndex(0);
       setAppliedDraftKeys([]);
       setAppliedDraftRecords({});
+      setDraftReviewAnnotations({});
       setDraftInspection(null);
       setDraftReviewCopyNotice(null);
       setVerificationPlan(null);
@@ -205,6 +217,7 @@ export function EditorPanel({
     setDraftIndex(0);
     setAppliedDraftKeys([]);
     setAppliedDraftRecords({});
+    setDraftReviewAnnotations({});
     setDraftReviewCopyNotice(null);
     setVerificationPlan(null);
     setVerificationNotice(null);
@@ -660,7 +673,7 @@ export function EditorPanel({
       return;
     }
     try {
-      await navigator.clipboard.writeText(buildReviewedDraftSummaryExport(incomingDrafts, appliedDraftKeys, appliedDraftRecords));
+      await navigator.clipboard.writeText(buildReviewedDraftSummaryExport(incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations));
       const copyMessage = `Copied metadata for ${incomingDrafts.length} reviewed draft${incomingDrafts.length === 1 ? "" : "s"}.`;
       setDraftReviewCopyNotice({ kind: "ok", text: copyMessage });
       setNotice(copyMessage);
@@ -677,14 +690,14 @@ export function EditorPanel({
     setError("");
     try {
       const snapshot = await testRunnerSnapshot();
-      const plan = buildReviewedDraftVerificationPlan(incomingDrafts, appliedDraftKeys, appliedDraftRecords, snapshot);
+      const plan = buildReviewedDraftVerificationPlan(incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations, snapshot);
       setVerificationPlan(plan);
       setVerificationNotice({
         kind: "ok",
         text: `Discovered ${snapshot.profiles.length} backend-owned verification profile${snapshot.profiles.length === 1 ? "" : "s"}. Nothing was executed.`,
       });
     } catch (commandError) {
-      const plan = buildReviewedDraftVerificationPlan(incomingDrafts, appliedDraftKeys, appliedDraftRecords, null, errorMessage(commandError));
+      const plan = buildReviewedDraftVerificationPlan(incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations, null, errorMessage(commandError));
       setVerificationPlan(plan);
       setVerificationNotice({
         kind: "error",
@@ -696,7 +709,7 @@ export function EditorPanel({
   }
 
   async function copyVerificationPlan() {
-    const plan = verificationPlan ?? buildReviewedDraftVerificationPlan(incomingDrafts, appliedDraftKeys, appliedDraftRecords, null);
+    const plan = verificationPlan ?? buildReviewedDraftVerificationPlan(incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations, null);
     setVerificationNotice(null);
     if (!navigator.clipboard?.writeText) {
       setVerificationNotice({ kind: "error", text: "Clipboard access is unavailable in this environment. Nothing was copied." });
@@ -708,6 +721,54 @@ export function EditorPanel({
     } catch (commandError) {
       setVerificationNotice({ kind: "error", text: `Could not copy verification metadata: ${errorMessage(commandError)}` });
     }
+  }
+
+  function updateSelectedDraftAnnotationStatus(status: Exclude<ReviewedDraftAnnotationStatus, "unreviewed">) {
+    if (!selectedDraftKey) return;
+    const updatedAtMs = Date.now();
+    setDraftReviewAnnotations((current) => ({
+      ...current,
+      [selectedDraftKey]: {
+        status,
+        note: current[selectedDraftKey]?.note ?? "",
+        updatedAtMs,
+      },
+    }));
+    setDraftReviewCopyNotice(null);
+  }
+
+  function updateSelectedDraftAnnotationNote(note: string) {
+    if (!selectedDraftKey) return;
+    const boundedNote = note.slice(0, MAX_REVIEW_NOTE_CHARS);
+    const updatedAtMs = Date.now();
+    setDraftReviewAnnotations((current) => {
+      const existing = current[selectedDraftKey];
+      if (!boundedNote && (!existing || existing.status === "unreviewed")) {
+        const next = { ...current };
+        delete next[selectedDraftKey];
+        return next;
+      }
+      return {
+        ...current,
+        [selectedDraftKey]: {
+          status: existing?.status ?? "unreviewed",
+          note: boundedNote,
+          updatedAtMs,
+        },
+      };
+    });
+    setDraftReviewCopyNotice(null);
+  }
+
+  function clearSelectedDraftAnnotation() {
+    if (!selectedDraftKey) return;
+    setDraftReviewAnnotations((current) => {
+      if (!current[selectedDraftKey]) return current;
+      const next = { ...current };
+      delete next[selectedDraftKey];
+      return next;
+    });
+    setDraftReviewCopyNotice(null);
   }
 
   function recompareSelectedDraft() {
@@ -1123,7 +1184,7 @@ export function EditorPanel({
                   <Sparkles className="h-4 w-4 text-violet-300" /> Generated drafts
                 </div>
                 <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
-                  Review-only memory. {draftReviewSummary.appliedCount} applied / {draftReviewSummary.pendingCount} pending. Draft contents are copied only into the Editor preview, never the metadata summary.
+                  Review-only memory. {draftReviewSummary.appliedCount} applied / {draftReviewSummary.pendingCount} pending · {draftReviewSummary.annotationCounts.reviewedCount} reviewed · {draftReviewSummary.annotationCounts.needsChangesCount} needs changes. Draft contents are copied only into the Editor preview, never the metadata summary.
                 </p>
                 <button
                   onClick={() => void copyReviewedDraftSummary()}
@@ -1185,11 +1246,16 @@ export function EditorPanel({
                 {incomingDrafts.map((draft, index) => {
                   const key = draftKey(draft, index);
                   const applied = appliedDraftKeys.includes(key);
+                  const annotation = draftReviewAnnotations[key];
+                  const annotationStatus = annotation?.status ?? "unreviewed";
+                  const title = appliedDraftRecords[key]
+                    ? `${appliedDraftRecords[key].action} ${appliedDraftRecords[key].path} at ${formatReviewTime(appliedDraftRecords[key].appliedAtMs)}`
+                    : `Pending reviewed draft · ${draftReviewAnnotationStatusLabel(annotationStatus)}`;
                   return (
                     <button
                       key={key}
                       onClick={() => setDraftIndex(index)}
-                      title={appliedDraftRecords[key] ? `${appliedDraftRecords[key].action} ${appliedDraftRecords[key].path} at ${formatReviewTime(appliedDraftRecords[key].appliedAtMs)}` : "Pending reviewed draft"}
+                      title={title}
                       className={`mb-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left font-mono text-[11px] transition ${
                         index === draftIndex
                           ? "bg-violet-500/15 text-violet-100"
@@ -1197,6 +1263,11 @@ export function EditorPanel({
                       }`}
                     >
                       <span className="min-w-0 flex-1 truncate">{draft.path}</span>
+                      {annotationStatus !== "unreviewed" && (
+                        <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] ${draftReviewAnnotationPillClass(annotationStatus)}`}>
+                          {draftReviewAnnotationShortLabel(annotationStatus)}
+                        </span>
+                      )}
                       {applied && <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />}
                     </button>
                   );
@@ -1219,7 +1290,7 @@ export function EditorPanel({
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-mono text-[12px] text-zinc-200">{selectedDraft.path}</div>
                   <div className="mt-0.5 text-[10.5px] text-zinc-600">
-                    {draftInspection?.key === selectedDraftKey ? draftStatusLabel(draftInspection) : "Inspecting draft…"} · {selectedDraft.language} · {selectedDraftMetadata ? `${formatBytes(selectedDraftMetadata.bytes)} · ${selectedDraftMetadata.lines} line${selectedDraftMetadata.lines === 1 ? "" : "s"}` : "metadata pending"}{selectedDraftApplication ? ` · ${selectedDraftApplication.action} ${formatReviewTime(selectedDraftApplication.appliedAtMs)}` : ""}
+                    {draftInspection?.key === selectedDraftKey ? draftStatusLabel(draftInspection) : "Inspecting draft…"} · {selectedDraft.language} · {selectedDraftMetadata ? `${formatBytes(selectedDraftMetadata.bytes)} · ${selectedDraftMetadata.lines} line${selectedDraftMetadata.lines === 1 ? "" : "s"}` : "metadata pending"} · {draftReviewAnnotationStatusLabel(selectedDraftAnnotationStatus)}{selectedDraftApplication ? ` · ${selectedDraftApplication.action} ${formatReviewTime(selectedDraftApplication.appliedAtMs)}` : ""}
                   </div>
                 </div>
                 <button
@@ -1264,7 +1335,7 @@ export function EditorPanel({
                       <div className="min-w-0">
                         <div>Inline Monaco diff · original workspace content on the left, reviewed draft on the right</div>
                         <div className="mt-0.5 font-mono text-[10px] text-zinc-600">
-                          {reviewedDiffChangeLabel} · {reviewedDiffApplyStateLabel}
+                          {reviewedDiffChangeLabel} · {reviewedDiffApplyStateLabel} · {draftReviewAnnotationStatusLabel(selectedDraftAnnotationStatus)}
                         </div>
                       </div>
                       <div className="flex shrink-0 items-center gap-1.5">
@@ -1337,6 +1408,53 @@ export function EditorPanel({
                   </div>
                 )}
               </div>
+              <div className="border-b border-white/10 bg-white/[0.015] px-4 py-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1 text-[11.5px] leading-relaxed text-zinc-400">
+                    <div className="flex items-center gap-2 font-semibold text-zinc-100">
+                      <Pencil className="h-3.5 w-3.5 text-violet-300" /> Session review annotation
+                    </div>
+                    <div className="mt-0.5 text-[10.5px] text-zinc-500">
+                      In-memory only. This does not write files, unlock apply, run commands or enter the native audit log. Notes are included only when you explicitly copy reviewed-draft metadata.
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => updateSelectedDraftAnnotationStatus("reviewed")}
+                      className={`rounded-lg border px-2.5 py-1.5 text-[10.5px] font-semibold ${draftReviewAnnotationButtonClass(selectedDraftAnnotationStatus === "reviewed", "reviewed")}`}
+                    >
+                      Mark reviewed
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updateSelectedDraftAnnotationStatus("needs-changes")}
+                      className={`rounded-lg border px-2.5 py-1.5 text-[10.5px] font-semibold ${draftReviewAnnotationButtonClass(selectedDraftAnnotationStatus === "needs-changes", "needs-changes")}`}
+                    >
+                      Needs changes
+                    </button>
+                    <button
+                      type="button"
+                      onClick={clearSelectedDraftAnnotation}
+                      disabled={!selectedDraftAnnotation}
+                      className="rounded-lg border border-white/10 px-2.5 py-1.5 text-[10.5px] font-semibold text-zinc-500 hover:bg-white/5 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+                <textarea
+                  value={selectedDraftAnnotationNote}
+                  onChange={(event) => updateSelectedDraftAnnotationNote(event.currentTarget.value)}
+                  maxLength={MAX_REVIEW_NOTE_CHARS}
+                  placeholder="Optional reviewer note for this generated draft. Kept in memory until drafts are dismissed."
+                  className="mt-3 h-16 w-full resize-none rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11.5px] leading-relaxed text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-violet-400/50"
+                />
+                <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-zinc-600">
+                  <span>{draftReviewAnnotationStatusLabel(selectedDraftAnnotationStatus)}{selectedDraftAnnotation?.updatedAtMs ? ` · updated ${formatReviewTime(selectedDraftAnnotation.updatedAtMs)}` : ""}</span>
+                  <span>{selectedDraftAnnotationNote.length}/{MAX_REVIEW_NOTE_CHARS} chars</span>
+                </div>
+              </div>
               <pre className="min-h-0 flex-1 overflow-auto whitespace-pre p-5 font-mono text-[11.5px] leading-relaxed text-zinc-300">
                 {selectedDraft.content}
               </pre>
@@ -1381,6 +1499,7 @@ export function EditorPanel({
 const MAX_DIFF_PREVIEW_LINES = 240;
 const MAX_DIFF_CONTEXT_LINES = 3;
 const MAX_DIFF_LINE_CHARS = 240;
+const MAX_REVIEW_NOTE_CHARS = 1000;
 
 interface ReviewedDraftApplicationRecord {
   key: string;
@@ -1395,6 +1514,13 @@ interface ReviewedDraftApplicationRecord {
   size: number;
 }
 
+interface ReviewedDraftAnnotationCounts {
+  reviewedCount: number;
+  needsChangesCount: number;
+  annotatedCount: number;
+  unreviewedCount: number;
+}
+
 interface ReviewedDraftSummaryItem {
   index: number;
   path: string;
@@ -1402,6 +1528,10 @@ interface ReviewedDraftSummaryItem {
   bytes: number;
   lines: number;
   applied: boolean;
+  reviewStatus: ReviewedDraftAnnotationStatus;
+  reviewNote?: string;
+  reviewNoteChars: number;
+  reviewUpdatedAtMs?: number;
   application?: ReviewedDraftApplicationRecord;
 }
 
@@ -1411,6 +1541,7 @@ interface ReviewedDraftSummary {
   pendingCount: number;
   totalBytes: number;
   lastAppliedAtMs?: number;
+  annotationCounts: ReviewedDraftAnnotationCounts;
   files: ReviewedDraftSummaryItem[];
 }
 
@@ -1439,9 +1570,12 @@ function summarizeReviewedDrafts(
   drafts: VFile[],
   appliedKeys: string[],
   appliedRecords: Record<string, ReviewedDraftApplicationRecord>,
+  annotations: Record<string, ReviewedDraftAnnotation> = {},
 ): ReviewedDraftSummary {
   const files = drafts.map((draft, index) => {
     const key = draftKey(draft, index);
+    const annotation = annotations[key];
+    const reviewNote = annotation?.note.trim() || undefined;
     return {
       index,
       path: normalizeDraftPath(draft.path) || draft.path,
@@ -1449,10 +1583,15 @@ function summarizeReviewedDrafts(
       bytes: textBytes(draft.content),
       lines: countLines(draft.content),
       applied: appliedKeys.includes(key),
+      reviewStatus: annotation?.status ?? "unreviewed",
+      reviewNote,
+      reviewNoteChars: reviewNote?.length ?? 0,
+      reviewUpdatedAtMs: annotation?.updatedAtMs,
       application: appliedRecords[key],
     };
   });
   const appliedCount = files.filter((file) => file.applied).length;
+  const annotationCounts = summarizeReviewAnnotationCounts(files);
   const lastAppliedAtMs = files
     .map((file) => file.application?.appliedAtMs ?? 0)
     .reduce((latest, value) => Math.max(latest, value), 0) || undefined;
@@ -1462,7 +1601,19 @@ function summarizeReviewedDrafts(
     pendingCount: Math.max(0, files.length - appliedCount),
     totalBytes: files.reduce((sum, file) => sum + file.bytes, 0),
     lastAppliedAtMs,
+    annotationCounts,
     files,
+  };
+}
+
+function summarizeReviewAnnotationCounts(files: ReviewedDraftSummaryItem[]): ReviewedDraftAnnotationCounts {
+  const reviewedCount = files.filter((file) => file.reviewStatus === "reviewed").length;
+  const needsChangesCount = files.filter((file) => file.reviewStatus === "needs-changes").length;
+  return {
+    reviewedCount,
+    needsChangesCount,
+    annotatedCount: reviewedCount + needsChangesCount + files.filter((file) => file.reviewNoteChars > 0 && file.reviewStatus === "unreviewed").length,
+    unreviewedCount: files.filter((file) => file.reviewStatus === "unreviewed" && file.reviewNoteChars === 0).length,
   };
 }
 
@@ -1470,17 +1621,19 @@ function buildReviewedDraftSummaryExport(
   drafts: VFile[],
   appliedKeys: string[],
   appliedRecords: Record<string, ReviewedDraftApplicationRecord>,
+  annotations: Record<string, ReviewedDraftAnnotation> = {},
 ): string {
-  const summary = summarizeReviewedDrafts(drafts, appliedKeys, appliedRecords);
+  const summary = summarizeReviewedDrafts(drafts, appliedKeys, appliedRecords, annotations);
   return JSON.stringify({
     label: "DevLab reviewed-draft Editor summary",
     generatedAt: new Date().toISOString(),
-    note: "Metadata only. Draft contents are omitted; workspace writes require explicit per-file Editor apply.",
+    note: "Metadata only. Draft contents are omitted; workspace writes require explicit per-file Editor apply. Session review annotation notes are included only because this copy action was explicit.",
     fileCount: summary.fileCount,
     appliedCount: summary.appliedCount,
     pendingCount: summary.pendingCount,
     totalBytes: summary.totalBytes,
     lastAppliedAtMs: summary.lastAppliedAtMs,
+    annotationCounts: summary.annotationCounts,
     files: summary.files,
   }, null, 2);
 }
@@ -1489,10 +1642,11 @@ function buildReviewedDraftVerificationPlan(
   drafts: VFile[],
   appliedKeys: string[],
   appliedRecords: Record<string, ReviewedDraftApplicationRecord>,
+  annotations: Record<string, ReviewedDraftAnnotation> = {},
   snapshot: TestRunnerSnapshot | null,
   unavailableReason?: string,
 ): ReviewedDraftVerificationPlan {
-  const draftSummary = summarizeReviewedDrafts(drafts, appliedKeys, appliedRecords);
+  const draftSummary = summarizeReviewedDrafts(drafts, appliedKeys, appliedRecords, annotations);
   const affectedPaths = draftSummary.files.map((file) => file.path);
   const recommendedProfiles = snapshot
     ? recommendVerificationProfiles(snapshot.profiles, affectedPaths)
@@ -1500,7 +1654,7 @@ function buildReviewedDraftVerificationPlan(
   return {
     label: "DevLab reviewed-draft verification plan",
     generatedAt: new Date().toISOString(),
-    note: "Metadata only. No tests or shell commands were executed by this plan. Run backend-owned profiles explicitly from Self-Healing Tests after applying reviewed drafts.",
+    note: "Metadata only. Draft contents are omitted; session annotation notes may be included because they were typed in this review. No tests or shell commands were executed by this plan. Run backend-owned profiles explicitly from Self-Healing Tests after applying reviewed drafts.",
     ...(unavailableReason ? { unavailableReason } : {}),
     draftSummary,
     affectedPaths,
@@ -1751,6 +1905,37 @@ function draftStatusClass(status?: DraftInspectionStatus): string {
     default:
       return "bg-white/[0.02]";
   }
+}
+
+function draftReviewAnnotationStatusLabel(status: ReviewedDraftAnnotationStatus): string {
+  switch (status) {
+    case "reviewed": return "Marked reviewed";
+    case "needs-changes": return "Needs changes";
+    case "unreviewed": return "Not marked reviewed";
+  }
+}
+
+function draftReviewAnnotationShortLabel(status: Exclude<ReviewedDraftAnnotationStatus, "unreviewed">): string {
+  return status === "reviewed" ? "reviewed" : "needs changes";
+}
+
+function draftReviewAnnotationPillClass(status: ReviewedDraftAnnotationStatus): string {
+  switch (status) {
+    case "reviewed": return "border border-emerald-400/20 bg-emerald-400/10 text-emerald-200";
+    case "needs-changes": return "border border-amber-400/20 bg-amber-400/10 text-amber-200";
+    case "unreviewed": return "border border-white/10 bg-white/[0.04] text-zinc-500";
+  }
+}
+
+function draftReviewAnnotationButtonClass(active: boolean, status: Exclude<ReviewedDraftAnnotationStatus, "unreviewed">): string {
+  if (status === "reviewed") {
+    return active
+      ? "border-emerald-400/40 bg-emerald-400/15 text-emerald-100"
+      : "border-emerald-400/20 text-emerald-200 hover:bg-emerald-400/10";
+  }
+  return active
+    ? "border-amber-400/40 bg-amber-400/15 text-amber-100"
+    : "border-amber-400/20 text-amber-200 hover:bg-amber-400/10";
 }
 
 function joinPath(parent: string, child: string): string {
