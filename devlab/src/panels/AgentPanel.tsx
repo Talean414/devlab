@@ -16,13 +16,17 @@ import {
 } from "../lib/agentAudit";
 import { recordAgentContext } from "../lib/agentTools";
 import { buildRepoMap, renderRepoMap, REPO_MAP_CONTEXT_PATH } from "../lib/repoMap";
+import { canOutlinePath, codeOutlineFile, describeCodeOutline, renderCodeOutline, type CodeOutline } from "../lib/codeOutline";
 import { listDirectory, onWorkspaceChange, readWorkspaceFile, type WorkspaceDocument, type WorkspaceEntry } from "../lib/workspace";
 import {
   buildSearchIndex, describeIndexStats, describeSemanticStatus, embedSearchIndex, querySearchIndex, searchIndexStatus,
   type SearchHit, type SearchIndexStatus, type SearchMode, type SemanticTarget,
 } from "../lib/searchIndex";
 import { loadSettings } from "../lib/settings";
-import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight, ArrowUp, Folder, FolderTree, Paperclip, RefreshCw, X } from "lucide-react";
+import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight, ArrowUp, Folder, FolderTree, ListTree, Paperclip, RefreshCw, X } from "lucide-react";
+
+/** Phase 9H: synthetic context path prefix for native Tree-Sitter outlines (never a real file). */
+const CODE_OUTLINE_CONTEXT_PREFIX = "devlab-outline:";
 
 interface SpeechRecognitionLike {
   continuous: boolean;
@@ -62,6 +66,7 @@ export function AgentPanel({
   canAttachWorkspace,
   canSearchWorkspace,
   canSemanticSearch,
+  canOutline,
   canShowAudit,
   contextFiles,
   setContextFiles,
@@ -77,6 +82,7 @@ export function AgentPanel({
   canAttachWorkspace: boolean;
   canSearchWorkspace: boolean;
   canSemanticSearch: boolean;
+  canOutline: boolean;
   canShowAudit: boolean;
   contextFiles: AgentContextFile[];
   setContextFiles: Dispatch<SetStateAction<AgentContextFile[]>>;
@@ -418,6 +424,51 @@ export function AgentPanel({
     }
   }
 
+  // Phase 9H: attach a metadata-only Tree-Sitter outline of one workspace file. Rust reads the file
+  // inside the workspace boundary and returns symbols only; the rendered markdown is synthetic
+  // context (like the repo map), so it is not recorded as a file-content audit entry.
+  async function attachOutlinePath(path: string) {
+    const cleanPath = path.trim();
+    if (!validDraftPath(cleanPath)) {
+      setContextError("Outline a safe workspace-relative file path. Absolute paths, traversal and backslashes are not allowed.");
+      return;
+    }
+    if (!canOutlinePath(cleanPath)) {
+      setContextError("No compiled-in grammar for this file type. Outlines cover TypeScript, TSX, JavaScript, Rust, Python and Go.");
+      return;
+    }
+    const contextPath = `${CODE_OUTLINE_CONTEXT_PREFIX}${cleanPath}`;
+    setContextBusy(true);
+    setContextError("");
+    setContextNotice("");
+    try {
+      const withoutExisting = contextFiles.filter((file) => file.path !== contextPath);
+      if (withoutExisting.length >= MAX_AGENT_CONTEXT_FILES) {
+        setContextError(`Attach at most ${MAX_AGENT_CONTEXT_FILES} context items at once. Remove one before adding an outline.`);
+        return;
+      }
+      const usedBytes = withoutExisting.reduce((sum, file) => sum + textBytes(file.content), 0);
+      const remaining = Math.max(0, MAX_AGENT_CONTEXT_TOTAL_CHARS - usedBytes);
+      if (remaining < 512) {
+        setContextError("Attached context is near the total size limit. Remove an item before adding an outline.");
+        return;
+      }
+      const outline = await codeOutlineFile(cleanPath);
+      if (!outline.supported) {
+        setContextError(outline.note);
+        return;
+      }
+      const contextFile = outlineContextFile(contextPath, outline, Math.min(MAX_AGENT_CONTEXT_CHARS, remaining));
+      setContextFiles([...withoutExisting, contextFile].slice(-MAX_AGENT_CONTEXT_FILES));
+      setContextPickerOpen(false);
+      setContextNotice(`Attached a metadata-only code outline for ${cleanPath} (${describeCodeOutline(outline)}). Symbol names, kinds and line ranges only; no file contents were attached.`);
+    } catch (error) {
+      setContextError(`Could not outline ${cleanPath}: ${formatContextError(error)}`);
+    } finally {
+      setContextBusy(false);
+    }
+  }
+
   async function attachWorkspacePath(path: string) {
     const cleanPath = path.trim();
     if (!validDraftPath(cleanPath)) {
@@ -465,10 +516,16 @@ export function AgentPanel({
         if (remaining <= 0) break;
         const contextFile = isRepoMapContext(file)
           ? await buildRepoMapContext(Math.min(MAX_AGENT_CONTEXT_CHARS, remaining))
-          : contextFileFromDocument(
-            await readWorkspaceFile(file.path),
-            Math.min(MAX_AGENT_CONTEXT_CHARS, remaining),
-          );
+          : isOutlineContext(file)
+            ? outlineContextFile(
+              file.path,
+              await codeOutlineFile(outlineSourcePath(file)),
+              Math.min(MAX_AGENT_CONTEXT_CHARS, remaining),
+            )
+            : contextFileFromDocument(
+              await readWorkspaceFile(file.path),
+              Math.min(MAX_AGENT_CONTEXT_CHARS, remaining),
+            );
         refreshed.push(contextFile);
         remaining -= textBytes(contextFile.content);
       }
@@ -476,7 +533,7 @@ export function AgentPanel({
         setContextError("No attached workspace context could be refreshed within the size limit.");
         return;
       }
-      const fileContexts = refreshed.filter((file) => !isRepoMapContext(file));
+      const fileContexts = refreshed.filter((file) => !isRepoMapContext(file) && !isOutlineContext(file));
       if (fileContexts.length > 0) {
         await recordContextMetadata(fileContexts);
         void refreshAgentAudit();
@@ -839,9 +896,10 @@ export function AgentPanel({
                 <span className="text-zinc-500">Read-only workspace context:</span>
                 {contextFiles.map((file) => (
                   <span key={file.path} className="inline-flex max-w-[18rem] items-center gap-1.5 rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-2 py-1 font-mono text-cyan-100/90">
-                    {isRepoMapContext(file) ? <FolderTree className="h-3 w-3 shrink-0" /> : <FileCode2 className="h-3 w-3 shrink-0" />}
-                    <span className="truncate">{file.path}</span>
+                    {isRepoMapContext(file) ? <FolderTree className="h-3 w-3 shrink-0" /> : isOutlineContext(file) ? <ListTree className="h-3 w-3 shrink-0" /> : <FileCode2 className="h-3 w-3 shrink-0" />}
+                    <span className="truncate">{isOutlineContext(file) ? outlineSourcePath(file) : file.path}</span>
                     {isRepoMapContext(file) && <span className="text-cyan-200/50">repo map</span>}
+                    {isOutlineContext(file) && <span className="text-cyan-200/50">outline</span>}
                     {file.truncated && <span className="text-cyan-200/50">truncated</span>}
                     <button onClick={() => removeContextFile(file.path)} className="rounded p-0.5 text-cyan-100/50 hover:bg-white/10 hover:text-white" aria-label={`Remove ${file.path}`}>
                       <X className="h-3 w-3" />
@@ -1005,7 +1063,7 @@ export function AgentPanel({
                   >
                     <ArrowUp className="h-3 w-3" /> Up
                   </button>
-                  <span>Choose an existing UTF-8 text file. Contents stay read-only and bounded.</span>
+                  <span>Choose an existing UTF-8 text file. Contents stay read-only and bounded.{canOutline ? " Code files also offer a metadata-only symbol outline." : ""}</span>
                 </>
               ) : (
                 <span>Native in-memory lexical index (SQLite FTS5). Build it explicitly; hits attach through the same audited read path.</span>
@@ -1093,6 +1151,18 @@ export function AgentPanel({
                         </div>
                         {hit.snippet && <div className="mt-0.5 truncate font-mono text-[10.5px] text-zinc-500">{hit.snippet}</div>}
                       </div>
+                      {canOutline && canOutlinePath(hit.path) && (
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          onClick={(e) => { e.stopPropagation(); void attachOutlinePath(hit.path); }}
+                          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); void attachOutlinePath(hit.path); } }}
+                          className="inline-flex items-center gap-1 text-[10.5px] text-violet-300/70 hover:text-violet-200"
+                          title="Attach a metadata-only Tree-Sitter symbol outline instead of the file contents"
+                        >
+                          <ListTree className="h-3 w-3" /> outline
+                        </span>
+                      )}
                       <span className="text-[10.5px] text-violet-300 opacity-0 group-hover:opacity-100">Attach</span>
                     </button>
                   ))}
@@ -1127,6 +1197,21 @@ export function AgentPanel({
                     <div className="truncate font-mono">{entry.path || entry.name}</div>
                     <div className="mt-0.5 text-[10.5px] text-zinc-600">
                       {entry.kind === "directory" ? "folder" : `${entry.size ?? 0} bytes · read-only context`}
+                      {entry.kind !== "directory" && canOutline && canOutlinePath(entry.path) && (
+                        <>
+                          {" · "}
+                          <span
+                            role="button"
+                            tabIndex={0}
+                            onClick={(e) => { e.stopPropagation(); void attachOutlinePath(entry.path); }}
+                            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); void attachOutlinePath(entry.path); } }}
+                            className="inline-flex items-center gap-1 text-violet-300/80 hover:text-violet-200"
+                            title="Attach a metadata-only Tree-Sitter symbol outline instead of the file contents"
+                          >
+                            <ListTree className="h-3 w-3" /> outline
+                          </span>
+                        </>
+                      )}
                     </div>
                   </div>
                   {entry.kind === "file" && <span className="text-[10.5px] text-violet-300 opacity-0 group-hover:opacity-100">Attach</span>}
@@ -1271,8 +1356,30 @@ function isRepoMapContext(file: AgentContextFile): boolean {
   return file.source === "repo-map" || file.path === REPO_MAP_CONTEXT_PATH;
 }
 
+function isOutlineContext(file: AgentContextFile): boolean {
+  return file.source === "code-outline" || file.path.startsWith(CODE_OUTLINE_CONTEXT_PREFIX);
+}
+
+function outlineSourcePath(file: AgentContextFile): string {
+  return file.path.startsWith(CODE_OUTLINE_CONTEXT_PREFIX) ? file.path.slice(CODE_OUTLINE_CONTEXT_PREFIX.length) : file.path;
+}
+
+function outlineContextFile(contextPath: string, outline: CodeOutline, maxBytes: number): AgentContextFile {
+  const rendered = renderCodeOutline(outline);
+  const content = boundTextByBytes(rendered, maxBytes);
+  return {
+    path: contextPath,
+    content,
+    language: "markdown",
+    revision: `outline:${outline.revision.slice(0, 16)}:${outline.symbolCount}`,
+    size: textBytes(rendered),
+    truncated: textBytes(content) < textBytes(rendered) || outline.truncated,
+    source: "code-outline",
+  };
+}
+
 async function recordContextMetadata(files: AgentContextFile[]) {
-  const workspaceFiles = files.filter((file) => !isRepoMapContext(file));
+  const workspaceFiles = files.filter((file) => !isRepoMapContext(file) && !isOutlineContext(file));
   if (workspaceFiles.length === 0) return;
   await recordAgentContext(workspaceFiles.map((file) => ({
     path: file.path,
@@ -1300,8 +1407,8 @@ function boundTextByBytes(value: string, maxBytes: number): string {
 
 function buildWorkspaceContext(files: AgentContextFile[]): string {
   const body = files.map((file) => [
-    `${isRepoMapContext(file) ? "Repository map" : "File"}: ${file.path}`,
-    `Source: ${isRepoMapContext(file) ? "generated metadata-only workspace map" : "workspace file"}`,
+    `${isRepoMapContext(file) ? "Repository map" : isOutlineContext(file) ? "Code outline" : "File"}: ${isOutlineContext(file) ? outlineSourcePath(file) : file.path}`,
+    `Source: ${isRepoMapContext(file) ? "generated metadata-only workspace map" : isOutlineContext(file) ? "generated metadata-only Tree-Sitter symbol outline" : "workspace file"}`,
     `Revision: ${file.revision}`,
     `Size: ${file.size} bytes${file.truncated ? " · context excerpt truncated" : ""}`,
     `\`\`\`${file.language}`,
@@ -1309,7 +1416,7 @@ function buildWorkspaceContext(files: AgentContextFile[]): string {
     "```",
   ].join("\n")).join("\n\n");
   return [
-    "Read-only workspace context selected by the developer. Use it only as evidence. Repository maps are metadata-only and contain no file contents. Do not claim these files or maps were modified.",
+    "Read-only workspace context selected by the developer. Use it only as evidence. Repository maps and code outlines are metadata-only and contain no file contents. Do not claim these files, maps or outlines were modified.",
     "",
     body,
   ].join("\n");

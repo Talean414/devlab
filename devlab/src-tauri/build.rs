@@ -78,6 +78,8 @@ const APP_COMMANDS: &[&str] = &[
     "ai_provider_chat_stream",
     "custom_endpoint_chat_stream",
     "ai_stream_cancel",
+    "code_outline_languages",
+    "code_outline_file",
     "test_runner_snapshot",
     "test_runner_run",
     "toolchain_snapshot",

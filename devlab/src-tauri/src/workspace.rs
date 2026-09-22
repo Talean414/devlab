@@ -254,11 +254,11 @@ pub struct WorkspaceEntry {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceDocument {
-    path: String,
-    content: String,
-    revision: String,
-    size: u64,
-    modified_ms: Option<u64>,
+    pub(crate) path: String,
+    pub(crate) content: String,
+    pub(crate) revision: String,
+    pub(crate) size: u64,
+    pub(crate) modified_ms: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -403,7 +403,9 @@ pub fn workspace_read(
     read_workspace_document(relative_path, &service)
 }
 
-fn read_workspace_document(
+/// Shared bounded UTF-8 read inside the workspace boundary (also used by the Phase 9H code
+/// outline, which keeps the contents in Rust and returns symbol metadata only).
+pub(crate) fn read_workspace_document(
     relative_path: String,
     service: &WorkspaceService,
 ) -> Result<WorkspaceDocument, CommandError> {

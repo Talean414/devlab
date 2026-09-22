@@ -85,6 +85,8 @@
     "allow-ai-provider-chat-stream",
     "allow-custom-endpoint-chat-stream",
     "allow-ai-stream-cancel",
+    "allow-code-outline-languages",
+    "allow-code-outline-file",
     "allow-test-runner-snapshot",
     "allow-test-runner-run",
     "allow-toolchain-snapshot"
