@@ -1,8 +1,18 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import type { AgentContextFile, ChatMessage, OpenGeneratedDrafts, VFile } from "../types";
+import { AgentAuditCard } from "../components/AgentAuditCard";
 import { Markdown } from "../components/CodeBlock";
 import { getApiKey, streamChat, getModel, type GenTurn } from "../lib/gemini";
-import { listAgentAudit, type AgentAuditEvent } from "../lib/agentAudit";
+import {
+  AGENT_AUDIT_KIND_FILTERS,
+  buildAgentAuditMetadataExport,
+  filterAgentAuditEvents,
+  formatAgentAuditShortTime,
+  isAgentRelevantAudit,
+  listAgentAudit,
+  type AgentAuditEvent,
+  type AgentAuditKindFilter,
+} from "../lib/agentAudit";
 import { recordAgentContext } from "../lib/agentTools";
 import { listDirectory, readWorkspaceFile, type WorkspaceDocument, type WorkspaceEntry } from "../lib/workspace";
 import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight, ArrowUp, Folder, Paperclip, RefreshCw, X } from "lucide-react";
@@ -38,13 +48,6 @@ const MAX_AGENT_DRAFT_PATH_BYTES = 512;
 const MAX_AGENT_CONTEXT_FILES = 4;
 const MAX_AGENT_CONTEXT_CHARS = 16 * 1024;
 const MAX_AGENT_CONTEXT_TOTAL_CHARS = 48 * 1024;
-type AgentAuditKindFilter = "all" | "agent-context" | "multi-file-draft" | "reviewed-draft";
-const AGENT_AUDIT_FILTERS: { value: AgentAuditKindFilter; label: string }[] = [
-  { value: "all", label: "All" },
-  { value: "agent-context", label: "Context" },
-  { value: "multi-file-draft", label: "Draft staging" },
-  { value: "reviewed-draft", label: "Reviewed writes" },
-];
 
 export function AgentPanel({
   onNeedKey,
@@ -90,6 +93,8 @@ export function AgentPanel({
   const [auditError, setAuditError] = useState("");
   const [auditKindFilter, setAuditKindFilter] = useState<AgentAuditKindFilter>("all");
   const [auditQuery, setAuditQuery] = useState("");
+  const [auditLastRefreshedMs, setAuditLastRefreshedMs] = useState<number | null>(null);
+  const [auditCopyNotice, setAuditCopyNotice] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const recRef = useRef<SpeechRecognitionLike | null>(null);
   const hasKey = !!getApiKey();
@@ -133,9 +138,11 @@ export function AgentPanel({
     if (!canShowAudit) return;
     setAuditLoading(true);
     setAuditError("");
+    setAuditCopyNotice("");
     try {
       const events = await listAgentAudit(50);
       setAuditEvents(events.filter(isAgentRelevantAudit).slice(0, 24));
+      setAuditLastRefreshedMs(Date.now());
     } catch (error) {
       setAuditError(formatContextError(error));
     } finally {
@@ -339,6 +346,32 @@ export function AgentPanel({
   const visibleAuditEvents = filterAgentAuditEvents(auditEvents, auditKindFilter, auditQuery).slice(0, 8);
   const hasAuditFilters = auditKindFilter !== "all" || auditQuery.trim().length > 0;
 
+  async function copyVisibleAuditMetadata() {
+    if (visibleAuditEvents.length === 0) {
+      setAuditCopyNotice("No visible Agent audit metadata to copy.");
+      return;
+    }
+    setAuditError("");
+    setAuditCopyNotice("");
+    if (!navigator.clipboard?.writeText) {
+      setAuditError("Clipboard access is unavailable in this environment. Nothing was copied.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(buildAgentAuditMetadataExport(visibleAuditEvents, {
+        label: "DevLab visible Agent audit metadata",
+        filters: {
+          kind: auditKindFilter,
+          query: auditQuery.trim(),
+          source: "Agent panel visible events",
+        },
+      }));
+      setAuditCopyNotice(`Copied ${visibleAuditEvents.length} metadata event${visibleAuditEvents.length === 1 ? "" : "s"} to clipboard.`);
+    } catch (error) {
+      setAuditError(`Could not copy audit metadata: ${formatContextError(error)}`);
+    }
+  }
+
   return (
     <div className="flex h-full flex-col">
       <PanelHeader
@@ -460,6 +493,16 @@ export function AgentPanel({
               >
                 {auditOpen ? "Hide" : "Show"}
               </button>
+              {auditOpen && (
+                <button
+                  onClick={() => { void copyVisibleAuditMetadata(); }}
+                  disabled={visibleAuditEvents.length === 0}
+                  className="text-zinc-500 hover:text-zinc-200 disabled:opacity-40"
+                  title="Copy visible metadata-only audit events"
+                >
+                  Copy visible
+                </button>
+              )}
               <button
                 onClick={() => { void refreshAgentAudit(); }}
                 disabled={auditLoading}
@@ -479,7 +522,7 @@ export function AgentPanel({
                     className="rounded-lg border border-white/10 bg-black/20 px-2 py-1.5 text-[11px] text-zinc-300 outline-none focus:border-cyan-500/40"
                     aria-label="Filter Agent audit activity"
                   >
-                    {AGENT_AUDIT_FILTERS.map((filter) => <option key={filter.value} value={filter.value}>{filter.label}</option>)}
+                    {AGENT_AUDIT_KIND_FILTERS.map((filter) => <option key={filter.value} value={filter.value}>{filter.label}</option>)}
                   </select>
                   <input
                     value={auditQuery}
@@ -501,34 +544,13 @@ export function AgentPanel({
                 {!auditError && auditEvents.length > 0 && visibleAuditEvents.length === 0 && (
                   <div className="text-zinc-600">No matching Agent audit events.</div>
                 )}
-                {!auditError && visibleAuditEvents.map((event) => (
-                  <div key={event.id} className="rounded-lg border border-white/10 bg-black/15 p-2">
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono text-[10.5px] text-zinc-500">{auditTime(event.timestampMs)}</span>
-                      <span className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[10.5px] text-cyan-200">{event.kind}</span>
-                      <span className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[10.5px] text-zinc-400">{event.action}</span>
-                      <span className={`ml-auto font-semibold ${auditTone(event.outcome)}`}>{event.outcome}</span>
-                    </div>
-                    <div className="mt-1 truncate font-mono text-[10.5px] text-zinc-500">{event.target}</div>
-                    <div className="mt-1 text-zinc-300/80">{event.summary}</div>
-                    <details className="mt-1.5 rounded-lg border border-white/5 bg-white/[0.02] px-2 py-1 text-[10.5px] text-zinc-500">
-                      <summary className="cursor-pointer select-none text-zinc-400 hover:text-zinc-200">Metadata details</summary>
-                      <dl className="mt-1.5 grid gap-x-3 gap-y-1 sm:grid-cols-[5.5rem_1fr]">
-                        <dt>Audit ID</dt><dd className="font-mono text-zinc-300">{event.id}</dd>
-                        <dt>Timestamp</dt><dd className="font-mono text-zinc-300">{auditFullTime(event.timestampMs)}</dd>
-                        <dt>Workspace</dt><dd className="truncate font-mono text-zinc-300">{event.workspaceName ?? "workspace not recorded"}</dd>
-                        <dt>Kind</dt><dd className="font-mono text-zinc-300">{event.kind}</dd>
-                        <dt>Action</dt><dd className="font-mono text-zinc-300">{event.action}</dd>
-                        <dt>Outcome</dt><dd className="font-mono text-zinc-300">{event.outcome}</dd>
-                        <dt>Target</dt><dd className="break-all font-mono text-zinc-300">{event.target}</dd>
-                        <dt>Summary</dt><dd className="break-words text-zinc-300">{event.summary}</dd>
-                      </dl>
-                      <div className="mt-1.5 text-zinc-600">Metadata only — file contents, captured outputs and credentials are not included.</div>
-                    </details>
+                {!auditError && visibleAuditEvents.map((event) => <AgentAuditCard key={event.id} event={event} />)}
+                {!auditError && auditCopyNotice && <div className="text-[10.5px] text-emerald-300">{auditCopyNotice}</div>}
+                {!auditError && auditEvents.length > 0 && (
+                  <div className="text-[10.5px] text-zinc-600">
+                    Showing {visibleAuditEvents.length} filtered metadata event{visibleAuditEvents.length === 1 ? "" : "s"} from the latest {auditEvents.length} Agent-relevant audit records
+                    {auditLastRefreshedMs ? ` · refreshed ${formatAgentAuditShortTime(auditLastRefreshedMs)}` : ""}.
                   </div>
-                ))}
-                {!auditError && visibleAuditEvents.length > 0 && auditEvents.length > visibleAuditEvents.length && (
-                  <div className="text-[10.5px] text-zinc-600">Showing {visibleAuditEvents.length} filtered metadata events from the latest {auditEvents.length} Agent-relevant audit records.</div>
                 )}
               </div>
             )}
@@ -720,41 +742,6 @@ export function PanelHeader({
   );
 }
 
-
-function filterAgentAuditEvents(events: AgentAuditEvent[], kindFilter: AgentAuditKindFilter, query: string): AgentAuditEvent[] {
-  const normalizedQuery = query.trim().toLowerCase();
-  return events.filter((event) => {
-    if (kindFilter !== "all" && event.kind !== kindFilter) return false;
-    if (!normalizedQuery) return true;
-    return [event.kind, event.action, event.target, event.outcome, event.summary]
-      .some((value) => value.toLowerCase().includes(normalizedQuery));
-  });
-}
-
-function isAgentRelevantAudit(event: AgentAuditEvent): boolean {
-  return event.kind === "agent-context" || event.kind === "multi-file-draft" || event.kind === "reviewed-draft";
-}
-
-function auditTime(timestampMs: number): string {
-  return new Date(timestampMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function auditFullTime(timestampMs: number): string {
-  return new Date(timestampMs).toLocaleString([], {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-}
-
-function auditTone(outcome: string): string {
-  if (outcome === "success" || outcome === "passed" || outcome === "review" || outcome === "read-only") return "text-emerald-300";
-  if (outcome === "failed" || outcome === "error") return "text-rose-300";
-  return "text-amber-300";
-}
 
 function parentPath(path: string): string {
   const parts = path.split("/").filter(Boolean);

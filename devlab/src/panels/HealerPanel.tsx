@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
+import { AgentAuditCard } from "../components/AgentAuditCard";
 import { PanelHeader } from "./AgentPanel";
 import { getApiKey, streamChat } from "../lib/gemini";
-import { listAgentAudit, type AgentAuditEvent } from "../lib/agentAudit";
+import {
+  AGENT_AUDIT_METADATA_NOTE,
+  formatAgentAuditShortTime,
+  listAgentAudit,
+  type AgentAuditEvent,
+} from "../lib/agentAudit";
 import { readWorkspaceFile } from "../lib/workspace";
 import type { OpenGeneratedDrafts } from "../types";
 import {
@@ -43,17 +49,6 @@ function errorTitle(error: string) {
 
 function visibleError(error: string) {
   return error.replace(/^Repair draft error:\s*/, "");
-}
-
-function auditTime(timestampMs: number) {
-  if (!timestampMs) return "unknown time";
-  return new Date(timestampMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function auditTone(outcome: string) {
-  if (["passed", "success"].includes(outcome)) return "text-emerald-300";
-  if (["timeout", "error", "failed"].includes(outcome)) return "text-rose-300";
-  return "text-zinc-400";
 }
 
 function excerpt(value: string, maxChars: number) {
@@ -301,6 +296,7 @@ export function HealerPanel({
   const [auditEvents, setAuditEvents] = useState<AgentAuditEvent[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState("");
+  const [auditLastRefreshedMs, setAuditLastRefreshedMs] = useState<number | null>(null);
 
   const selected = useMemo(
     () => snapshot?.profiles.find((profile) => profile.id === selectedId) ?? snapshot?.profiles[0],
@@ -312,6 +308,7 @@ export function HealerPanel({
     setAuditError("");
     try {
       setAuditEvents(await listAgentAudit(8));
+      setAuditLastRefreshedMs(Date.now());
     } catch (err) {
       setAuditError(formatError(err));
     } finally {
@@ -559,24 +556,17 @@ ${document.content}
                 </button>
               </div>
               <p className="mt-1 text-[10.5px] leading-relaxed text-zinc-600">
-                Native memory log for test runs and reviewed-draft writes. Outputs and file contents are not stored.
+                Native memory log for test runs and reviewed-draft writes. {AGENT_AUDIT_METADATA_NOTE}
               </p>
+              {auditLastRefreshedMs && !auditError && (
+                <div className="mt-1 text-[10.5px] text-zinc-600">Last refreshed {formatAgentAuditShortTime(auditLastRefreshedMs)} · {auditEvents.length} metadata event{auditEvents.length === 1 ? "" : "s"}</div>
+              )}
               {auditError && <div className="mt-2 text-[10.5px] text-rose-300">{auditError}</div>}
               {!auditError && auditEvents.length === 0 && (
                 <div className="mt-3 text-[11px] text-zinc-600">No audited actions yet.</div>
               )}
               <div className="mt-2 space-y-2">
-                {auditEvents.map((event) => (
-                  <div key={event.id} className="rounded-lg border border-white/5 bg-white/[0.02] p-2">
-                    <div className="flex items-center gap-2 text-[10.5px]">
-                      <Clock3 className="h-3 w-3 text-zinc-500" />
-                      <span className="font-mono text-zinc-500">{auditTime(event.timestampMs)}</span>
-                      <span className={`ml-auto font-semibold ${auditTone(event.outcome)}`}>{event.outcome}</span>
-                    </div>
-                    <div className="mt-1 truncate font-mono text-[10.5px] text-zinc-300">{event.target}</div>
-                    <div className="mt-0.5 line-clamp-2 text-[10.5px] leading-relaxed text-zinc-600">{event.summary}</div>
-                  </div>
-                ))}
+                {auditEvents.map((event) => <AgentAuditCard key={event.id} event={event} compact />)}
               </div>
             </div>
           </div>
