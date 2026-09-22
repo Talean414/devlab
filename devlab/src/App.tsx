@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import type { AgentContextFile, BuilderPhase, BuilderPlan, ChatMessage, OpenGeneratedDrafts, VFile, ViewId } from "./types";
+import type { AgentContextFile, BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, ChatMessage, OpenGeneratedDrafts, VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import { loadDeploy, loadGit, loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
 import { resolveAiRoute } from "./lib/modelRouting";
@@ -116,6 +116,8 @@ export default function App() {
   const [builderBuiltFiles, setBuilderBuiltFiles] = useState<VFile[]>([]);
   const [builderStaging, setBuilderStaging] = useState(false);
   const [builderStageNotice, setBuilderStageNotice] = useState("");
+  // Session-only metadata ledger for task batches staged into Editor review; intentionally not persisted.
+  const [builderTaskStagingLedger, setBuilderTaskStagingLedger] = useState<BuilderTaskStagingRecord[]>([]);
   const [pendingRecovery, setPendingRecovery] = useState<SessionRecoverySnapshot | null>(() => loadSessionRecovery());
   const [recoveryReady, setRecoveryReady] = useState(() => !loadSessionRecovery());
 
@@ -226,6 +228,7 @@ export default function App() {
     setBuilderBuiltFiles([]);
     setBuilderStaging(false);
     setBuilderStageNotice("");
+    setBuilderTaskStagingLedger([]);
     setGeneratedDrafts([]);
   }
 
@@ -345,6 +348,8 @@ export default function App() {
             setStaging={setBuilderStaging}
             stageNotice={builderStageNotice}
             setStageNotice={setBuilderStageNotice}
+            taskStagingLedger={builderTaskStagingLedger}
+            setTaskStagingLedger={setBuilderTaskStagingLedger}
           />
         </Suspense>
         : nativeFeature(
@@ -530,7 +535,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 8K task handoffs</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 8L task batch staging</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}

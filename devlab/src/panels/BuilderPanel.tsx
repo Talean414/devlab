@@ -4,10 +4,10 @@ import { Markdown } from "../components/CodeBlock";
 import { getApiKey, getCurrentAiRoute, streamChat, type GenTurn } from "../lib/gemini";
 import { loadSettings } from "../lib/settings";
 import { projectTemplates } from "../data/templates";
-import type { BuilderPhase, BuilderPlan, OpenGeneratedDrafts, VFile } from "../types";
+import type { BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, OpenGeneratedDrafts, VFile } from "../types";
 import {
   Wand2, Loader2, CheckCircle2, FileCode2, TerminalSquare,
-  Sparkles, RotateCcw, FolderPlus, ArrowRight, ClipboardList, Copy,
+  Sparkles, RotateCcw, FolderPlus, ArrowRight, ClipboardList, Copy, ListChecks,
 } from "lucide-react";
 
 const MAX_PLAN_FILES = 12;
@@ -16,6 +16,7 @@ const MAX_PLAN_COMMANDS = 16;
 const MAX_DRAFT_BYTES = 512 * 1024;
 const MAX_FILE_OUTPUT_CHARS = 96 * 1024;
 const MAX_SPEC_CHARS = 48 * 1024;
+const MAX_TASK_STAGING_RECORDS = 24;
 
 const IDEAS = [
   "A SaaS dashboard with auth, Stripe billing and a Postgres database",
@@ -86,6 +87,8 @@ export function BuilderPanel({
   setStaging,
   stageNotice,
   setStageNotice,
+  taskStagingLedger,
+  setTaskStagingLedger,
 }: {
   onNeedKey: () => void;
   onOpenFiles: OpenGeneratedDrafts;
@@ -109,6 +112,8 @@ export function BuilderPanel({
   setStaging: Dispatch<SetStateAction<boolean>>;
   stageNotice: string;
   setStageNotice: Dispatch<SetStateAction<string>>;
+  taskStagingLedger: BuilderTaskStagingRecord[];
+  setTaskStagingLedger: Dispatch<SetStateAction<BuilderTaskStagingRecord[]>>;
 }) {
   const outRef = useRef<HTMLDivElement>(null);
   const [specNotice, setSpecNotice] = useState("");
@@ -116,17 +121,20 @@ export function BuilderPanel({
   const [taskPlanNotice, setTaskPlanNotice] = useState("");
   const [taskHandoffNotice, setTaskHandoffNotice] = useState("");
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [stagingTaskId, setStagingTaskId] = useState<string | null>(null);
+  const [taskStagingNotice, setTaskStagingNotice] = useState("");
   const settings = loadSettings();
   const specPreview = plan ? buildSpecMetadataPreview(plan, brief) : null;
   const taskPlanPreview = plan ? buildTaskPlanPreview(plan, builtFiles) : null;
-  const taskHandoffPreview = taskPlanPreview && plan ? buildTaskHandoffPreview(taskPlanPreview, builtFiles, plan.summary) : null;
+  const taskHandoffPreview = taskPlanPreview && plan ? buildTaskHandoffPreview(taskPlanPreview, builtFiles, plan.summary, taskStagingLedger) : null;
+  const taskStagingLedgerPreview = buildTaskStagingLedgerPreview(taskStagingLedger);
 
   async function generatePlan(text: string) {
     if (!text.trim()) return;
     const route = getCurrentAiRoute("planning");
     if (route.status !== "active") { setError(route.reason); return; }
     if (!getApiKey()) { onNeedKey(); return; }
-    setBusy(true); setError(""); setRaw(""); setPlan(null); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setTaskHandoffNotice(""); setActiveTaskId(null); setPhase("planning");
+    setBusy(true); setError(""); setRaw(""); setPlan(null); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setTaskHandoffNotice(""); setTaskStagingNotice(""); setTaskStagingLedger([]); setActiveTaskId(null); setPhase("planning");
 
     const templateList = projectTemplates.map((t) => `${t.id} (${t.stack}, ${t.lang})`).join(", ");
     const prompt = `You are DevLab's project architect. The developer wants to build:
@@ -226,6 +234,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setStageNotice("");
     setTaskPlanNotice("");
     setTaskHandoffNotice("");
+    setTaskStagingNotice("");
     try {
       const opened = await onOpenFiles(builtFiles, plan.summary);
       if (opened) {
@@ -247,6 +256,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setSpecPreviewNotice("");
     setTaskPlanNotice("");
     setTaskHandoffNotice("");
+    setTaskStagingNotice("");
     if (!navigator.clipboard?.writeText) {
       setError("Clipboard access is unavailable in this environment. Nothing was copied.");
       return;
@@ -266,6 +276,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setSpecPreviewNotice("");
     setTaskPlanNotice("");
     setTaskHandoffNotice("");
+    setTaskStagingNotice("");
     if (!navigator.clipboard?.writeText) {
       setError("Clipboard access is unavailable in this environment. Nothing was copied.");
       return;
@@ -285,6 +296,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setSpecPreviewNotice("");
     setTaskPlanNotice("");
     setTaskHandoffNotice("");
+    setTaskStagingNotice("");
     if (!navigator.clipboard?.writeText) {
       setError("Clipboard access is unavailable in this environment. Nothing was copied.");
       return;
@@ -304,6 +316,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setSpecPreviewNotice("");
     setTaskPlanNotice("");
     setTaskHandoffNotice("");
+    setTaskStagingNotice("");
     if (!navigator.clipboard?.writeText) {
       setError("Clipboard access is unavailable in this environment. Nothing was copied.");
       return;
@@ -334,6 +347,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setSpecPreviewNotice("");
     setTaskPlanNotice("");
     setTaskHandoffNotice("");
+    setTaskStagingNotice("");
     const targetFiles = task.reviewedFileTargets
       .map((targetPath) => plan.files.find((file) => file.path === targetPath))
       .filter((file): file is BuilderPlan["files"][number] => Boolean(file));
@@ -366,6 +380,66 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     }
   }
 
+  async function stageTaskDrafts(taskId: string) {
+    if (!plan || !taskPlanPreview) return;
+    const task = taskPlanPreview.tasks.find((item) => item.id === taskId);
+    if (!task) return;
+    setError("");
+    setStageNotice("");
+    setTaskPlanNotice("");
+    setTaskHandoffNotice("");
+    setTaskStagingNotice("");
+    const builtByPath = new Map(builtFiles.map((file) => [file.path, file]));
+    const taskFiles = task.generatedFileTargets
+      .map((path) => builtByPath.get(path))
+      .filter((file): file is VFile => Boolean(file));
+    if (taskFiles.length === 0) {
+      setTaskStagingNotice(`${task.id} has no generated in-memory drafts to stage. Generate missing drafts first; nothing was staged or written.`);
+      return;
+    }
+    setStagingTaskId(task.id);
+    setStaging(true);
+    try {
+      const summary = boundSpecText(`Builder task batch ${task.id} — ${task.title}: ${plan.summary}`, 1_800);
+      const opened = await onOpenFiles(taskFiles, summary);
+      if (!opened) {
+        setError(`${task.id} drafts were not staged for editor review. Nothing was written.`);
+        return;
+      }
+      const record = buildTaskStagingRecord(task, taskFiles, summary);
+      setTaskStagingLedger((current) => [record, ...current.filter((item) => item.taskId !== task.id)].slice(0, MAX_TASK_STAGING_RECORDS));
+      // The Builder panel unmounts while Editor review is open, so the success notice lives in App-level state.
+      setStageNotice(
+        `Native agent-tools staged ${taskFiles.length} reviewed draft file${taskFiles.length === 1 ? "" : "s"} for ${task.id}${task.pendingFileTargets.length > 0 ? ` (${task.pendingFileTargets.length} target${task.pendingFileTargets.length === 1 ? "" : "s"} still pending)` : ""}. Nothing was written; apply each file in Editor review.`,
+      );
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setStaging(false);
+      setStagingTaskId(null);
+    }
+  }
+
+  async function copyTaskStagingLedger() {
+    setError("");
+    setTaskHandoffNotice("");
+    setTaskStagingNotice("");
+    if (taskStagingLedger.length === 0) {
+      setTaskStagingNotice("No task batches have been staged for Editor review in this session. Nothing was copied.");
+      return;
+    }
+    if (!navigator.clipboard?.writeText) {
+      setError("Clipboard access is unavailable in this environment. Nothing was copied.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(taskStagingLedgerPreview.exportText);
+      setTaskStagingNotice(`Copied metadata-only task staging ledger for ${taskStagingLedger.length} staged batch${taskStagingLedger.length === 1 ? "" : "es"}.`);
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
   async function openSpecInEditorReview() {
     if (!plan) return;
     setStaging(true);
@@ -375,6 +449,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setSpecPreviewNotice("");
     setTaskPlanNotice("");
     setTaskHandoffNotice("");
+    setTaskStagingNotice("");
     try {
       const content = buildSpecMarkdown(plan, brief);
       const opened = await onOpenFiles([
@@ -394,14 +469,14 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
 
   function reset() {
     setPhase("brief"); setBrief(""); setPlan(null); setRaw("");
-    setBuiltFiles([]); setError(""); setStageNotice(""); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setTaskHandoffNotice(""); setActiveTaskId(null);
+    setBuiltFiles([]); setError(""); setStageNotice(""); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setTaskHandoffNotice(""); setTaskStagingNotice(""); setTaskStagingLedger([]); setActiveTaskId(null);
   }
 
   return (
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Agentic Project Builder"
-        subtitle="Phase 8K · task handoff metadata"
+        subtitle="Phase 8L · task batch staging"
         badge={settings.autonomy === "auto" ? "Autonomous" : settings.autonomy === "suggest" ? "Suggest mode" : "Ask first"}
         badgeOk={settings.autonomy !== "ask"}
       />
@@ -644,8 +719,11 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                 <div className="mt-3 space-y-2">
                   {taskPlanPreview.tasks.map((task) => {
                     const generatingTask = activeTaskId === task.id;
-                    const canGenerateTask = !generating && !activeTaskId && task.pendingFileTargets.length > 0;
+                    const stagingTask = stagingTaskId === task.id;
+                    const canGenerateTask = !generating && !activeTaskId && !staging && task.pendingFileTargets.length > 0;
+                    const canStageTask = !generating && !activeTaskId && !staging && task.generatedFileTargets.length > 0;
                     const handoffPacket = taskHandoffPreview?.packets.find((packet) => packet.id === task.id);
+                    const stagingRecord = taskStagingLedger.find((record) => record.taskId === task.id);
                     return (
                       <div key={task.id} className="rounded-lg border border-white/10 bg-black/15 p-3">
                         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -654,6 +732,11 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                               <span className="rounded-md bg-cyan-400/10 px-2 py-0.5 font-mono text-[10.5px] font-semibold text-cyan-200 ring-1 ring-cyan-400/20">{task.id}</span>
                               <span className="text-[12.5px] font-semibold text-cyan-50">{task.title}</span>
                               <span className="rounded-full border border-white/10 px-2 py-0.5 text-[10.5px] text-cyan-100/60">{task.statusLabel}</span>
+                              {stagingRecord && (
+                                <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 text-[10.5px] text-emerald-200">
+                                  staged for Editor review · {stagingRecord.files.length} file{stagingRecord.files.length === 1 ? "" : "s"}
+                                </span>
+                              )}
                             </div>
                             <p className="mt-1 text-[11.5px] leading-relaxed text-cyan-100/60">{task.detail}</p>
                             <div className="mt-2 flex flex-wrap gap-1.5">
@@ -687,6 +770,15 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                               {generatingTask ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
                               Generate missing drafts
                             </button>
+                            <button
+                              onClick={() => { void stageTaskDrafts(task.id); }}
+                              disabled={!canStageTask}
+                              title={task.generatedFileTargets.length === 0 ? "Generate in-memory drafts for this task first." : "Stage only this task's generated drafts through the native agent-tools gate for Editor review. Nothing is written."}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-40"
+                            >
+                              {stagingTask ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowRight className="h-3.5 w-3.5" />}
+                              Stage for Editor review
+                            </button>
                           </div>
                         </div>
                         <details className="mt-2 text-[11px] text-cyan-100/60">
@@ -717,6 +809,9 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                               {handoffPacket && handoffPacket.pendingFileTargets.length > 0 && (
                                 <p className="mt-1 text-cyan-100/45">Pending: {handoffPacket.pendingFileTargets.join(", ")}</p>
                               )}
+                              {handoffPacket && (
+                                <p className="mt-1 text-cyan-100/45">Editor staging: {handoffPacket.stagingState}</p>
+                              )}
                             </div>
                           </div>
                         </details>
@@ -726,6 +821,46 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                 </div>
                 {taskPlanNotice && <div className="mt-3 text-[12px] text-emerald-300">{taskPlanNotice}</div>}
                 {taskHandoffNotice && <div className="mt-2 text-[12px] text-emerald-300">{taskHandoffNotice}</div>}
+                {taskStagingNotice && <div className="mt-2 text-[12px] text-emerald-300">{taskStagingNotice}</div>}
+
+                <details className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/[0.04] p-3 text-[11.5px] text-emerald-100/70">
+                  <summary className="flex cursor-pointer select-none flex-wrap items-center justify-between gap-2 text-emerald-100">
+                    <span className="inline-flex items-center gap-2 font-semibold">
+                      <ListChecks className="h-3.5 w-3.5 text-emerald-300" />
+                      Task staging ledger · {taskStagingLedgerPreview.summary}
+                    </span>
+                    <span className="text-[10.5px] text-emerald-100/50">Session-only metadata; not saved to recovery snapshots</span>
+                  </summary>
+                  <p className="mt-2 leading-relaxed text-emerald-100/60">
+                    Records which task batches were staged through the native agent-tools gate into Editor review during this session. Staging a batch replaces the current Editor review queue with that task's generated drafts and records file path and byte metadata only; draft contents, workspace contents and apply results are not tracked here. Apply state remains visible only in Editor review.
+                  </p>
+                  {taskStagingLedger.length > 0 ? (
+                    <ul className="mt-2 space-y-1.5">
+                      {taskStagingLedger.map((record) => (
+                        <li key={`${record.taskId}-${record.stagedAtMs}`} className="rounded-md border border-white/10 bg-black/15 px-2.5 py-1.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="rounded-md bg-emerald-400/10 px-2 py-0.5 font-mono text-[10.5px] font-semibold text-emerald-200 ring-1 ring-emerald-400/20">{record.taskId}</span>
+                            <span className="font-semibold text-emerald-50">{record.taskTitle}</span>
+                            <span className="text-emerald-100/50">{formatStagingTime(record.stagedAtMs)} · {record.files.length} file{record.files.length === 1 ? "" : "s"} · {formatByteCount(record.totalBytes)}</span>
+                          </div>
+                          <div className="mt-1 font-mono text-[10.5px] text-emerald-100/55">{record.files.map((file) => file.path).join(", ")}</div>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-2 text-emerald-100/45">No task batches have been staged for Editor review yet.</p>
+                  )}
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => { void copyTaskStagingLedger(); }}
+                      disabled={taskStagingLedger.length === 0}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-400/20 disabled:opacity-40"
+                    >
+                      <Copy className="h-3.5 w-3.5" /> Copy staging ledger
+                    </button>
+                    <span className="text-[10.5px] text-emerald-100/50">Staging is not apply; Editor reviewed-draft apply remains the only write path.</span>
+                  </div>
+                </details>
               </div>
             )}
 
@@ -760,7 +895,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
               <div className="flex gap-2">
                 <button
                   onClick={generateAll}
-                  disabled={!!generating || !!activeTaskId}
+                  disabled={!!generating || !!activeTaskId || staging}
                   className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:from-cyan-400 hover:to-blue-500 disabled:opacity-40"
                 >
                   {generating ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />}
@@ -807,7 +942,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                     </div>
                     <button
                       onClick={() => generateFile(f.path, f.description)}
-                      disabled={!!generating || !!activeTaskId}
+                      disabled={!!generating || !!activeTaskId || staging}
                       className="shrink-0 rounded-md bg-white/5 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-white/10 disabled:opacity-40"
                     >
                       {built ? "Regenerate" : "Generate"}
@@ -882,6 +1017,7 @@ interface TaskHandoffPacket {
   id: string;
   title: string;
   handoffState: string;
+  stagingState: string;
   dependsOn: string[];
   nextTaskIds: string[];
   generatedDrafts: DraftHandoffFile[];
@@ -901,9 +1037,10 @@ interface TaskHandoffPreview {
   exportText: string;
 }
 
-function buildTaskHandoffPreview(taskPlan: TaskPlanPreview, builtFiles: VFile[], projectSummary: string): TaskHandoffPreview {
+function buildTaskHandoffPreview(taskPlan: TaskPlanPreview, builtFiles: VFile[], projectSummary: string, stagingLedger: BuilderTaskStagingRecord[] = []): TaskHandoffPreview {
   const generatedAt = new Date().toISOString();
   const builtByPath = new Map(builtFiles.map((file) => [file.path, file]));
+  const stagingByTask = new Map(stagingLedger.map((record) => [record.taskId, record]));
   const packets = taskPlan.tasks.map((task, _index, tasks) => {
     const generatedDrafts = task.generatedFileTargets
       .map((path) => buildDraftHandoffFile(builtByPath.get(path)))
@@ -916,6 +1053,7 @@ function buildTaskHandoffPreview(taskPlan: TaskPlanPreview, builtFiles: VFile[],
         : generatedDrafts.length > 0
           ? "partial handoff; some draft targets are still pending"
           : "waiting for in-memory draft generation";
+    const stagingState = describeTaskStagingState(task, stagingByTask.get(task.id));
     const exportText = [
       "DevLab Builder task handoff packet",
       `Generated: ${generatedAt}`,
@@ -927,6 +1065,7 @@ function buildTaskHandoffPreview(taskPlan: TaskPlanPreview, builtFiles: VFile[],
       "",
       `## ${task.id} — ${task.title}`,
       `State: ${handoffState}`,
+      `Editor staging: ${stagingState}`,
       `Depends on: ${task.dependsOn.length > 0 ? task.dependsOn.join(", ") : "none"}`,
       `Next task(s): ${nextTaskIds.length > 0 ? nextTaskIds.join(", ") : "none"}`,
       `Review gate: ${task.reviewGate}`,
@@ -944,6 +1083,7 @@ function buildTaskHandoffPreview(taskPlan: TaskPlanPreview, builtFiles: VFile[],
       "",
       "### Apply boundary",
       "- Handoff packets do not apply, persist or execute anything.",
+      "- Staging a task batch only opens its in-memory drafts in Editor review through the native agent-tools metadata gate; it is not apply.",
       "- Editor reviewed-draft apply remains the only workspace write path.",
       "- Verification must be run explicitly after reviewed apply; this packet does not claim checks passed.",
     ].join("\n");
@@ -951,6 +1091,7 @@ function buildTaskHandoffPreview(taskPlan: TaskPlanPreview, builtFiles: VFile[],
       id: task.id,
       title: task.title,
       handoffState,
+      stagingState,
       dependsOn: task.dependsOn,
       nextTaskIds,
       generatedDrafts,
@@ -974,12 +1115,14 @@ function buildTaskHandoffPreview(taskPlan: TaskPlanPreview, builtFiles: VFile[],
     "## Summary",
     `- ${summary}`,
     `- Generated draft metadata: ${generatedDraftCount} target${generatedDraftCount === 1 ? "" : "s"}, ${formatByteCount(totalDraftBytes)} total`,
+    `- Task batches staged for Editor review this session: ${stagingLedger.length}`,
     "- Draft contents and workspace diffs are intentionally omitted; use Editor review/recompare before apply.",
     "",
     "## Task handoff packets",
     ...packets.flatMap((packet) => [
       `### ${packet.id} — ${packet.title}`,
       `State: ${packet.handoffState}`,
+      `Editor staging: ${packet.stagingState}`,
       `Depends on: ${packet.dependsOn.length > 0 ? packet.dependsOn.join(", ") : "none"}`,
       `Next task(s): ${packet.nextTaskIds.length > 0 ? packet.nextTaskIds.join(", ") : "none"}`,
       `Generated draft metadata: ${packet.generatedDrafts.length > 0 ? packet.generatedDrafts.map((file) => `${file.path} (${file.language}, ${formatByteCount(file.bytes)}, ${file.lines} line${file.lines === 1 ? "" : "s"})`).join(", ") : "none"}`,
@@ -999,6 +1142,76 @@ function buildDraftHandoffFile(file: VFile | undefined): DraftHandoffFile | null
     bytes: textBytes(file.content),
     lines: countLines(file.content),
   };
+}
+
+interface TaskStagingLedgerPreview {
+  summary: string;
+  stagedTaskCount: number;
+  stagedFileCount: number;
+  totalBytes: number;
+  exportText: string;
+}
+
+function buildTaskStagingRecord(task: TaskPlanPreviewTask, files: VFile[], summary: string): BuilderTaskStagingRecord {
+  const fileMetadata = files.map((file) => ({ path: boundSpecText(file.path, 512), bytes: textBytes(file.content) }));
+  return {
+    taskId: task.id,
+    taskTitle: boundSpecText(task.title, 240),
+    stagedAtMs: Date.now(),
+    summary: boundSpecText(summary, 1_800),
+    files: fileMetadata,
+    totalBytes: fileMetadata.reduce((total, file) => total + file.bytes, 0),
+  };
+}
+
+function describeTaskStagingState(task: TaskPlanPreviewTask, record: BuilderTaskStagingRecord | undefined): string {
+  if (!record) {
+    return task.generatedFileTargets.length > 0
+      ? "not staged yet; generated drafts remain in Builder memory"
+      : "not staged; no generated drafts available";
+  }
+  const stagedPaths = new Set(record.files.map((file) => file.path));
+  const unstagedGenerated = task.generatedFileTargets.filter((path) => !stagedPaths.has(path));
+  const base = `staged ${record.files.length} file${record.files.length === 1 ? "" : "s"} for Editor review at ${new Date(record.stagedAtMs).toISOString()}`;
+  if (unstagedGenerated.length > 0) {
+    return `${base}; ${unstagedGenerated.length} newer generated draft${unstagedGenerated.length === 1 ? "" : "s"} not yet restaged`;
+  }
+  return `${base}; apply state is tracked only in Editor review`;
+}
+
+function buildTaskStagingLedgerPreview(records: BuilderTaskStagingRecord[]): TaskStagingLedgerPreview {
+  const stagedTaskCount = records.length;
+  const stagedFileCount = records.reduce((total, record) => total + record.files.length, 0);
+  const totalBytes = records.reduce((total, record) => total + record.totalBytes, 0);
+  const summary = `${stagedTaskCount} staged batch${stagedTaskCount === 1 ? "" : "es"} · ${stagedFileCount} file${stagedFileCount === 1 ? "" : "s"} · ${formatByteCount(totalBytes)}`;
+  const exportText = [
+    "DevLab Builder task staging ledger",
+    `Generated: ${new Date().toISOString()}`,
+    "Source: session-only renderer metadata recorded when task batches were staged through the native agent-tools gate for Editor review",
+    "Safety: metadata-only; draft contents, workspace contents, diffs, apply results, command output and verification results are not included. Staging is not apply.",
+    "",
+    "## Summary",
+    `- ${summary}`,
+    "- Editor reviewed-draft apply remains the only workspace write path.",
+    "- This ledger is not persisted and is not included in recovery snapshots.",
+    "",
+    "## Staged task batches",
+    ...(records.length > 0
+      ? records.flatMap((record) => [
+        `### ${record.taskId} — ${record.taskTitle}`,
+        `Staged at: ${new Date(record.stagedAtMs).toISOString()}`,
+        `Summary: ${record.summary}`,
+        `Files (${record.files.length}, ${formatByteCount(record.totalBytes)}):`,
+        ...record.files.map((file) => `- ${file.path} — ${formatByteCount(file.bytes)}`),
+        "",
+      ])
+      : ["- None staged in this session."]),
+  ].join("\n");
+  return { summary, stagedTaskCount, stagedFileCount, totalBytes, exportText };
+}
+
+function formatStagingTime(ms: number) {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 function countLines(value: string) {

@@ -115,6 +115,17 @@ export interface VFile {
 
 export type OpenGeneratedDrafts = (files: VFile[], summary?: string) => Promise<boolean>;
 
+// Session-only, metadata-only record of one Builder task batch staged for Editor review.
+// It never stores draft contents and is intentionally excluded from recovery snapshots.
+export interface BuilderTaskStagingRecord {
+  taskId: string;
+  taskTitle: string;
+  stagedAtMs: number;
+  summary: string;
+  files: { path: string; bytes: number }[];
+  totalBytes: number;
+}
+
 export interface BuildPlanStep {
   id: string;
   title: string;
