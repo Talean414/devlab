@@ -80,6 +80,7 @@ export function AgentPanel({
   const [stagingMessageId, setStagingMessageId] = useState<string | null>(null);
   const [stageNotice, setStageNotice] = useState("");
   const [stageError, setStageError] = useState("");
+  const [draftManifestNotice, setDraftManifestNotice] = useState<{ messageId: string; kind: "ok" | "error"; text: string } | null>(null);
   const [contextBusy, setContextBusy] = useState(false);
   const [contextError, setContextError] = useState("");
   const [contextNotice, setContextNotice] = useState("");
@@ -328,6 +329,7 @@ export function AgentPanel({
     if (drafts.length === 0 || stagingMessageId) return;
     setStageNotice("");
     setStageError("");
+    setDraftManifestNotice(null);
     setStagingMessageId(message.id);
     try {
       const opened = await onOpenFiles(
@@ -340,6 +342,24 @@ export function AgentPanel({
       } else setStageError("AI Agent drafts were not staged for editor review. Nothing was written.");
     } finally {
       setStagingMessageId(null);
+    }
+  }
+
+  async function copyDraftManifest(message: ChatMessage, drafts: VFile[]) {
+    setDraftManifestNotice(null);
+    if (drafts.length === 0) {
+      setDraftManifestNotice({ messageId: message.id, kind: "error", text: "No reviewed-draft metadata is available to copy." });
+      return;
+    }
+    if (!navigator.clipboard?.writeText) {
+      setDraftManifestNotice({ messageId: message.id, kind: "error", text: "Clipboard access is unavailable in this environment. Nothing was copied." });
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(buildAgentDraftManifestExport(drafts, message));
+      setDraftManifestNotice({ messageId: message.id, kind: "ok", text: `Copied metadata for ${drafts.length} reviewed draft${drafts.length === 1 ? "" : "s"}.` });
+    } catch (error) {
+      setDraftManifestNotice({ messageId: message.id, kind: "error", text: `Could not copy draft metadata: ${formatContextError(error)}` });
     }
   }
 
@@ -409,6 +429,7 @@ export function AgentPanel({
 
         {messages.map((m) => {
           const draftFiles = m.role === "model" ? extractAgentDrafts(m.content) : [];
+          const draftSummary = draftFiles.length > 0 ? summarizeAgentDrafts(draftFiles) : null;
           return (
           <div
             key={m.id}
@@ -431,13 +452,20 @@ export function AgentPanel({
               ) : m.content ? (
                 <>
                   <Markdown text={m.content} />
-                  {draftFiles.length > 0 && (
+                  {draftSummary && (
                     <div className="mt-3 rounded-xl border border-violet-500/20 bg-violet-500/[0.06] p-3 text-[11.5px] text-violet-100/80">
                       <div className="flex items-center gap-2">
                         <FileCode2 className="h-3.5 w-3.5 text-violet-300" />
                         <span className="min-w-0 flex-1">
-                          {draftFiles.length} labeled file draft{draftFiles.length === 1 ? "" : "s"} detected. Stage for reviewed Editor diff/apply?
+                          {draftSummary.fileCount} labeled file draft{draftSummary.fileCount === 1 ? "" : "s"} detected · {formatBytes(draftSummary.totalBytes)} total. Nothing has been written.
                         </span>
+                        <button
+                          onClick={() => void copyDraftManifest(m, draftFiles)}
+                          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-[11px] font-semibold text-violet-100 hover:bg-white/[0.08]"
+                          title="Copy metadata-only draft manifest"
+                        >
+                          Copy manifest
+                        </button>
                         <button
                           onClick={() => void stageDraftsFromMessage(m, draftFiles)}
                           disabled={!!stagingMessageId}
@@ -447,9 +475,27 @@ export function AgentPanel({
                           Open reviewed drafts
                         </button>
                       </div>
-                      <div className="mt-2 truncate font-mono text-[10.5px] text-violet-100/60">
-                        {draftFiles.map((file) => file.path).join(" · ")}
-                      </div>
+                      <details className="mt-2 rounded-lg border border-violet-400/10 bg-black/10 px-2 py-1.5">
+                        <summary className="cursor-pointer select-none text-[11px] font-semibold text-violet-100/80 hover:text-violet-50">Draft manifest metadata</summary>
+                        <div className="mt-2 space-y-1.5">
+                          {draftSummary.files.map((file) => (
+                            <div key={file.path} className="grid gap-1 rounded-md border border-white/5 bg-black/15 px-2 py-1.5 text-[10.5px] sm:grid-cols-[1fr_auto_auto_auto]">
+                              <span className="truncate font-mono text-violet-100/80">{file.path}</span>
+                              <span className="font-mono text-violet-100/50">{file.language}</span>
+                              <span className="font-mono text-violet-100/50">{formatBytes(file.bytes)}</span>
+                              <span className="font-mono text-violet-100/50">{file.lines} line{file.lines === 1 ? "" : "s"}</span>
+                            </div>
+                          ))}
+                        </div>
+                        <p className="mt-2 text-[10.5px] leading-relaxed text-violet-100/55">
+                          Metadata only. Draft contents stay in memory until you open Editor review; workspace writes still require explicit per-file Apply.
+                        </p>
+                      </details>
+                      {draftManifestNotice?.messageId === m.id && (
+                        <div className={`mt-2 text-[10.5px] ${draftManifestNotice.kind === "ok" ? "text-emerald-300" : "text-rose-300"}`}>
+                          {draftManifestNotice.text}
+                        </div>
+                      )}
                     </div>
                   )}
                 </>
@@ -816,6 +862,58 @@ function formatContextError(error: unknown): string {
     if (typeof maybe.message === "string") return maybe.message;
   }
   return typeof error === "string" ? error : "Could not attach the workspace file.";
+}
+
+interface AgentDraftManifestItem {
+  path: string;
+  language: string;
+  bytes: number;
+  lines: number;
+}
+
+interface AgentDraftSummary {
+  fileCount: number;
+  totalBytes: number;
+  files: AgentDraftManifestItem[];
+}
+
+function summarizeAgentDrafts(drafts: VFile[]): AgentDraftSummary {
+  const files = drafts.map((draft) => ({
+    path: draft.path,
+    language: draft.language || languageForPath(draft.path),
+    bytes: textBytes(draft.content),
+    lines: draft.content.length === 0 ? 0 : draft.content.split("\n").length,
+  }));
+  return {
+    fileCount: files.length,
+    totalBytes: files.reduce((sum, file) => sum + file.bytes, 0),
+    files,
+  };
+}
+
+function buildAgentDraftManifestExport(drafts: VFile[], message: ChatMessage): string {
+  const summary = summarizeAgentDrafts(drafts);
+  return JSON.stringify({
+    label: "DevLab AI Agent reviewed-draft manifest",
+    generatedAt: new Date().toISOString(),
+    messageId: message.id,
+    messageTimestampMs: message.ts,
+    note: "Metadata only. Draft contents are omitted; workspace writes still require explicit Editor reviewed-draft apply.",
+    limits: {
+      maxFiles: MAX_AGENT_DRAFT_FILES,
+      maxTotalBytes: MAX_AGENT_DRAFT_BYTES,
+      maxPathBytes: MAX_AGENT_DRAFT_PATH_BYTES,
+    },
+    fileCount: summary.fileCount,
+    totalBytes: summary.totalBytes,
+    files: summary.files,
+  }, null, 2);
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MiB`;
 }
 
 function extractAgentDrafts(markdown: string): VFile[] {
