@@ -3,6 +3,7 @@
 
 import { loadSettings } from "./settings";
 import {
+  generationGuardrailInstruction,
   resolveAiRoute,
   routeInstruction,
   type AiRoute,
@@ -250,6 +251,7 @@ export async function* streamChat(
   const systemText = [
     SYSTEM_PROMPT,
     routeInstruction(route.task),
+    generationGuardrailInstruction(route.task),
     customPrompt ? `Developer preferences:\n${customPrompt}` : "",
   ].filter(Boolean).join("\n\n");
   const body = {
@@ -285,8 +287,14 @@ export async function* streamVision(
   }));
   parts.push({ text: prompt });
 
+  const systemText = [
+    SYSTEM_PROMPT,
+    routeInstruction("vision"),
+    generationGuardrailInstruction("vision"),
+  ].join("\n\n");
+
   const body = {
-    systemInstruction: { parts: [{ text: `${SYSTEM_PROMPT}\n\n${routeInstruction("vision")}` }] },
+    systemInstruction: { parts: [{ text: systemText }] },
     contents: [{ role: "user", parts }],
     generationConfig: {
       temperature: clamp(settings.temperature, 0, 2),

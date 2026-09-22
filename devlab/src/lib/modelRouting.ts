@@ -249,6 +249,45 @@ export function routeInstruction(taskId: AiTaskKind): string {
   }
 }
 
+export function generationGuardrailInstruction(taskId: AiTaskKind): string {
+  const task = getTaskProfile(taskId);
+  const shared = [
+    "DevLab generation guardrails: generated files are review drafts only; do not claim they were written, installed, tested, deployed or executed.",
+    "Keep secrets, tokens, credentials and environment-specific values out of generated files and examples unless the user explicitly supplies non-secret placeholders.",
+    "Prefer small single-responsibility files, strict TypeScript interfaces where TypeScript is used, clear module boundaries and accessible semantic HTML for UI work.",
+  ];
+
+  switch (task.routeClass) {
+    case "implementation":
+      return [
+        ...shared,
+        "Frontend implementation defaults: modern responsive layouts, Tailwind-friendly class structure when Tailwind is in the requested stack, subtle elevation/glass effects, keyboard/focus states and mobile-first spacing.",
+        "Use Lucide icons, Framer Motion, TanStack Query, Zustand or other libraries only when the project already includes them or the generated plan/commands explicitly add them; otherwise avoid surprise dependencies.",
+        "Output complete file contents for the requested safe workspace-relative path and keep component files focused enough to review in DevLab's explicit editor gate.",
+      ].join("\n");
+    case "vision":
+      return [
+        ...shared,
+        "UI reverse-engineering defaults: derive palette, typography, spacing, layout and component hierarchy from observable evidence before drafting files.",
+        "When producing React/Tailwind drafts, preserve responsive behavior, accessible labels, loading/empty states and visual hierarchy instead of generic placeholder screens.",
+        "Do not invent external assets, paid services or unavailable dependencies; use local placeholders or CSS/SVG only when the source evidence is ambiguous.",
+      ].join("\n");
+    case "reasoning":
+      return [
+        ...shared,
+        "Planning defaults: prefer reviewable task slices, changed-file plans, out-of-scope notes, risk notes and explicit verification suggestions without implying any command has run.",
+        "For frontend plans, include design-system tokens, component boundaries, accessibility expectations and dependency assumptions so generated drafts stay coherent.",
+      ].join("\n");
+    case "diagnostic":
+      return [
+        ...shared,
+        "Repair defaults: keep patches minimal, explain regression risk, preserve existing style and suggest verification profiles to run explicitly after reviewed apply.",
+      ].join("\n");
+    default:
+      return shared.join("\n");
+  }
+}
+
 function modelForProvider(
   provider: AiProviderId,
   settings: DevLabSettings,
