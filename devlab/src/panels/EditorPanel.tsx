@@ -6,6 +6,10 @@ import { testRunnerSnapshot, type TestProfile, type TestRunnerSnapshot } from ".
 import { recommendVerificationProfiles, type VerificationProfileRecommendation } from "../lib/verificationGuidance";
 import type { DraftPolicyGateSummary, ReviewedDraftApplyOutcome, VFile } from "../types";
 import {
+  appendSavedReviewView, buildSavedReviewViewsExport, createSavedReviewView, previewReviewViewRestore,
+  restoreReviewViewAnnotations, MAX_REVIEW_VIEW_NAME_CHARS, MAX_SAVED_REVIEW_VIEWS, type SavedReviewView,
+} from "../lib/reviewViews";
+import {
   applyReviewedDraftToWorkspace,
   closeWorkspace,
   createWorkspaceDirectory,
@@ -46,6 +50,7 @@ import {
   Sparkles,
   Trash2,
   X,
+  BookmarkPlus,
 } from "lucide-react";
 
 interface OpenDocument extends WorkspaceDocument {
@@ -144,6 +149,10 @@ export function EditorPanel({
   const [appliedDraftKeys, setAppliedDraftKeys] = useState<string[]>([]);
   const [appliedDraftRecords, setAppliedDraftRecords] = useState<Record<string, ReviewedDraftApplicationRecord>>({});
   const [draftReviewAnnotations, setDraftReviewAnnotations] = useState<Record<string, ReviewedDraftAnnotation>>({});
+  // Session-only named snapshots of review filter + annotations + selection for the current queue.
+  const [savedReviewViews, setSavedReviewViews] = useState<SavedReviewView<ReviewedDraftFilter>[]>([]);
+  const [reviewViewName, setReviewViewName] = useState("");
+  const [reviewViewNotice, setReviewViewNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const [draftReviewCopyNotice, setDraftReviewCopyNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const [verificationLoading, setVerificationLoading] = useState(false);
   const [verificationPlan, setVerificationPlan] = useState<ReviewedDraftVerificationPlan | null>(null);
@@ -224,6 +233,9 @@ export function EditorPanel({
       setAppliedDraftKeys([]);
       setAppliedDraftRecords({});
       setDraftReviewAnnotations({});
+      setSavedReviewViews([]);
+      setReviewViewName("");
+      setReviewViewNotice(null);
       setDraftInspection(null);
       setDraftReviewCopyNotice(null);
       setVerificationPlan(null);
@@ -238,6 +250,9 @@ export function EditorPanel({
     setAppliedDraftKeys([]);
     setAppliedDraftRecords({});
     setDraftReviewAnnotations({});
+    setSavedReviewViews([]);
+    setReviewViewName("");
+    setReviewViewNotice(null);
     setDraftReviewCopyNotice(null);
     setVerificationPlan(null);
     setVerificationNotice(null);
@@ -806,6 +821,61 @@ export function EditorPanel({
     }
   }
 
+  const reviewQueueKeys = useMemo(() => incomingDrafts.map((draft, index) => draftKey(draft, index)), [incomingDrafts]);
+
+  function saveCurrentReviewView() {
+    if (incomingDrafts.length === 0) return;
+    if (savedReviewViews.length >= MAX_SAVED_REVIEW_VIEWS) {
+      setReviewViewNotice({ kind: "error", text: `Saved view limit reached (${MAX_SAVED_REVIEW_VIEWS}). Delete a view before saving another.` });
+      return;
+    }
+    const view = createSavedReviewView<ReviewedDraftFilter>(
+      { name: reviewViewName, filter: draftReviewFilter, selectedKey: selectedDraftKey, annotations: draftReviewAnnotations, queueKeys: reviewQueueKeys },
+      savedReviewViews,
+    );
+    setSavedReviewViews((current) => appendSavedReviewView(current, view));
+    setReviewViewName("");
+    setReviewViewNotice({ kind: "ok", text: `Saved review view "${view.name}" (${view.filter} filter, ${view.counts.annotated} annotation${view.counts.annotated === 1 ? "" : "s"}). Session-only; nothing was written.` });
+  }
+
+  function restoreReviewView(viewId: string) {
+    const view = savedReviewViews.find((item) => item.id === viewId);
+    if (!view) return;
+    const preview = previewReviewViewRestore(view, draftReviewAnnotations, reviewQueueKeys);
+    if (preview.overwritten > 0 && !window.confirm(`Restore "${view.name}"? ${preview.summary}. This changes review-only UI state; it does not write files or apply drafts.`)) return;
+    setDraftReviewFilter(view.filter);
+    setDraftReviewAnnotations(restoreReviewViewAnnotations(view, reviewQueueKeys) as Record<string, ReviewedDraftAnnotation>);
+    if (preview.selectedStillPresent) {
+      const index = reviewQueueKeys.indexOf(view.selectedKey);
+      if (index >= 0) setDraftIndex(index);
+    }
+    setReviewViewNotice({ kind: "ok", text: `Restored "${view.name}": ${preview.summary}. Apply still requires the explicit reviewed-draft button.` });
+  }
+
+  function deleteReviewView(viewId: string) {
+    const view = savedReviewViews.find((item) => item.id === viewId);
+    setSavedReviewViews((current) => current.filter((item) => item.id !== viewId));
+    if (view) setReviewViewNotice({ kind: "ok", text: `Deleted saved view "${view.name}". Current annotations are unchanged.` });
+  }
+
+  async function copySavedReviewViews() {
+    setReviewViewNotice(null);
+    if (!navigator.clipboard?.writeText) {
+      setReviewViewNotice({ kind: "error", text: "Clipboard access is unavailable in this environment. Nothing was copied." });
+      return;
+    }
+    try {
+      const pathForKey = (key: string) => {
+        const index = reviewQueueKeys.indexOf(key);
+        return index >= 0 ? incomingDrafts[index]?.path : undefined;
+      };
+      await navigator.clipboard.writeText(buildSavedReviewViewsExport(savedReviewViews, pathForKey));
+      setReviewViewNotice({ kind: "ok", text: `Copied ${savedReviewViews.length} saved review view${savedReviewViews.length === 1 ? "" : "s"} as review-only metadata.` });
+    } catch (copyError) {
+      setReviewViewNotice({ kind: "error", text: errorMessage(copyError) });
+    }
+  }
+
   function updateSelectedDraftAnnotationStatus(status: Exclude<ReviewedDraftAnnotationStatus, "unreviewed">) {
     if (!selectedDraftKey) return;
     const updatedAtMs = Date.now();
@@ -1311,6 +1381,64 @@ export function EditorPanel({
                       {draftReviewShortcutNotice}
                     </div>
                   )}
+                  <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.02] p-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="inline-flex items-center gap-1.5 font-semibold text-zinc-200"><BookmarkPlus className="h-3.5 w-3.5 text-violet-300" /> Saved review views</span>
+                      <span className="font-mono text-[10px] text-zinc-600">{savedReviewViews.length}/{MAX_SAVED_REVIEW_VIEWS}</span>
+                    </div>
+                    <p className="mt-1 text-[10px] leading-relaxed text-zinc-600">
+                      Name and save the current filter, session annotations and selected draft for this queue, then restore later. Views are session-only, dropped when the queue is replaced, never persisted, and never write files or apply drafts.
+                    </p>
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                      <input
+                        value={reviewViewName}
+                        onChange={(event) => setReviewViewName(event.currentTarget.value)}
+                        onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); saveCurrentReviewView(); } }}
+                        maxLength={MAX_REVIEW_VIEW_NAME_CHARS}
+                        placeholder="View name (e.g. needs-changes pass 1)"
+                        className="min-w-[160px] flex-1 rounded-md border border-white/10 bg-black/30 px-2 py-1 text-[10.5px] text-zinc-200 placeholder:text-zinc-600 focus:border-violet-400/40 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={saveCurrentReviewView}
+                        disabled={incomingDrafts.length === 0 || savedReviewViews.length >= MAX_SAVED_REVIEW_VIEWS}
+                        className="rounded-md border border-violet-400/30 bg-violet-400/10 px-2 py-1 text-[10px] font-semibold text-violet-100 hover:bg-violet-400/20 disabled:opacity-40"
+                      >
+                        Save view
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { void copySavedReviewViews(); }}
+                        disabled={savedReviewViews.length === 0}
+                        className="inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-[10px] font-semibold text-zinc-300 hover:bg-white/5 disabled:opacity-40"
+                      >
+                        <Copy className="h-3 w-3" /> Copy views
+                      </button>
+                    </div>
+                    {savedReviewViews.length > 0 && (
+                      <ul className="mt-2 space-y-1">
+                        {savedReviewViews.map((view) => {
+                          const preview = previewReviewViewRestore(view, draftReviewAnnotations, reviewQueueKeys);
+                          return (
+                            <li key={view.id} className="rounded-md border border-white/10 bg-black/20 px-2 py-1.5">
+                              <div className="flex flex-wrap items-center justify-between gap-1.5">
+                                <span className="font-semibold text-zinc-200">{view.name}</span>
+                                <span className="font-mono text-[9.5px] text-zinc-600">{formatReviewTime(view.savedAtMs)} · {view.filter} · {view.counts.annotated} annotated</span>
+                              </div>
+                              <div className="mt-0.5 text-[9.5px] text-zinc-500" title={preview.summary}>Restore would: {preview.summary}</div>
+                              <div className="mt-1 flex gap-1.5">
+                                <button type="button" onClick={() => restoreReviewView(view.id)} className="rounded border border-violet-400/30 px-1.5 py-0.5 text-[9.5px] font-semibold text-violet-100 hover:bg-violet-400/15">Restore</button>
+                                <button type="button" onClick={() => deleteReviewView(view.id)} className="rounded border border-white/10 px-1.5 py-0.5 text-[9.5px] font-semibold text-zinc-400 hover:bg-white/5">Delete</button>
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                    {reviewViewNotice && (
+                      <div className={`mt-2 text-[10px] leading-relaxed ${reviewViewNotice.kind === "ok" ? "text-emerald-300" : "text-rose-300"}`}>{reviewViewNotice.text}</div>
+                    )}
+                  </div>
                 </div>
                 {draftPolicyGate && (
                   <div className={`mt-3 rounded-xl border p-3 text-[11px] ${draftPolicyGate.refused.length > 0 ? "border-amber-500/25 bg-amber-500/[0.05] text-amber-100/80" : "border-white/10 bg-white/[0.02] text-zinc-400"}`}>
