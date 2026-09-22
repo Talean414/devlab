@@ -4,7 +4,7 @@ import { Markdown } from "../components/CodeBlock";
 import { getApiKey, getCurrentAiRoute, streamChat, type GenTurn } from "../lib/gemini";
 import { loadSettings } from "../lib/settings";
 import { projectTemplates } from "../data/templates";
-import type { BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, OpenGeneratedDrafts, VFile } from "../types";
+import type { BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, OpenGeneratedDrafts, ReviewedDraftApplyOutcome, VFile } from "../types";
 import {
   Wand2, Loader2, CheckCircle2, FileCode2, TerminalSquare,
   Sparkles, RotateCcw, FolderPlus, ArrowRight, ClipboardList, Copy, ListChecks,
@@ -89,6 +89,8 @@ export function BuilderPanel({
   setStageNotice,
   taskStagingLedger,
   setTaskStagingLedger,
+  applyOutcomes,
+  setApplyOutcomes,
 }: {
   onNeedKey: () => void;
   onOpenFiles: OpenGeneratedDrafts;
@@ -114,6 +116,8 @@ export function BuilderPanel({
   setStageNotice: Dispatch<SetStateAction<string>>;
   taskStagingLedger: BuilderTaskStagingRecord[];
   setTaskStagingLedger: Dispatch<SetStateAction<BuilderTaskStagingRecord[]>>;
+  applyOutcomes: ReviewedDraftApplyOutcome[];
+  setApplyOutcomes: Dispatch<SetStateAction<ReviewedDraftApplyOutcome[]>>;
 }) {
   const outRef = useRef<HTMLDivElement>(null);
   const [specNotice, setSpecNotice] = useState("");
@@ -126,7 +130,8 @@ export function BuilderPanel({
   const settings = loadSettings();
   const specPreview = plan ? buildSpecMetadataPreview(plan, brief) : null;
   const taskPlanPreview = plan ? buildTaskPlanPreview(plan, builtFiles) : null;
-  const taskHandoffPreview = taskPlanPreview && plan ? buildTaskHandoffPreview(taskPlanPreview, builtFiles, plan.summary, taskStagingLedger) : null;
+  const taskApplyProgress = taskPlanPreview ? buildTaskApplyProgress(taskPlanPreview, builtFiles, applyOutcomes) : null;
+  const taskHandoffPreview = taskPlanPreview && plan ? buildTaskHandoffPreview(taskPlanPreview, builtFiles, plan.summary, taskStagingLedger, taskApplyProgress ?? undefined) : null;
   const taskStagingLedgerPreview = buildTaskStagingLedgerPreview(taskStagingLedger);
 
   async function generatePlan(text: string) {
@@ -134,7 +139,7 @@ export function BuilderPanel({
     const route = getCurrentAiRoute("planning");
     if (route.status !== "active") { setError(route.reason); return; }
     if (!getApiKey()) { onNeedKey(); return; }
-    setBusy(true); setError(""); setRaw(""); setPlan(null); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setTaskHandoffNotice(""); setTaskStagingNotice(""); setTaskStagingLedger([]); setActiveTaskId(null); setPhase("planning");
+    setBusy(true); setError(""); setRaw(""); setPlan(null); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setTaskHandoffNotice(""); setTaskStagingNotice(""); setTaskStagingLedger([]); setApplyOutcomes([]); setActiveTaskId(null); setPhase("planning");
 
     const templateList = projectTemplates.map((t) => `${t.id} (${t.stack}, ${t.lang})`).join(", ");
     const prompt = `You are DevLab's project architect. The developer wants to build:
@@ -469,14 +474,14 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
 
   function reset() {
     setPhase("brief"); setBrief(""); setPlan(null); setRaw("");
-    setBuiltFiles([]); setError(""); setStageNotice(""); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setTaskHandoffNotice(""); setTaskStagingNotice(""); setTaskStagingLedger([]); setActiveTaskId(null);
+    setBuiltFiles([]); setError(""); setStageNotice(""); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setTaskHandoffNotice(""); setTaskStagingNotice(""); setTaskStagingLedger([]); setApplyOutcomes([]); setActiveTaskId(null);
   }
 
   return (
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Agentic Project Builder"
-        subtitle="Phase 8L · task batch staging"
+        subtitle="Phase 8M · task apply progress"
         badge={settings.autonomy === "auto" ? "Autonomous" : settings.autonomy === "suggest" ? "Suggest mode" : "Ask first"}
         badgeOk={settings.autonomy !== "ask"}
       />
@@ -708,14 +713,23 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                     Renderer memory only
                   </div>
                   <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-cyan-100/65">
-                    <span className="block text-cyan-100">{taskPlanPreview.pendingFileCount} pending draft target{taskPlanPreview.pendingFileCount === 1 ? "" : "s"}</span>
-                    Apply remains per-file review
+                    <span className="block text-cyan-100">{taskApplyProgress?.appliedTargetCount ?? 0}/{taskPlanPreview.fileTargetCount} target{taskPlanPreview.fileTargetCount === 1 ? "" : "s"} applied in Editor</span>
+                    {taskPlanPreview.pendingFileCount} pending draft target{taskPlanPreview.pendingFileCount === 1 ? "" : "s"} · per-file explicit apply
                   </div>
                   <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-cyan-100/65">
                     <span className="block text-cyan-100">{taskHandoffPreview?.readyTaskCount ?? 0} ready handoff{(taskHandoffPreview?.readyTaskCount ?? 0) === 1 ? "" : "s"}</span>
                     {formatByteCount(taskHandoffPreview?.totalDraftBytes ?? 0)} generated draft metadata
                   </div>
                 </div>
+                {taskApplyProgress && (
+                  <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-cyan-300/20 bg-cyan-300/[0.05] px-3 py-2 text-[11.5px] text-cyan-100/75">
+                    <ArrowRight className="h-3.5 w-3.5 text-cyan-300" />
+                    <span>{taskApplyProgress.guidance}</span>
+                    {taskApplyProgress.staleTargetCount > 0 && (
+                      <span className="text-amber-200/80">{taskApplyProgress.staleTargetCount} applied target{taskApplyProgress.staleTargetCount === 1 ? " has" : "s have"} a newer in-memory draft; restage and recompare before applying again.</span>
+                    )}
+                  </div>
+                )}
                 <div className="mt-3 space-y-2">
                   {taskPlanPreview.tasks.map((task) => {
                     const generatingTask = activeTaskId === task.id;
@@ -724,6 +738,8 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                     const canStageTask = !generating && !activeTaskId && !staging && task.generatedFileTargets.length > 0;
                     const handoffPacket = taskHandoffPreview?.packets.find((packet) => packet.id === task.id);
                     const stagingRecord = taskStagingLedger.find((record) => record.taskId === task.id);
+                    const applyStatus = taskApplyProgress?.tasks.find((item) => item.taskId === task.id);
+                    const isSuggestedNext = taskApplyProgress?.nextTaskId === task.id;
                     return (
                       <div key={task.id} className="rounded-lg border border-white/10 bg-black/15 p-3">
                         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -737,17 +753,37 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                                   staged for Editor review · {stagingRecord.files.length} file{stagingRecord.files.length === 1 ? "" : "s"}
                                 </span>
                               )}
+                              {applyStatus && applyStatus.appliedTargets.length > 0 && (
+                                <span className={`rounded-full border px-2 py-0.5 text-[10.5px] ${applyStatus.state === "applied" ? "border-violet-400/30 bg-violet-400/10 text-violet-200" : applyStatus.state === "stale" ? "border-amber-400/30 bg-amber-400/10 text-amber-200" : "border-violet-400/20 bg-violet-400/5 text-violet-200/80"}`}>
+                                  {applyStatus.label}
+                                </span>
+                              )}
+                              {isSuggestedNext && (
+                                <span className="rounded-full border border-cyan-300/40 bg-cyan-300/10 px-2 py-0.5 text-[10.5px] font-semibold text-cyan-100">
+                                  suggested next
+                                </span>
+                              )}
                             </div>
                             <p className="mt-1 text-[11.5px] leading-relaxed text-cyan-100/60">{task.detail}</p>
                             <div className="mt-2 flex flex-wrap gap-1.5">
                               {task.reviewedFileTargets.length > 0 ? task.reviewedFileTargets.map((targetPath) => {
                                 const isGenerated = task.generatedFileTargets.includes(targetPath);
+                                const isApplied = applyStatus?.appliedTargets.includes(targetPath) ?? false;
+                                const isStale = applyStatus?.staleTargets.includes(targetPath) ?? false;
+                                const chipClass = isStale
+                                  ? "border-amber-400/30 bg-amber-400/10 text-amber-200"
+                                  : isApplied
+                                    ? "border-violet-400/30 bg-violet-400/10 text-violet-200"
+                                    : isGenerated
+                                      ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
+                                      : "border-cyan-400/20 bg-cyan-400/10 text-cyan-200";
+                                const chipLabel = isStale ? "applied · draft changed" : isApplied ? "applied" : isGenerated ? "draft" : "pending";
                                 return (
                                   <span
                                     key={`${task.id}-${targetPath}`}
-                                    className={`rounded-md border px-2 py-0.5 font-mono text-[10.5px] ${isGenerated ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : "border-cyan-400/20 bg-cyan-400/10 text-cyan-200"}`}
+                                    className={`rounded-md border px-2 py-0.5 font-mono text-[10.5px] ${chipClass}`}
                                   >
-                                    {isGenerated ? "draft" : "pending"} · {targetPath}
+                                    {chipLabel} · {targetPath}
                                   </span>
                                 );
                               }) : (
@@ -811,6 +847,9 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                               )}
                               {handoffPacket && (
                                 <p className="mt-1 text-cyan-100/45">Editor staging: {handoffPacket.stagingState}</p>
+                              )}
+                              {handoffPacket && (
+                                <p className="mt-1 text-cyan-100/45">Editor apply: {handoffPacket.applyState}</p>
                               )}
                             </div>
                           </div>
@@ -1018,6 +1057,7 @@ interface TaskHandoffPacket {
   title: string;
   handoffState: string;
   stagingState: string;
+  applyState: string;
   dependsOn: string[];
   nextTaskIds: string[];
   generatedDrafts: DraftHandoffFile[];
@@ -1037,7 +1077,7 @@ interface TaskHandoffPreview {
   exportText: string;
 }
 
-function buildTaskHandoffPreview(taskPlan: TaskPlanPreview, builtFiles: VFile[], projectSummary: string, stagingLedger: BuilderTaskStagingRecord[] = []): TaskHandoffPreview {
+function buildTaskHandoffPreview(taskPlan: TaskPlanPreview, builtFiles: VFile[], projectSummary: string, stagingLedger: BuilderTaskStagingRecord[] = [], applyProgress?: TaskApplyProgress): TaskHandoffPreview {
   const generatedAt = new Date().toISOString();
   const builtByPath = new Map(builtFiles.map((file) => [file.path, file]));
   const stagingByTask = new Map(stagingLedger.map((record) => [record.taskId, record]));
@@ -1054,6 +1094,7 @@ function buildTaskHandoffPreview(taskPlan: TaskPlanPreview, builtFiles: VFile[],
           ? "partial handoff; some draft targets are still pending"
           : "waiting for in-memory draft generation";
     const stagingState = describeTaskStagingState(task, stagingByTask.get(task.id));
+    const applyState = applyProgress?.tasks.find((item) => item.taskId === task.id)?.detail ?? "no reviewed-draft apply recorded in this session";
     const exportText = [
       "DevLab Builder task handoff packet",
       `Generated: ${generatedAt}`,
@@ -1066,6 +1107,7 @@ function buildTaskHandoffPreview(taskPlan: TaskPlanPreview, builtFiles: VFile[],
       `## ${task.id} — ${task.title}`,
       `State: ${handoffState}`,
       `Editor staging: ${stagingState}`,
+      `Editor apply: ${applyState}`,
       `Depends on: ${task.dependsOn.length > 0 ? task.dependsOn.join(", ") : "none"}`,
       `Next task(s): ${nextTaskIds.length > 0 ? nextTaskIds.join(", ") : "none"}`,
       `Review gate: ${task.reviewGate}`,
@@ -1086,12 +1128,14 @@ function buildTaskHandoffPreview(taskPlan: TaskPlanPreview, builtFiles: VFile[],
       "- Staging a task batch only opens its in-memory drafts in Editor review through the native agent-tools metadata gate; it is not apply.",
       "- Editor reviewed-draft apply remains the only workspace write path.",
       "- Verification must be run explicitly after reviewed apply; this packet does not claim checks passed.",
+      "- Apply state is session-only metadata reported by the Editor after explicit per-file apply; it is not re-verified against the workspace.",
     ].join("\n");
     return {
       id: task.id,
       title: task.title,
       handoffState,
       stagingState,
+      applyState,
       dependsOn: task.dependsOn,
       nextTaskIds,
       generatedDrafts,
@@ -1116,6 +1160,8 @@ function buildTaskHandoffPreview(taskPlan: TaskPlanPreview, builtFiles: VFile[],
     `- ${summary}`,
     `- Generated draft metadata: ${generatedDraftCount} target${generatedDraftCount === 1 ? "" : "s"}, ${formatByteCount(totalDraftBytes)} total`,
     `- Task batches staged for Editor review this session: ${stagingLedger.length}`,
+    `- Reviewed file targets applied in Editor this session: ${applyProgress?.appliedTargetCount ?? 0}/${taskPlan.fileTargetCount}${applyProgress && applyProgress.staleTargetCount > 0 ? ` (${applyProgress.staleTargetCount} with newer drafts)` : ""}`,
+    `- Suggested next task: ${applyProgress?.nextTaskId ?? "none"}`,
     "- Draft contents and workspace diffs are intentionally omitted; use Editor review/recompare before apply.",
     "",
     "## Task handoff packets",
@@ -1123,6 +1169,7 @@ function buildTaskHandoffPreview(taskPlan: TaskPlanPreview, builtFiles: VFile[],
       `### ${packet.id} — ${packet.title}`,
       `State: ${packet.handoffState}`,
       `Editor staging: ${packet.stagingState}`,
+      `Editor apply: ${packet.applyState}`,
       `Depends on: ${packet.dependsOn.length > 0 ? packet.dependsOn.join(", ") : "none"}`,
       `Next task(s): ${packet.nextTaskIds.length > 0 ? packet.nextTaskIds.join(", ") : "none"}`,
       `Generated draft metadata: ${packet.generatedDrafts.length > 0 ? packet.generatedDrafts.map((file) => `${file.path} (${file.language}, ${formatByteCount(file.bytes)}, ${file.lines} line${file.lines === 1 ? "" : "s"})`).join(", ") : "none"}`,
@@ -1142,6 +1189,108 @@ function buildDraftHandoffFile(file: VFile | undefined): DraftHandoffFile | null
     bytes: textBytes(file.content),
     lines: countLines(file.content),
   };
+}
+
+type TaskApplyState = "not-started" | "partial" | "applied" | "stale" | "no-targets";
+
+interface TaskApplyStatus {
+  taskId: string;
+  state: TaskApplyState;
+  label: string;
+  detail: string;
+  appliedTargets: string[];
+  staleTargets: string[];
+  unappliedTargets: string[];
+}
+
+interface TaskApplyProgress {
+  tasks: TaskApplyStatus[];
+  appliedTargetCount: number;
+  staleTargetCount: number;
+  nextTaskId: string | null;
+  guidance: string;
+}
+
+function buildTaskApplyProgress(taskPlan: TaskPlanPreview, builtFiles: VFile[], outcomes: ReviewedDraftApplyOutcome[]): TaskApplyProgress {
+  const builtByPath = new Map(builtFiles.map((file) => [file.path, file]));
+  const outcomeByPath = new Map<string, ReviewedDraftApplyOutcome>();
+  for (const outcome of outcomes) {
+    const existing = outcomeByPath.get(outcome.path);
+    if (!existing || outcome.appliedAtMs > existing.appliedAtMs) outcomeByPath.set(outcome.path, outcome);
+  }
+  const tasks = taskPlan.tasks.map((task): TaskApplyStatus => {
+    const appliedTargets = task.reviewedFileTargets.filter((path) => outcomeByPath.has(path));
+    const staleTargets = appliedTargets.filter((path) => {
+      const outcome = outcomeByPath.get(path);
+      const draft = builtByPath.get(path);
+      return Boolean(outcome && draft && textBytes(draft.content) !== outcome.bytes);
+    });
+    const unappliedTargets = task.reviewedFileTargets.filter((path) => !outcomeByPath.has(path));
+    const total = task.reviewedFileTargets.length;
+    const latestApplied = appliedTargets
+      .map((path) => outcomeByPath.get(path))
+      .filter((outcome): outcome is ReviewedDraftApplyOutcome => Boolean(outcome))
+      .sort((a, b) => b.appliedAtMs - a.appliedAtMs)[0];
+    let state: TaskApplyState;
+    if (total === 0) state = "no-targets";
+    else if (staleTargets.length > 0) state = "stale";
+    else if (appliedTargets.length === total) state = "applied";
+    else if (appliedTargets.length > 0) state = "partial";
+    else state = "not-started";
+    const label = state === "no-targets"
+      ? "no apply targets"
+      : state === "stale"
+        ? `${appliedTargets.length}/${total} applied · ${staleTargets.length} changed since apply`
+        : `${appliedTargets.length}/${total} applied in Editor`;
+    const detail = state === "no-targets"
+      ? "no reviewed file targets to apply"
+      : appliedTargets.length === 0
+        ? "no reviewed-draft apply recorded in this session"
+        : `${appliedTargets.length}/${total} target${total === 1 ? "" : "s"} applied via explicit Editor apply${latestApplied ? ` (latest ${latestApplied.action.toLowerCase()} ${latestApplied.path} at ${new Date(latestApplied.appliedAtMs).toISOString()}, revision ${latestApplied.revision.slice(0, 12)})` : ""}${staleTargets.length > 0 ? `; ${staleTargets.length} applied target${staleTargets.length === 1 ? " has" : "s have"} a newer in-memory draft: ${staleTargets.join(", ")}` : ""}${unappliedTargets.length > 0 ? `; not yet applied: ${unappliedTargets.join(", ")}` : ""}`;
+    return { taskId: task.id, state, label, detail, appliedTargets, staleTargets, unappliedTargets };
+  });
+  const appliedPaths = new Set(tasks.flatMap((task) => task.appliedTargets));
+  const stalePaths = new Set(tasks.flatMap((task) => task.staleTargets));
+  const appliedTargetCount = appliedPaths.size;
+  const staleTargetCount = stalePaths.size;
+  const statusByTask = new Map(tasks.map((task) => [task.taskId, task]));
+  const isSettled = (taskId: string) => {
+    const status = statusByTask.get(taskId);
+    return !status || status.state === "applied" || status.state === "no-targets";
+  };
+  const nextTask = taskPlan.tasks.find((task) => {
+    const status = statusByTask.get(task.id);
+    if (!status || status.state === "applied" || status.state === "no-targets") return false;
+    return task.dependsOn.every(isSettled);
+  }) ?? null;
+  const nextTaskId = nextTask?.id ?? null;
+  let guidance: string;
+  if (taskPlan.fileTargetCount === 0) {
+    guidance = "No reviewed file targets were assigned, so there is nothing to stage or apply for these batches.";
+  } else if (!nextTask) {
+    const blocked = taskPlan.tasks.find((task) => {
+      const status = statusByTask.get(task.id);
+      return status && status.state !== "applied" && status.state !== "no-targets";
+    });
+    guidance = blocked
+      ? `${blocked.id} is waiting on an earlier task: apply its dependency drafts in the Editor first.`
+      : "All reviewed file targets have recorded Editor applies in this session. Run verification explicitly; this view does not claim checks passed.";
+  } else {
+    const status = statusByTask.get(nextTask.id);
+    const taskState = taskPlan.tasks.find((task) => task.id === nextTask.id);
+    if (status?.state === "stale") {
+      guidance = `Next: ${nextTask.id} has applied targets with newer in-memory drafts; restage and recompare in the Editor before applying again.`;
+    } else if (status?.state === "partial") {
+      guidance = `Next: finish ${nextTask.id} by applying ${status.unappliedTargets.length} remaining target${status.unappliedTargets.length === 1 ? "" : "s"} in Editor review.`;
+    } else if (taskState && taskState.generatedFileTargets.length === 0) {
+      guidance = `Next: generate in-memory drafts for ${nextTask.id}, then stage them for Editor review.`;
+    } else if (taskState && taskState.pendingFileTargets.length > 0) {
+      guidance = `Next: ${nextTask.id} still has ${taskState.pendingFileTargets.length} pending draft target${taskState.pendingFileTargets.length === 1 ? "" : "s"}; generate them, then stage the batch for Editor review.`;
+    } else {
+      guidance = `Next: stage ${nextTask.id} for Editor review and apply each reviewed draft explicitly.`;
+    }
+  }
+  return { tasks, appliedTargetCount, staleTargetCount, nextTaskId, guidance };
 }
 
 interface TaskStagingLedgerPreview {

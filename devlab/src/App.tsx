@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import type { AgentContextFile, BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, ChatMessage, OpenGeneratedDrafts, VFile, ViewId } from "./types";
+import type { AgentContextFile, BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, ChatMessage, OpenGeneratedDrafts, ReviewedDraftApplyOutcome, VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import { loadDeploy, loadGit, loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
 import { resolveAiRoute } from "./lib/modelRouting";
@@ -67,6 +67,9 @@ const ToolsPanel = lazy(() => import("./panels/ToolsPanel").then((module) => ({
 
 interface NavItem { id: ViewId; icon: typeof Sparkles; label: string; shortcut?: string }
 
+// Bound for the session-only reviewed-draft apply outcome ledger shared with Project Builder.
+const MAX_APPLY_OUTCOMES = 48;
+
 const NAV: NavItem[] = [
   { id: "welcome",  icon: Sparkles,     label: "Home" },
   { id: "agent",    icon: Bot,          label: "AI Agent",       shortcut: "⌘1" },
@@ -118,6 +121,8 @@ export default function App() {
   const [builderStageNotice, setBuilderStageNotice] = useState("");
   // Session-only metadata ledger for task batches staged into Editor review; intentionally not persisted.
   const [builderTaskStagingLedger, setBuilderTaskStagingLedger] = useState<BuilderTaskStagingRecord[]>([]);
+  // Session-only metadata outcomes reported by Editor reviewed-draft apply; never persisted, no file contents.
+  const [reviewedDraftApplyOutcomes, setReviewedDraftApplyOutcomes] = useState<ReviewedDraftApplyOutcome[]>([]);
   const [pendingRecovery, setPendingRecovery] = useState<SessionRecoverySnapshot | null>(() => loadSessionRecovery());
   const [recoveryReady, setRecoveryReady] = useState(() => !loadSessionRecovery());
 
@@ -229,7 +234,15 @@ export default function App() {
     setBuilderStaging(false);
     setBuilderStageNotice("");
     setBuilderTaskStagingLedger([]);
+    setReviewedDraftApplyOutcomes([]);
     setGeneratedDrafts([]);
+  }
+
+  function recordReviewedDraftApplyOutcome(outcome: ReviewedDraftApplyOutcome) {
+    setReviewedDraftApplyOutcomes((current) => [
+      outcome,
+      ...current.filter((item) => item.path !== outcome.path),
+    ].slice(0, MAX_APPLY_OUTCOMES));
   }
 
   function finishRecoveryPrompt() {
@@ -350,6 +363,8 @@ export default function App() {
             setStageNotice={setBuilderStageNotice}
             taskStagingLedger={builderTaskStagingLedger}
             setTaskStagingLedger={setBuilderTaskStagingLedger}
+            applyOutcomes={reviewedDraftApplyOutcomes}
+            setApplyOutcomes={setReviewedDraftApplyOutcomes}
           />
         </Suspense>
         : nativeFeature(
@@ -362,6 +377,7 @@ export default function App() {
             incomingDrafts={generatedDrafts}
             onDismissDrafts={() => setGeneratedDrafts([])}
             onDirtyChange={setEditorDirty}
+            onDraftApplied={recordReviewedDraftApplyOutcome}
           />;
         }
         return generatedDrafts.length > 0
@@ -535,7 +551,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 8L task batch staging</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 8M task apply progress</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}

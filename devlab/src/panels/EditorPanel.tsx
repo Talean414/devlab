@@ -3,7 +3,7 @@ import Editor, { DiffEditor, type DiffOnMount, type MonacoDiffEditor } from "@mo
 import { PanelHeader } from "./AgentPanel";
 import { loadSettings, getTheme } from "../lib/settings";
 import { testRunnerSnapshot, type TestProfile, type TestRunnerSnapshot } from "../lib/testRunner";
-import type { VFile } from "../types";
+import type { ReviewedDraftApplyOutcome, VFile } from "../types";
 import {
   applyReviewedDraftToWorkspace,
   closeWorkspace,
@@ -115,10 +115,12 @@ export function EditorPanel({
   incomingDrafts = [],
   onDismissDrafts,
   onDirtyChange,
+  onDraftApplied,
 }: {
   incomingDrafts?: VFile[];
   onDismissDrafts?: () => void;
   onDirtyChange?: (dirty: boolean) => void;
+  onDraftApplied?: (outcome: ReviewedDraftApplyOutcome) => void;
 }) {
   const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null);
   const [currentDirectory, setCurrentDirectory] = useState("");
@@ -716,6 +718,16 @@ export function EditorPanel({
         : [...appliedDraftKeys, appliedKey];
       setAppliedDraftKeys(nextAppliedKeys);
       setAppliedDraftRecords((current) => ({ ...current, [appliedKey]: appliedRecord }));
+      // Metadata-only outcome for the session apply ledger shared with Project Builder; no contents are passed.
+      onDraftApplied?.({
+        path: appliedRecord.path,
+        action: appliedRecord.action,
+        appliedAtMs: appliedRecord.appliedAtMs,
+        bytes: appliedRecord.bytes,
+        lines: appliedRecord.lines,
+        revision: appliedRecord.revision,
+        size: appliedRecord.size,
+      });
       setVerificationPlan(null);
       setVerificationNotice(null);
       const nextDraftIndex = nextUnappliedDraftIndex(incomingDrafts, nextAppliedKeys, draftIndex);

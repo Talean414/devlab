@@ -126,6 +126,18 @@ export interface BuilderTaskStagingRecord {
   totalBytes: number;
 }
 
+// Session-only, metadata-only outcome reported by the Editor after one explicit reviewed-draft apply.
+// It carries no file contents and is intentionally excluded from recovery snapshots.
+export interface ReviewedDraftApplyOutcome {
+  path: string;
+  action: "Created" | "Updated";
+  appliedAtMs: number;
+  bytes: number;
+  lines: number;
+  revision: string;
+  size: number;
+}
+
 export interface BuildPlanStep {
   id: string;
   title: string;
