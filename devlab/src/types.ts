@@ -28,6 +28,17 @@ export interface ChatMessage {
   ts: number;
 }
 
+
+export type BuilderPhase = "brief" | "planning" | "review" | "done";
+
+export interface BuilderPlan {
+  summary: string;
+  stack: string[];
+  steps: { title: string; detail: string }[];
+  commands: string[];
+  files: { path: string; description: string }[];
+}
+
 export interface ProjectTemplate {
   id: string;
   name: string;

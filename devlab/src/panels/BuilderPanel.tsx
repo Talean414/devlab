@@ -1,29 +1,19 @@
-import { useRef, useState } from "react";
+import { useRef, type Dispatch, type SetStateAction } from "react";
 import { PanelHeader } from "./AgentPanel";
 import { Markdown } from "../components/CodeBlock";
 import { getApiKey, streamChat, type GenTurn } from "../lib/gemini";
 import { recordAgentDraft } from "../lib/agentTools";
 import { loadSettings } from "../lib/settings";
 import { projectTemplates } from "../data/templates";
-import type { VFile } from "../types";
+import type { BuilderPhase, BuilderPlan, VFile } from "../types";
 import {
   Wand2, Loader2, CheckCircle2, FileCode2, TerminalSquare,
   Sparkles, RotateCcw, FolderPlus, ArrowRight,
 } from "lucide-react";
 
-type Phase = "brief" | "planning" | "review" | "done";
-
 const MAX_PLAN_FILES = 12;
 const MAX_DRAFT_BYTES = 512 * 1024;
 const MAX_FILE_OUTPUT_CHARS = 96 * 1024;
-
-interface Plan {
-  summary: string;
-  stack: string[];
-  steps: { title: string; detail: string }[];
-  commands: string[];
-  files: { path: string; description: string }[];
-}
 
 const IDEAS = [
   "A SaaS dashboard with auth, Stripe billing and a Postgres database",
@@ -66,21 +56,52 @@ function textBytes(value: string) {
 }
 
 export function BuilderPanel({
-  onNeedKey, onOpenFiles,
+  onNeedKey,
+  onOpenFiles,
+  phase,
+  setPhase,
+  brief,
+  setBrief,
+  raw,
+  setRaw,
+  plan,
+  setPlan,
+  busy,
+  setBusy,
+  error,
+  setError,
+  generating,
+  setGenerating,
+  builtFiles,
+  setBuiltFiles,
+  staging,
+  setStaging,
+  stageNotice,
+  setStageNotice,
 }: {
   onNeedKey: () => void;
   onOpenFiles: (files: VFile[]) => void;
+  phase: BuilderPhase;
+  setPhase: Dispatch<SetStateAction<BuilderPhase>>;
+  brief: string;
+  setBrief: Dispatch<SetStateAction<string>>;
+  raw: string;
+  setRaw: Dispatch<SetStateAction<string>>;
+  plan: BuilderPlan | null;
+  setPlan: Dispatch<SetStateAction<BuilderPlan | null>>;
+  busy: boolean;
+  setBusy: Dispatch<SetStateAction<boolean>>;
+  error: string;
+  setError: Dispatch<SetStateAction<string>>;
+  generating: string | null;
+  setGenerating: Dispatch<SetStateAction<string | null>>;
+  builtFiles: VFile[];
+  setBuiltFiles: Dispatch<SetStateAction<VFile[]>>;
+  staging: boolean;
+  setStaging: Dispatch<SetStateAction<boolean>>;
+  stageNotice: string;
+  setStageNotice: Dispatch<SetStateAction<string>>;
 }) {
-  const [phase, setPhase] = useState<Phase>("brief");
-  const [brief, setBrief] = useState("");
-  const [raw, setRaw] = useState("");
-  const [plan, setPlan] = useState<Plan | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [generating, setGenerating] = useState<string | null>(null);
-  const [builtFiles, setBuiltFiles] = useState<VFile[]>([]);
-  const [staging, setStaging] = useState(false);
-  const [stageNotice, setStageNotice] = useState("");
   const outRef = useRef<HTMLDivElement>(null);
   const settings = loadSettings();
 
@@ -121,7 +142,7 @@ Rules:
       const firstBrace = cleaned.indexOf("{");
       const lastBrace = cleaned.lastIndexOf("}");
       const jsonStr = firstBrace > -1 ? cleaned.slice(firstBrace, lastBrace + 1) : cleaned;
-      const parsed = JSON.parse(jsonStr) as Plan;
+      const parsed = JSON.parse(jsonStr) as BuilderPlan;
       parsed.files = parsed.files
         .filter((file) => validDraftPath(file.path))
         .slice(0, MAX_PLAN_FILES);

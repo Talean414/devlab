@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import type { ChatMessage, VFile, ViewId } from "./types";
+import type { BuilderPhase, BuilderPlan, ChatMessage, VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import { loadDeploy, loadGit, loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
 import {
@@ -95,6 +95,16 @@ export default function App() {
   const [agentMessages, setAgentMessages] = useState<ChatMessage[]>([]);
   const [agentInput, setAgentInput] = useState("");
   const [agentBusy, setAgentBusy] = useState(false);
+  const [builderPhase, setBuilderPhase] = useState<BuilderPhase>("brief");
+  const [builderBrief, setBuilderBrief] = useState("");
+  const [builderRaw, setBuilderRaw] = useState("");
+  const [builderPlan, setBuilderPlan] = useState<BuilderPlan | null>(null);
+  const [builderBusy, setBuilderBusy] = useState(false);
+  const [builderError, setBuilderError] = useState("");
+  const [builderGenerating, setBuilderGenerating] = useState<string | null>(null);
+  const [builderBuiltFiles, setBuilderBuiltFiles] = useState<VFile[]>([]);
+  const [builderStaging, setBuilderStaging] = useState(false);
+  const [builderStageNotice, setBuilderStageNotice] = useState("");
 
   const hasKey = !!getApiKey();
   const model = getPicked() || getModel();
@@ -194,7 +204,31 @@ export default function App() {
       />;
       case "builder":  return hasNativeCapability(runtime, "agent-tools")
         ? <Suspense fallback={<NativePanelLoading label="Loading native agent tools…" />}>
-          <BuilderPanel key={keyVersion} onNeedKey={() => setShowModal(true)} onOpenFiles={openGeneratedSource} />
+          <BuilderPanel
+            key={keyVersion}
+            onNeedKey={() => setShowModal(true)}
+            onOpenFiles={openGeneratedSource}
+            phase={builderPhase}
+            setPhase={setBuilderPhase}
+            brief={builderBrief}
+            setBrief={setBuilderBrief}
+            raw={builderRaw}
+            setRaw={setBuilderRaw}
+            plan={builderPlan}
+            setPlan={setBuilderPlan}
+            busy={builderBusy}
+            setBusy={setBuilderBusy}
+            error={builderError}
+            setError={setBuilderError}
+            generating={builderGenerating}
+            setGenerating={setBuilderGenerating}
+            builtFiles={builderBuiltFiles}
+            setBuiltFiles={setBuilderBuiltFiles}
+            staging={builderStaging}
+            setStaging={setBuilderStaging}
+            stageNotice={builderStageNotice}
+            setStageNotice={setBuilderStageNotice}
+          />
         </Suspense>
         : nativeFeature(
           "Project Builder", "agent-tools", "Phase 6E · permission-gated multi-file draft staging",
