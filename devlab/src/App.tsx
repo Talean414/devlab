@@ -3,6 +3,10 @@ import type { BuilderPhase, BuilderPlan, ChatMessage, VFile, ViewId } from "./ty
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import { loadDeploy, loadGit, loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
 import {
+  buildSessionRecovery, clearSessionRecovery, loadSessionRecovery, saveSessionRecovery,
+  sessionRecoverySummary, type SessionRecoverySnapshot,
+} from "./lib/sessionRecovery";
+import {
   detectRuntime, hasNativeCapability, WEB_RUNTIME,
   type NativeCapability, type RuntimeInfo,
 } from "./lib/native";
@@ -105,6 +109,8 @@ export default function App() {
   const [builderBuiltFiles, setBuilderBuiltFiles] = useState<VFile[]>([]);
   const [builderStaging, setBuilderStaging] = useState(false);
   const [builderStageNotice, setBuilderStageNotice] = useState("");
+  const [pendingRecovery, setPendingRecovery] = useState<SessionRecoverySnapshot | null>(() => loadSessionRecovery());
+  const [recoveryReady, setRecoveryReady] = useState(() => !loadSessionRecovery());
 
   const hasKey = !!getApiKey();
   const model = getPicked() || getModel();
@@ -136,12 +142,39 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!firstRun) {
+    if (!firstRun && !pendingRecovery) {
       if (!getApiKey()) setShowModal(true);
       else pickBestModel();
       setFirstRun(true);
     }
-  }, [firstRun]);
+  }, [firstRun, pendingRecovery]);
+
+  useEffect(() => {
+    if (!recoveryReady) return;
+    const snapshot = buildSessionRecovery({
+      view,
+      agentMessages,
+      agentInput,
+      builderPhase,
+      builderBrief,
+      builderRaw,
+      builderPlan,
+      builderBuiltFiles,
+      builderStageNotice,
+    });
+    saveSessionRecovery(snapshot);
+  }, [
+    recoveryReady,
+    view,
+    agentMessages,
+    agentInput,
+    builderPhase,
+    builderBrief,
+    builderRaw,
+    builderPlan,
+    builderBuiltFiles,
+    builderStageNotice,
+  ]);
 
   useEffect(() => {
     const tick = () => setTime(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
@@ -166,6 +199,55 @@ export default function App() {
 
   const refreshKey = () => setKeyVersion((v) => v + 1);
   const refreshSettings = () => setSettings(loadSettings());
+
+  function resetRecoverableSession() {
+    setAgentMessages([]);
+    setAgentInput("");
+    setAgentBusy(false);
+    setBuilderPhase("brief");
+    setBuilderBrief("");
+    setBuilderRaw("");
+    setBuilderPlan(null);
+    setBuilderBusy(false);
+    setBuilderError("");
+    setBuilderGenerating(null);
+    setBuilderBuiltFiles([]);
+    setBuilderStaging(false);
+    setBuilderStageNotice("");
+    setGeneratedDrafts([]);
+  }
+
+  function finishRecoveryPrompt() {
+    setPendingRecovery(null);
+    setRecoveryReady(true);
+    setFirstRun(true);
+    if (getApiKey()) void pickBestModel();
+  }
+
+  function continueRecoveredSession(snapshot: SessionRecoverySnapshot) {
+    setAgentMessages(snapshot.agent?.messages ?? []);
+    setAgentInput(snapshot.agent?.input ?? "");
+    setAgentBusy(false);
+    setBuilderPhase(snapshot.builder?.phase ?? "brief");
+    setBuilderBrief(snapshot.builder?.brief ?? "");
+    setBuilderRaw(snapshot.builder?.raw ?? "");
+    setBuilderPlan(snapshot.builder?.plan ?? null);
+    setBuilderBusy(false);
+    setBuilderError("");
+    setBuilderGenerating(null);
+    setBuilderBuiltFiles(snapshot.builder?.builtFiles ?? []);
+    setBuilderStaging(false);
+    setBuilderStageNotice(snapshot.builder?.stageNotice ?? "");
+    setView(settings.visiblePanels.includes(snapshot.view) ? snapshot.view : "agent");
+    finishRecoveryPrompt();
+  }
+
+  function startFresh(next: "builder" | "editor" | "current") {
+    clearSessionRecovery();
+    resetRecoverableSession();
+    finishRecoveryPrompt();
+    if (next !== "current") setView(next);
+  }
 
   const nav = NAV.filter((n) => settings.visiblePanels.includes(n.id));
 
@@ -416,12 +498,87 @@ export default function App() {
         </footer>
       )}
 
-      {showModal && (
+      {pendingRecovery && (
+        <SessionRecoveryPrompt
+          snapshot={pendingRecovery}
+          onContinue={() => continueRecoveredSession(pendingRecovery)}
+          onNewProject={() => startFresh("builder")}
+          onOpenWorkspace={() => startFresh("editor")}
+          onDismiss={() => startFresh("current")}
+        />
+      )}
+
+      {showModal && !pendingRecovery && (
         <KeyModal
           onClose={() => setShowModal(false)}
           onSaved={() => { refreshKey(); setShowModal(false); navigate("agent"); }}
         />
       )}
+    </div>
+  );
+}
+
+function SessionRecoveryPrompt({
+  snapshot,
+  onContinue,
+  onNewProject,
+  onOpenWorkspace,
+  onDismiss,
+}: {
+  snapshot: SessionRecoverySnapshot;
+  onContinue: () => void;
+  onNewProject: () => void;
+  onOpenWorkspace: () => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-lg rounded-2xl border border-white/10 bg-[#0d1017] p-6 shadow-2xl shadow-black/40 ring-soft">
+        <div className="flex items-start gap-3">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-cyan-500/10 ring-1 ring-cyan-500/20">
+            <Sparkles className="h-5 w-5 text-cyan-300" />
+          </div>
+          <div className="min-w-0">
+            <h3 className="text-base font-semibold text-white">Continue your previous DevLab session?</h3>
+            <p className="mt-1 text-[13px] leading-relaxed text-zinc-400">
+              DevLab found local browser recovery data from {new Date(snapshot.savedAt).toLocaleString()}:
+              <span className="mt-1 block font-medium text-zinc-200">{sessionRecoverySummary(snapshot)}</span>
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-4 rounded-xl border border-amber-500/20 bg-amber-500/[0.05] p-3 text-[12px] leading-relaxed text-amber-100/80">
+          This recovery data is stored only in this WebView's localStorage. It may include prompts,
+          model replies and generated draft file contents. Choose Start fresh if that data should be cleared.
+        </div>
+
+        <div className="mt-5 grid gap-2 sm:grid-cols-2">
+          <button
+            onClick={onContinue}
+            className="rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 px-4 py-2.5 text-[13px] font-semibold text-white shadow-lg shadow-cyan-950/30 hover:from-cyan-400 hover:to-blue-500"
+          >
+            Continue where I left off
+          </button>
+          <button
+            onClick={onNewProject}
+            className="rounded-xl border border-violet-500/30 bg-violet-500/10 px-4 py-2.5 text-[13px] font-semibold text-violet-100 hover:bg-violet-500/20"
+          >
+            Start a new project
+          </button>
+          <button
+            onClick={onOpenWorkspace}
+            className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-2.5 text-[13px] font-semibold text-zinc-200 hover:bg-white/[0.06]"
+          >
+            Open a workspace
+          </button>
+          <button
+            onClick={onDismiss}
+            className="rounded-xl border border-rose-500/25 bg-rose-500/10 px-4 py-2.5 text-[13px] font-semibold text-rose-100 hover:bg-rose-500/20"
+          >
+            Clear saved progress
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

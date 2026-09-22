@@ -52,6 +52,7 @@ PostgreSQL connectivity, schema inspection, bounded reads and separately confirm
 - BroadcastChannel/WebRTC collaboration primitives
 - Embedded web preview
 - WebView-local non-secret preferences; the Gemini BYOK key remains in its existing renderer flow
+- Optional local session recovery prompt for Agent and Project Builder progress, stored in WebView localStorage until continued or cleared
 
 Phase 5 is complete through Docker, SQLite, PostgreSQL and native HTTP. Phase 6 has started with bounded native test execution, reviewed one-file repair drafts and explicit approved-draft application; broader agent patch tools and signed distribution follow afterward. Until a backend exists, DevLab reports that the feature is unavailable instead of fabricating data or success.
 
@@ -231,6 +232,8 @@ Request bodies are limited to 2 MiB, response headers to 64 KiB and response bod
 5. In **Code Editor**, inspect every file. Persist files only with the explicit **Apply reviewed draft** button; existing files still require the revision-checked overwrite confirmation.
 
 Project Builder staging is not autonomous patch application. Shell commands are displayed for manual review only, file contents are not stored in the native audit log, and the only write path remains the reviewed-draft apply command.
+
+DevLab also keeps a bounded localStorage recovery snapshot for AI Agent and Project Builder progress. On reopen it asks whether to continue, start a new project, open a workspace, or clear saved progress. This is local to the WebView and may include prompts, model replies and generated draft file contents; it never stores passwords or OS credentials.
 
 ## 13. Run native workspace tests
 
