@@ -106,14 +106,16 @@ export function BuilderPanel({
 }) {
   const outRef = useRef<HTMLDivElement>(null);
   const [specNotice, setSpecNotice] = useState("");
+  const [specPreviewNotice, setSpecPreviewNotice] = useState("");
   const settings = loadSettings();
+  const specPreview = plan ? buildSpecMetadataPreview(plan, brief) : null;
 
   async function generatePlan(text: string) {
     if (!text.trim()) return;
     const route = getCurrentAiRoute("planning");
     if (route.status !== "active") { setError(route.reason); return; }
     if (!getApiKey()) { onNeedKey(); return; }
-    setBusy(true); setError(""); setRaw(""); setPlan(null); setSpecNotice(""); setPhase("planning");
+    setBusy(true); setError(""); setRaw(""); setPlan(null); setSpecNotice(""); setSpecPreviewNotice(""); setPhase("planning");
 
     const templateList = projectTemplates.map((t) => `${t.id} (${t.stack}, ${t.lang})`).join(", ");
     const prompt = `You are DevLab's project architect. The developer wants to build:
@@ -224,6 +226,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     if (!plan) return;
     setError("");
     setSpecNotice("");
+    setSpecPreviewNotice("");
     if (!navigator.clipboard?.writeText) {
       setError("Clipboard access is unavailable in this environment. Nothing was copied.");
       return;
@@ -236,12 +239,30 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     }
   }
 
+  async function copySpecMetadataPreview() {
+    if (!specPreview) return;
+    setError("");
+    setSpecNotice("");
+    setSpecPreviewNotice("");
+    if (!navigator.clipboard?.writeText) {
+      setError("Clipboard access is unavailable in this environment. Nothing was copied.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(specPreview.exportText);
+      setSpecPreviewNotice(`Copied spec metadata preview with ${specPreview.acceptanceCriteria.length} acceptance item${specPreview.acceptanceCriteria.length === 1 ? "" : "s"}, ${specPreview.riskNotes.length} risk note${specPreview.riskNotes.length === 1 ? "" : "s"} and ${specPreview.reviewGates.length} review gate${specPreview.reviewGates.length === 1 ? "" : "s"}.`);
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
   async function openSpecInEditorReview() {
     if (!plan) return;
     setStaging(true);
     setError("");
     setStageNotice("");
     setSpecNotice("");
+    setSpecPreviewNotice("");
     try {
       const content = buildSpecMarkdown(plan, brief);
       const opened = await onOpenFiles([
@@ -261,7 +282,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
 
   function reset() {
     setPhase("brief"); setBrief(""); setPlan(null); setRaw("");
-    setBuiltFiles([]); setError(""); setStageNotice(""); setSpecNotice("");
+    setBuiltFiles([]); setError(""); setStageNotice(""); setSpecNotice(""); setSpecPreviewNotice("");
   }
 
   return (
@@ -417,6 +438,49 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                   Metadata-only; no execution
                 </div>
               </div>
+              {specPreview && (
+                <details className="mt-3 rounded-lg border border-violet-400/20 bg-black/15 p-3 text-[11.5px] text-violet-100/70">
+                  <summary className="cursor-pointer select-none font-semibold text-violet-100">
+                    Spec metadata preview · {specPreview.summary}
+                  </summary>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-violet-200/60">Acceptance criteria</div>
+                      <ul className="mt-1 space-y-1">
+                        {specPreview.acceptanceCriteria.slice(0, 5).map((item) => <li key={item}>- {item}</li>)}
+                      </ul>
+                    </div>
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-violet-200/60">Risk notes</div>
+                      <ul className="mt-1 space-y-1">
+                        {specPreview.riskNotes.map((item) => <li key={item}>- {item}</li>)}
+                      </ul>
+                    </div>
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-violet-200/60">Review gates</div>
+                      <ul className="mt-1 space-y-1">
+                        {specPreview.reviewGates.map((item) => <li key={item}>- {item}</li>)}
+                      </ul>
+                    </div>
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-violet-200/60">Task DAG metadata</div>
+                      <ul className="mt-1 space-y-1">
+                        {specPreview.taskSummaries.map((item) => <li key={item}>- {item}</li>)}
+                      </ul>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => { void copySpecMetadataPreview(); }}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-violet-400/30 bg-violet-400/10 px-3 py-1.5 text-xs font-semibold text-violet-100 hover:bg-violet-400/20"
+                    >
+                      <Copy className="h-3.5 w-3.5" /> Copy spec metadata preview
+                    </button>
+                    <span className="text-[10.5px] text-violet-100/50">Preview only; spec.md still copies or stages through reviewed Editor flow.</span>
+                  </div>
+                  {specPreviewNotice && <div className="mt-2 text-[11px] text-emerald-300">{specPreviewNotice}</div>}
+                </details>
+              )}
               {specNotice && <div className="mt-3 text-[12px] text-emerald-300">{specNotice}</div>}
             </div>
 
@@ -535,6 +599,52 @@ interface SpecChecklist {
   dependencyAssumptions: string[];
   riskNotes: string[];
   reviewGates: string[];
+}
+
+interface SpecMetadataPreview {
+  summary: string;
+  acceptanceCriteria: string[];
+  dependencyAssumptions: string[];
+  riskNotes: string[];
+  reviewGates: string[];
+  taskSummaries: string[];
+  exportText: string;
+}
+
+function buildSpecMetadataPreview(plan: BuilderPlan, brief: string): SpecMetadataPreview {
+  const boundedPlan = boundPlanForSpec(plan);
+  const checklist = buildSpecChecklist(boundedPlan);
+  const taskDag = buildTaskDag(boundedPlan);
+  const taskSummaries = taskDag.slice(0, 8).map((task) => {
+    const files = task.reviewedFileTargets.length > 0 ? task.reviewedFileTargets.join(", ") : "no assigned file target";
+    return `${task.id}: ${task.title} — ${files}`;
+  });
+  const summary = `${taskDag.length} task${taskDag.length === 1 ? "" : "s"} · ${checklist.acceptanceCriteria.length} acceptance item${checklist.acceptanceCriteria.length === 1 ? "" : "s"} · ${checklist.riskNotes.length} risk note${checklist.riskNotes.length === 1 ? "" : "s"}`;
+  const exportText = [
+    "DevLab Builder spec metadata preview",
+    `Generated: ${new Date().toISOString()}`,
+    "Source: Project Builder approved plan metadata",
+    "Safety: preview-only renderer metadata; no command execution, persistence or workspace write.",
+    "",
+    "## Brief excerpt",
+    boundSpecText(brief.trim() || "No brief was retained for this plan.", 1_000),
+    "",
+    "## Acceptance criteria",
+    ...checklist.acceptanceCriteria.map((item) => `- ${item}`),
+    "",
+    "## Dependency and assumption register",
+    ...checklist.dependencyAssumptions.map((item) => `- ${item}`),
+    "",
+    "## Risk notes",
+    ...checklist.riskNotes.map((item) => `- ${item}`),
+    "",
+    "## Review gates",
+    ...checklist.reviewGates.map((item) => `- ${item}`),
+    "",
+    "## Task DAG preview",
+    ...taskSummaries.map((item) => `- ${item}`),
+  ].join("\n");
+  return { ...checklist, summary, taskSummaries, exportText };
 }
 
 function buildSpecMarkdown(plan: BuilderPlan, brief: string): string {
