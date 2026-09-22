@@ -2,10 +2,9 @@ import { useRef, type Dispatch, type SetStateAction } from "react";
 import { PanelHeader } from "./AgentPanel";
 import { Markdown } from "../components/CodeBlock";
 import { getApiKey, streamChat, type GenTurn } from "../lib/gemini";
-import { recordAgentDraft } from "../lib/agentTools";
 import { loadSettings } from "../lib/settings";
 import { projectTemplates } from "../data/templates";
-import type { BuilderPhase, BuilderPlan, VFile } from "../types";
+import type { BuilderPhase, BuilderPlan, OpenGeneratedDrafts, VFile } from "../types";
 import {
   Wand2, Loader2, CheckCircle2, FileCode2, TerminalSquare,
   Sparkles, RotateCcw, FolderPlus, ArrowRight,
@@ -80,7 +79,7 @@ export function BuilderPanel({
   setStageNotice,
 }: {
   onNeedKey: () => void;
-  onOpenFiles: (files: VFile[]) => void;
+  onOpenFiles: OpenGeneratedDrafts;
   phase: BuilderPhase;
   setPhase: Dispatch<SetStateAction<BuilderPhase>>;
   brief: string;
@@ -200,10 +199,12 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setError("");
     setStageNotice("");
     try {
-      const files = builtFiles.map((file) => ({ path: file.path, bytes: textBytes(file.content) }));
-      const session = await recordAgentDraft(plan.summary, files);
-      setStageNotice(`Native agent-tools staged ${session.fileCount} reviewed draft file(s). Nothing was written.`);
-      onOpenFiles(builtFiles);
+      const opened = await onOpenFiles(builtFiles, plan.summary);
+      if (opened) {
+        setStageNotice(`Native agent-tools staged ${builtFiles.length} reviewed draft file(s). Nothing was written.`);
+      } else {
+        setError("Generated drafts were not staged for editor review. Nothing was written.");
+      }
     } catch (err) {
       setError(formatError(err));
     } finally {

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import type { BuilderPhase, BuilderPlan, ChatMessage, VFile, ViewId } from "./types";
+import type { BuilderPhase, BuilderPlan, ChatMessage, OpenGeneratedDrafts, VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import { loadDeploy, loadGit, loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
 import {
@@ -10,6 +10,7 @@ import {
   detectRuntime, hasNativeCapability, WEB_RUNTIME,
   type NativeCapability, type RuntimeInfo,
 } from "./lib/native";
+import { recordAgentDraft } from "./lib/agentTools";
 import { cn } from "./utils/cn";
 import {
   Sparkles, FolderTree, Bot, Terminal as TerminalIcon, GitBranch, Rocket,
@@ -251,6 +252,28 @@ export default function App() {
 
   const nav = NAV.filter((n) => settings.visiblePanels.includes(n.id));
 
+  const openGeneratedSource: OpenGeneratedDrafts = async (files, summary = "Generated reviewed drafts") => {
+    if (files.length === 0) return false;
+    if (runtime.runtime === "tauri") {
+      if (!hasNativeCapability(runtime, "agent-tools")) {
+        alert("DevLab cannot stage generated drafts because the native agent-tools capability is unavailable in this build.");
+        return false;
+      }
+      try {
+        await recordAgentDraft(
+          summary,
+          files.map((file) => ({ path: file.path, bytes: textBytes(file.content) })),
+        );
+      } catch (error) {
+        alert(`Could not stage generated drafts for reviewed editor apply. Nothing was opened.\n\n${formatDraftStageError(error)}`);
+        return false;
+      }
+    }
+    setGeneratedDrafts(files);
+    navigate("editor");
+    return true;
+  };
+
   function nativeFeature(
     title: string,
     capability: NativeCapability,
@@ -267,11 +290,6 @@ export default function App() {
   }
 
   function render() {
-    const openGeneratedSource = (files: VFile[]) => {
-      if (files.length > 0) setGeneratedDrafts(files);
-      navigate("editor");
-    };
-
     switch (view) {
       case "welcome":  return <WelcomePanel key={keyVersion} onNavigate={navigate} hasKey={hasKey} />;
       case "agent":    return <AgentPanel
@@ -485,7 +503,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 6F reviewed draft diffs</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 6G unified draft staging</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}
@@ -516,6 +534,22 @@ export default function App() {
       )}
     </div>
   );
+}
+
+
+function textBytes(value: string) {
+  return new TextEncoder().encode(value).length;
+}
+
+function formatDraftStageError(error: unknown) {
+  if (error && typeof error === "object") {
+    const maybe = error as { code?: unknown; message?: unknown };
+    if (typeof maybe.message === "string" && typeof maybe.code === "string") {
+      return `${maybe.message} (${maybe.code})`;
+    }
+    if (typeof maybe.message === "string") return maybe.message;
+  }
+  return typeof error === "string" ? error : "The native agent-tools staging command failed.";
 }
 
 function SessionRecoveryPrompt({

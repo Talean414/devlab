@@ -2,7 +2,7 @@ import { useState } from "react";
 import { PanelHeader } from "./AgentPanel";
 import { CodeBlock } from "../components/CodeBlock";
 import { getApiKey, streamChat } from "../lib/gemini";
-import type { VFile } from "../types";
+import type { OpenGeneratedDrafts, VFile } from "../types";
 import { Database, Wand2, Loader2, ArrowRight, FileDiff, ScrollText, Plug, ListChecks } from "lucide-react";
 
 type Orm = "prisma" | "drizzle" | "sql";
@@ -21,7 +21,7 @@ const EXAMPLES = [
   "Add comments and reactions to the posts table",
 ];
 
-export function MigratePanel({ onOpenFiles }: { onOpenFiles: (f: VFile[]) => void }) {
+export function MigratePanel({ onOpenFiles }: { onOpenFiles: OpenGeneratedDrafts }) {
   const [orm, setOrm] = useState<Orm>("prisma");
   const [req, setReq] = useState("");
   const [schema, setSchema] = useState(DEFAULT_SCHEMA);
@@ -64,13 +64,14 @@ Keep to the existing schema's conventions. Use snake_case columns in SQL. Escape
     }
   }
 
-  function applyAll() {
+  async function applyAll() {
     if (!result) return;
     const files: VFile[] = [];
     if (orm === "prisma") files.push({ path: "prisma/schema.prisma", content: result.prisma, language: "prisma" });
     files.push({ path: `prisma/migrations/${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "").slice(0, 12)}_devlab/migration.sql`, content: result.sql, language: "sql" });
     files.push({ path: "src/routes/generated.ts", content: result.routes, language: "typescript" });
-    onOpenFiles(files);
+    const opened = await onOpenFiles(files, `Natural-language migration draft: ${result.summary}`);
+    if (!opened) setError("Migration drafts were not staged for editor review. Nothing was written.");
   }
 
   return (
@@ -105,7 +106,7 @@ Keep to the existing schema's conventions. Use snake_case columns in SQL. Escape
                 Migrate
               </button>
               {result && (
-                <button onClick={applyAll}
+                <button onClick={() => { void applyAll(); }}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-[12.5px] font-semibold text-emerald-200 hover:bg-emerald-500/20">
                   <ArrowRight className="h-3.5 w-3.5" /> Review drafts
                 </button>

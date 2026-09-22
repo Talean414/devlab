@@ -101,6 +101,8 @@ export interface VFile {
   language: string;
 }
 
+export type OpenGeneratedDrafts = (files: VFile[], summary?: string) => Promise<boolean>;
+
 export interface BuildPlanStep {
   id: string;
   title: string;

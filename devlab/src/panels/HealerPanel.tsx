@@ -3,7 +3,7 @@ import { PanelHeader } from "./AgentPanel";
 import { getApiKey, streamChat } from "../lib/gemini";
 import { listAgentAudit, type AgentAuditEvent } from "../lib/agentAudit";
 import { readWorkspaceFile } from "../lib/workspace";
-import type { VFile } from "../types";
+import type { OpenGeneratedDrafts } from "../types";
 import {
   testRunnerRun,
   testRunnerSnapshot,
@@ -285,7 +285,7 @@ export function HealerPanel({
   onOpenFiles,
   onNeedKey,
 }: {
-  onOpenFiles: (files: VFile[]) => void;
+  onOpenFiles: OpenGeneratedDrafts;
   onNeedKey: () => void;
 }) {
   const [snapshot, setSnapshot] = useState<TestRunnerSnapshot | null>(null);
@@ -449,13 +449,14 @@ ${document.content}
     }
   }
 
-  function openRepairDraft() {
+  async function openRepairDraft() {
     if (!repairDraft) return;
-    onOpenFiles([{
+    const opened = await onOpenFiles([{
       path: repairDraft.path,
       content: repairDraft.content,
       language: languageForPath(repairDraft.path),
-    }]);
+    }], `Self-Healing Tests repair draft for ${repairDraft.path}`);
+    if (!opened) setRepairNotice("Repair draft was not staged for editor review. Nothing was written.");
   }
 
   useEffect(() => {
@@ -693,7 +694,7 @@ ${document.content}
                             <div className="text-[11px] font-semibold uppercase tracking-wider text-violet-300">Rationale</div>
                             <p className="mt-1 text-[12.5px] leading-relaxed text-zinc-300">{repairDraft.rationale}</p>
                             <button
-                              onClick={openRepairDraft}
+                              onClick={() => { void openRepairDraft(); }}
                               className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-violet-500/40 bg-violet-500/10 px-3 py-2 text-[12px] font-semibold text-violet-100 hover:bg-violet-500/20"
                             >
                               <ArrowRight className="h-3.5 w-3.5" /> Open draft in editor review

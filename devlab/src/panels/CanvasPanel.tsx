@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { PanelHeader } from "./AgentPanel";
 import { getApiKey, streamChat, type GenTurn } from "../lib/gemini";
-import type { VFile } from "../types";
+import type { OpenGeneratedDrafts, VFile } from "../types";
 import {
   Monitor, Server, Database, DatabaseZap, ListOrdered, HardDrive, ShieldCheck,
   BrainCircuit, Globe2, Wand2, Loader2, Trash2, MousePointer2, Link2,
@@ -49,7 +49,7 @@ const SAMPLE: { nodes: ArchNode[]; edges: Edge[] } = {
   ],
 };
 
-export function CanvasPanel({ onOpenFiles }: { onOpenFiles: (f: VFile[]) => void }) {
+export function CanvasPanel({ onOpenFiles }: { onOpenFiles: OpenGeneratedDrafts }) {
   const [nodes, setNodes] = useState<ArchNode[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [mode, setMode] = useState<"move" | "link">("move");
@@ -174,8 +174,12 @@ Rules: 6 to 12 files that form a coherent monorepo matching EVERY node in the di
         setBuilt([...out]);
       }
       log(`✓ Done — ${out.length} in-memory drafts ready for review. Nothing was written to disk.`);
-      setStatus("done");
-      onOpenFiles(out);
+      const opened = await onOpenFiles(out, `Architecture Canvas draft: ${plan.summary}`);
+      if (opened) setStatus("done");
+      else {
+        log("Draft staging was cancelled or failed. Nothing was opened or written.");
+        setStatus("Draft staging failed.");
+      }
     } catch (e) {
       setStatus((e as Error).message);
     } finally {
@@ -310,7 +314,7 @@ Rules: 6 to 12 files that form a coherent monorepo matching EVERY node in the di
             <div className="flex items-center gap-2 border-b border-white/5 px-4 py-3 text-[12px] font-semibold text-zinc-200">
               <Sparkles className="h-4 w-4 text-cyan-400" /> Build log
               {status === "done" && (
-                <button onClick={() => onOpenFiles(built)} className="ml-auto inline-flex items-center gap-1 text-[11px] text-cyan-400 hover:underline">
+                <button onClick={() => { void onOpenFiles(built, "Architecture Canvas generated drafts"); }} className="ml-auto inline-flex items-center gap-1 text-[11px] text-cyan-400 hover:underline">
                   Review drafts <ArrowRight className="h-3 w-3" />
                 </button>
               )}

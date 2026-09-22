@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PanelHeader } from "./AgentPanel";
 import { getApiKey, streamVision, streamChat, fileToBase64 } from "../lib/gemini";
-import type { VFile } from "../types";
+import type { OpenGeneratedDrafts, VFile } from "../types";
 import {
   ScanLine, Upload, Link2, Wand2, Loader2, ImageIcon, Trash2, Globe2,
 } from "lucide-react";
 
-export function VisionPanel({ onOpenFiles }: { onOpenFiles: (f: VFile[]) => void }) {
+export function VisionPanel({ onOpenFiles }: { onOpenFiles: OpenGeneratedDrafts }) {
   const [image, setImage] = useState<{ data: string; mime: string; preview: string } | null>(null);
   const [url, setUrl] = useState("https://vercel.com");
   const [mode, setMode] = useState<"image" | "url">("image");
@@ -99,7 +99,8 @@ Rules: 3 to 6 files forming a working React + TypeScript + Tailwind clone. Repro
 
       pushLog(`✓ Clone ready — ${out.length} in-memory drafts. Nothing was written to disk.`);
       pushLog("OPENING_IN_EDITOR");
-      onOpenFiles(out);
+      const opened = await onOpenFiles(out, `Reverse-engineered app draft: ${plan.summary}`);
+      if (!opened) pushLog("error: draft staging failed; nothing was opened or written.");
     } catch (e) {
       pushLog("error: " + (e as Error).message);
     } finally {
