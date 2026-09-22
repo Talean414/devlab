@@ -465,18 +465,23 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     }
   }
 
-  function sendVerificationHandoff(taskId: string) {
+  function sendVerificationHandoff(taskId: string, intent: VerificationHandoffRequest["intent"] = "verify") {
     if (!verificationHandoff) return;
     const task = verificationHandoff.tasks.find((item) => item.taskId === taskId);
     if (!task) return;
     setError("");
     setVerificationNotice("");
+    const priorRun = intent === "repair" && task.lastRun && task.lastRun.status !== "passed"
+      ? { status: task.lastRun.status, exitCode: task.lastRun.exitCode, command: task.lastRun.command, ranAtMs: task.lastRun.ranAtMs }
+      : undefined;
     onRequestVerification({
       taskId: task.taskId,
       taskTitle: task.title,
       appliedPaths: task.appliedPaths,
       recommendedProfileIds: task.recommendedProfiles.map((profile) => profile.id),
       requestedAtMs: Date.now(),
+      intent,
+      ...(priorRun ? { priorRun } : {}),
     });
   }
 
@@ -552,7 +557,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Agentic Project Builder"
-        subtitle="Phase 8O · verification loop"
+        subtitle="Phase 8P · reviewed repair handoff"
         badge={settings.autonomy === "auto" ? "Autonomous" : settings.autonomy === "suggest" ? "Suggest mode" : "Ask first"}
         badgeOk={settings.autonomy !== "ask"}
       />
@@ -1047,7 +1052,17 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                             ) : (
                               <p className="mt-1 text-[10.5px] text-violet-100/45">{verificationSnapshot ? "No discovered profile matches these targets; verify manually after review." : "Discover profiles to see backend-owned matches for these targets."}</p>
                             )}
-                            <div className="mt-1.5">
+                            <div className="mt-1.5 flex flex-wrap gap-2">
+                              {task.lastRun && task.lastRun.status !== "passed" && !task.lastRun.staleAfterRun && (
+                                <button
+                                  onClick={() => sendVerificationHandoff(task.taskId, "repair")}
+                                  disabled={!canDiscoverVerification}
+                                  title={!canDiscoverVerification ? "The native test-runner capability is unavailable in this build." : "Open Self-Healing Tests for this failed batch. You still run the profile explicitly; after a real failing run, this batch's applied targets are offered as one-click repair-target candidates for the existing reviewed repair-draft flow."}
+                                  className="inline-flex items-center gap-1.5 rounded-lg border border-rose-400/30 bg-rose-400/10 px-2.5 py-1 text-[11px] font-semibold text-rose-100 hover:bg-rose-400/20 disabled:opacity-40"
+                                >
+                                  <Wand2 className="h-3 w-3" /> Open repair for {task.taskId} (reviewed draft only)
+                                </button>
+                              )}
                               <button
                                 onClick={() => sendVerificationHandoff(task.taskId)}
                                 disabled={!canDiscoverVerification || task.recommendedProfiles.length === 0}
@@ -1551,7 +1566,10 @@ function buildTaskVerificationHandoff(
     },
     { passed: 0, failed: 0, timeout: 0 },
   );
-  const summary = `${appliedTaskCount} batch${appliedTaskCount === 1 ? "" : "es"} with applied targets · ${appliedTargetCount} applied target${appliedTargetCount === 1 ? "" : "s"} · ${snapshot ? `${detectedProfileCount} discovered profile${detectedProfileCount === 1 ? "" : "s"}` : "profiles not discovered"} · real runs: ${runCounts.passed} passed, ${runCounts.failed} failed, ${runCounts.timeout} timed out`;
+  const repairCandidateTaskIds = tasks
+    .filter((task) => task.lastRun && task.lastRun.status !== "passed" && !task.lastRun.staleAfterRun)
+    .map((task) => task.taskId);
+  const summary = `${appliedTaskCount} batch${appliedTaskCount === 1 ? "" : "es"} with applied targets · ${appliedTargetCount} applied target${appliedTargetCount === 1 ? "" : "s"} · ${snapshot ? `${detectedProfileCount} discovered profile${detectedProfileCount === 1 ? "" : "s"}` : "profiles not discovered"} · real runs: ${runCounts.passed} passed, ${runCounts.failed} failed, ${runCounts.timeout} timed out${repairCandidateTaskIds.length > 0 ? ` · ${repairCandidateTaskIds.length} batch${repairCandidateTaskIds.length === 1 ? "" : "es"} eligible for reviewed repair` : ""}`;
   const exportText = [
     "DevLab Builder task verification handoff",
     `Generated: ${new Date().toISOString()}`,
@@ -1583,6 +1601,7 @@ function buildTaskVerificationHandoff(
     "## Next steps",
     "- Open Self-Healing Tests (or use Send, which only pre-selects) and run a recommended backend-owned profile explicitly.",
     "- A run listed above is evidence only for the applied state it observed; rerun after any further apply.",
+    ...(repairCandidateTaskIds.length > 0 ? [`- Batches with a current failing run (${repairCandidateTaskIds.join(", ")}) can open Self-Healing Tests in repair mode: rerun the profile explicitly, then draft a one-file repair from the real failing output; the draft still requires Editor reviewed apply.`] : []),
     "- Inspect real stdout/stderr; generate a repair draft only from a real failing run.",
     "- Restage and recompare any target marked changed since apply before applying it again.",
     "- Do not treat this handoff as proof that verification has run; only the listed real runs did.",

@@ -385,6 +385,12 @@ export function HealerPanel({
       const evidence = `${next.profile.command}\n${next.stdout}\n${next.stderr}`;
       const inferred = inferRepairPath(evidence);
       if (inferred) setRepairPath((current) => current || inferred);
+      // Repair handoff from Builder: when the output names no file, default to the batch's first applied target.
+      // The user can still change it, and a draft is generated only after the explicit Draft fix click.
+      else if (next.status !== "passed" && handoffRequest?.intent === "repair" && handoffRequest.appliedPaths[0]) {
+        const fallbackPath = handoffRequest.appliedPaths[0];
+        setRepairPath((current) => current || fallbackPath);
+      }
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -644,8 +650,13 @@ ${document.content}
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2 font-semibold text-violet-100">
                       <ArrowRight className="h-4 w-4 text-violet-300" />
-                      Builder verification handoff · <span className="font-mono text-[11px]">{handoffRequest.taskId}</span> {handoffRequest.taskTitle}
+                      Builder {handoffRequest.intent === "repair" ? "repair" : "verification"} handoff · <span className="font-mono text-[11px]">{handoffRequest.taskId}</span> {handoffRequest.taskTitle}
                     </div>
+                    {handoffRequest.intent === "repair" && (
+                      <p className="mt-1 text-rose-100/80">
+                        Builder recorded a {handoffRequest.priorRun?.status ?? "failed"} run{handoffRequest.priorRun ? <> of <span className="font-mono">{handoffRequest.priorRun.command}</span> (exit {handoffRequest.priorRun.exitCode ?? "—"})</> : null} for this batch. That earlier output is not reused: rerun the profile here, and once a real failing run exists, this batch's applied targets appear below as one-click repair-target candidates for the reviewed repair draft.
+                      </p>
+                    )}
                     <p className="mt-1 text-violet-100/70">
                       {handoffMatch
                         ? <>Pre-selected <span className="font-mono">{handoffMatch.command}</span> because it matches this batch's applied targets. Nothing has run; click <span className="font-semibold">Run tests</span> to execute it.</>
@@ -736,6 +747,25 @@ ${document.content}
                         <p className="mt-1 text-[12px] leading-relaxed text-zinc-500">
                           Optional Phase 6B assistant: read one existing source file, use this real test output as evidence, and generate an in-memory draft. Nothing is written automatically.
                         </p>
+                        {handoffRequest?.intent === "repair" && handoffRequest.appliedPaths.length > 0 && (
+                          <div className="mt-3">
+                            <div className="text-[10.5px] font-semibold uppercase tracking-wide text-violet-200/60">Applied targets from Builder {handoffRequest.taskId}</div>
+                            <div className="mt-1 flex flex-wrap gap-1.5">
+                              {handoffRequest.appliedPaths.map((path) => (
+                                <button
+                                  key={`repair-candidate-${path}`}
+                                  onClick={() => setRepairPath(path)}
+                                  disabled={repairBusy}
+                                  className={`rounded-md border px-2 py-0.5 font-mono text-[10.5px] ${repairPath.trim() === path ? "border-violet-400/50 bg-violet-400/20 text-violet-100" : "border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/10"} disabled:opacity-40`}
+                                  title="Use this applied target as the repair source file. Nothing is generated until you click Draft fix."
+                                >
+                                  {path}
+                                </button>
+                              ))}
+                            </div>
+                            <p className="mt-1 text-[10.5px] text-zinc-500">Candidates only set the path field; the draft is generated from the real output above only when you click Draft fix, and it is written only through Editor reviewed apply.</p>
+                          </div>
+                        )}
                         <div className="mt-3 flex gap-2">
                           <input
                             value={repairPath}

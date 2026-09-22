@@ -136,6 +136,11 @@ export interface VerificationHandoffRequest {
   appliedPaths: string[];
   recommendedProfileIds: string[];
   requestedAtMs: number;
+  // "verify" pre-selects a profile to run. "repair" additionally offers the task's applied paths as
+  // one-click repair-target candidates once a real failing run exists in Self-Healing Tests.
+  intent: "verify" | "repair";
+  // Metadata of the failed run that prompted a repair intent; informational only, never re-used as evidence.
+  priorRun?: { status: "failed" | "timeout"; exitCode: number | null; command: string; ranAtMs: number };
 }
 
 // Session-only, metadata-only outcome of one real backend-owned test run reported by Self-Healing Tests.
