@@ -10,7 +10,7 @@ import {
   type DevLabSettings, type ThemeId, type Autonomy, type Density, type AiProviderId, type ModelRoutingMode,
 } from "../lib/settings";
 import { starterBlueprintInstruction } from "../lib/generationBlueprints";
-import { componentScaffoldInstruction, designSystemInstruction, summarizeGenerationGuidance } from "../lib/generationGuidance";
+import { componentScaffoldInstruction, designSystemInstruction, qualityChecklistInstruction, summarizeGenerationGuidance } from "../lib/generationGuidance";
 import {
   AI_PROVIDER_PROFILES,
   AI_TASK_PROFILES,
@@ -54,6 +54,7 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
     blueprint: starterBlueprintInstruction(route.task),
     component: componentScaffoldInstruction(route.task),
     designSystem: designSystemInstruction(route.task),
+    quality: qualityChecklistInstruction(route.task),
     summary: summarizeGenerationGuidance(route.task),
   }));
 
@@ -361,7 +362,7 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
 
               <Card title="Generation guidance preview" desc="Read-only metadata showing the guidance DevLab injects into generation prompts. It does not run tools, install dependencies, write files or bypass reviewed apply.">
                 <div className="space-y-2">
-                  {guidancePreview.map(({ route, guardrail, blueprint, component, designSystem, summary }) => (
+                  {guidancePreview.map(({ route, guardrail, blueprint, component, designSystem, quality, summary }) => (
                     <details key={route.task} className="rounded-lg border border-white/10 bg-black/15 p-3 text-[11.5px] text-zinc-400">
                       <summary className="cursor-pointer select-none font-semibold text-zinc-200">
                         {route.taskLabel} · {summary.join(" · ")}
@@ -387,6 +388,12 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                           <div>
                             <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Design-system guidance</div>
                             <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap rounded-md bg-black/25 p-2 font-mono text-[10.5px] leading-relaxed text-zinc-500">{designSystem}</pre>
+                          </div>
+                        )}
+                        {quality && (
+                          <div>
+                            <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Quality checklist guidance</div>
+                            <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap rounded-md bg-black/25 p-2 font-mono text-[10.5px] leading-relaxed text-zinc-500">{quality}</pre>
                           </div>
                         )}
                       </div>

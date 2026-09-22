@@ -64,12 +64,51 @@ export function designSystemInstruction(taskId: AiTaskKind): string {
   }
 }
 
+export function qualityChecklistInstruction(taskId: AiTaskKind): string {
+  if (!hasQualityChecklistGuidance(taskId)) return "";
+  const shared = [
+    "Quality checklist guidance: include review notes for type-safety, formatting, linting, accessibility, error handling, tests and documentation without implying any check has run.",
+    "Prefer strict TypeScript settings, Biome or ESLint/Prettier, Vitest/Playwright/Testing Library, pytest, Go tests or Cargo checks only when the target stack already uses them or the reviewed blueprint/plan explicitly adds them.",
+    "When suggesting config or test files, keep them as reviewed draft artifacts or manual checklist items; do not create hidden install steps, execute commands, or report pass/fail results.",
+    "For generated files, include practical review points: input validation, loading/empty/error states, keyboard accessibility, responsive behavior, observability/logging boundaries and clear README/setup notes when relevant.",
+    "Recommend backend-owned verification profiles or explicit user-run commands only after reviewed apply, and preserve the invariant that DevLab has not executed them from the generation route.",
+  ];
+
+  switch (taskId) {
+    case "repair":
+      return [
+        ...shared,
+        "For repair drafts, call out the smallest regression check that should be run next and any unresolved diagnostic uncertainty, but never claim the repair was verified.",
+      ].join("\n");
+    case "migration":
+      return [
+        ...shared,
+        "For migration drafts, include dry-run/rollback notes, lock-risk warnings, environment separation and data-safety review points as manual checklist guidance unless a bounded backend profile later implements them.",
+      ].join("\n");
+    case "vision":
+      return [
+        ...shared,
+        "For UI reconstruction drafts, include accessibility, responsive breakpoints, reduced-motion behavior and visual-regression review notes as suggestions only.",
+      ].join("\n");
+    case "architecture":
+    case "planning":
+      return [
+        ...shared,
+        "For plans, include a concise acceptance-checklist section with required manual/backend-owned checks, changed-file expectations and out-of-scope risks before implementation.",
+      ].join("\n");
+    case "coding":
+    default:
+      return shared.join("\n");
+  }
+}
+
 export function summarizeGenerationGuidance(taskId: AiTaskKind): string[] {
   return [
     "review-only drafts",
     "secret-safe placeholders",
     hasComponentScaffoldGuidance(taskId) ? "component/style guidance" : "general guidance",
     hasDesignSystemGuidance(taskId) ? "design-system guidance" : "no design-system hints",
+    hasQualityChecklistGuidance(taskId) ? "quality checklist" : "no quality checklist",
     taskId === "planning" || taskId === "architecture" || taskId === "coding" || taskId === "vision" ? "starter blueprint hints" : "no blueprint hints",
   ];
 }
@@ -86,5 +125,14 @@ export function hasDesignSystemGuidance(taskId: AiTaskKind): boolean {
   return taskId === "planning"
     || taskId === "architecture"
     || taskId === "coding"
+    || taskId === "vision";
+}
+
+export function hasQualityChecklistGuidance(taskId: AiTaskKind): boolean {
+  return taskId === "planning"
+    || taskId === "architecture"
+    || taskId === "coding"
+    || taskId === "repair"
+    || taskId === "migration"
     || taskId === "vision";
 }
