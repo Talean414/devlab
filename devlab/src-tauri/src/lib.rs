@@ -8,6 +8,7 @@ mod git;
 mod http;
 mod ollama;
 mod postgres;
+mod search_index;
 mod terminal;
 mod test_runner;
 mod toolchain;
@@ -35,6 +36,9 @@ use postgres::{
     database_postgres_connect, database_postgres_connections, database_postgres_disconnect,
     database_postgres_execute, database_postgres_forget_password, database_postgres_query,
     database_postgres_schema, database_postgres_set_write_access, PostgresService,
+};
+use search_index::{
+    search_index_build, search_index_clear, search_index_query, search_index_status, SearchIndexService,
 };
 use serde::Serialize;
 use terminal::{
@@ -84,6 +88,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
             "toolchain",
             "local-ai",
             "ai-providers",
+            "search-index",
         ],
     }
 }
@@ -96,6 +101,7 @@ pub fn run() {
         .manage(TerminalService::default())
         .manage(DatabaseService::default())
         .manage(PostgresService::default())
+        .manage(SearchIndexService::default())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -173,6 +179,10 @@ pub fn run() {
             ai_credential_store,
             ai_credential_delete,
             ai_provider_chat,
+            search_index_build,
+            search_index_status,
+            search_index_query,
+            search_index_clear,
             test_runner_snapshot,
             test_runner_run,
             toolchain_snapshot,

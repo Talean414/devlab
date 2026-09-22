@@ -11,6 +11,7 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::audit::AgentAuditService;
+use crate::search_index::SearchIndexService;
 use tauri_plugin_dialog::DialogExt;
 
 const MAX_TEXT_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -271,6 +272,7 @@ struct WorkspaceChange {
 pub async fn workspace_select(
     app: AppHandle,
     service: State<'_, WorkspaceService>,
+    search_index: State<'_, SearchIndexService>,
 ) -> Result<Option<WorkspaceInfo>, CommandError> {
     let selected = app
         .dialog()
@@ -290,6 +292,8 @@ pub async fn workspace_select(
     let root = WorkspaceRoot::open(selected_path)?;
     let watcher = create_watcher(&app, &root)?;
     let info = WorkspaceInfo::from_root(&root);
+    // Any search index belongs to the previous workspace; drop it before the root changes.
+    search_index.clear();
     service.replace(root, watcher)?;
     Ok(Some(info))
 }
@@ -306,7 +310,11 @@ pub fn workspace_current(
 }
 
 #[tauri::command]
-pub fn workspace_close(service: State<'_, WorkspaceService>) -> Result<(), CommandError> {
+pub fn workspace_close(
+    service: State<'_, WorkspaceService>,
+    search_index: State<'_, SearchIndexService>,
+) -> Result<(), CommandError> {
+    search_index.clear();
     service.close()
 }
 

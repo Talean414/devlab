@@ -16,7 +16,8 @@ import {
 } from "../lib/agentAudit";
 import { recordAgentContext } from "../lib/agentTools";
 import { buildRepoMap, renderRepoMap, REPO_MAP_CONTEXT_PATH } from "../lib/repoMap";
-import { listDirectory, readWorkspaceFile, type WorkspaceDocument, type WorkspaceEntry } from "../lib/workspace";
+import { listDirectory, onWorkspaceChange, readWorkspaceFile, type WorkspaceDocument, type WorkspaceEntry } from "../lib/workspace";
+import { buildSearchIndex, describeIndexStats, querySearchIndex, searchIndexStatus, type SearchHit, type SearchIndexStatus } from "../lib/searchIndex";
 import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight, ArrowUp, Folder, FolderTree, Paperclip, RefreshCw, X } from "lucide-react";
 
 interface SpeechRecognitionLike {
@@ -55,6 +56,7 @@ export function AgentPanel({
   onNeedKey,
   onOpenFiles,
   canAttachWorkspace,
+  canSearchWorkspace,
   canShowAudit,
   contextFiles,
   setContextFiles,
@@ -68,6 +70,7 @@ export function AgentPanel({
   onNeedKey: () => void;
   onOpenFiles: OpenGeneratedDrafts;
   canAttachWorkspace: boolean;
+  canSearchWorkspace: boolean;
   canShowAudit: boolean;
   contextFiles: AgentContextFile[];
   setContextFiles: Dispatch<SetStateAction<AgentContextFile[]>>;
@@ -93,6 +96,15 @@ export function AgentPanel({
   const [pickerDirectory, setPickerDirectory] = useState("");
   const [pickerEntries, setPickerEntries] = useState<WorkspaceEntry[]>([]);
   const [pickerLoading, setPickerLoading] = useState(false);
+  // Phase 9C: native in-memory lexical search inside the context picker.
+  const [pickerMode, setPickerMode] = useState<"browse" | "search">("browse");
+  const [searchStatus, setSearchStatus] = useState<SearchIndexStatus | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
+  const [searchMeta, setSearchMeta] = useState("");
+  const [searchBusy, setSearchBusy] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const [searchStale, setSearchStale] = useState(false);
   const [auditOpen, setAuditOpen] = useState(false);
   const [auditEvents, setAuditEvents] = useState<AgentAuditEvent[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
@@ -145,6 +157,17 @@ export function AgentPanel({
   useEffect(() => {
     if (canShowAudit) void refreshAgentAudit();
   }, [canShowAudit]);
+
+  useEffect(() => {
+    if (!canSearchWorkspace) return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void onWorkspaceChange(() => {
+      // Never rebuild automatically: just flag the in-memory index as possibly stale.
+      setSearchStale(true);
+    }).then((fn) => { if (disposed) fn(); else unlisten = fn; }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, [canSearchWorkspace]);
 
   async function refreshAgentAudit() {
     if (!canShowAudit) return;
@@ -256,6 +279,49 @@ export function AgentPanel({
     }
     setContextPickerOpen(true);
     await loadContextDirectory(pickerDirectory);
+    if (canSearchWorkspace) void refreshSearchStatus();
+  }
+
+  async function refreshSearchStatus() {
+    try {
+      setSearchStatus(await searchIndexStatus());
+    } catch {
+      setSearchStatus(null);
+    }
+  }
+
+  async function buildIndex() {
+    setSearchBusy(true);
+    setSearchError("");
+    setSearchHits([]);
+    setSearchMeta("");
+    try {
+      const status = await buildSearchIndex();
+      setSearchStatus(status);
+      setSearchStale(false);
+      if (status.stats) setSearchMeta(`Index built: ${describeIndexStats(status.stats)}. In memory only; dropped when the workspace closes.`);
+    } catch (error) {
+      setSearchError(formatContextError(error));
+    } finally {
+      setSearchBusy(false);
+    }
+  }
+
+  async function runSearch() {
+    const query = searchQuery.trim();
+    if (!query) return;
+    setSearchBusy(true);
+    setSearchError("");
+    try {
+      const response = await querySearchIndex(query, { limit: 30 });
+      setSearchHits(response.hits);
+      setSearchMeta(`${response.totalMatches} match${response.totalMatches === 1 ? "" : "es"} for ${response.ftsQuery} in ${response.elapsedMs} ms${response.truncated ? ` · showing top ${response.hits.length}` : ""}. Lexical bm25 only; snippets are bounded excerpts.`);
+    } catch (error) {
+      setSearchHits([]);
+      setSearchError(formatContextError(error));
+    } finally {
+      setSearchBusy(false);
+    }
   }
 
   async function loadContextDirectory(directory: string) {
@@ -866,17 +932,92 @@ export function AgentPanel({
             </div>
 
             <div className="flex items-center gap-2 border-b border-white/5 px-4 py-2 text-[11.5px] text-zinc-500">
-              <button
-                onClick={() => { void loadContextDirectory(parentPath(pickerDirectory)); }}
-                disabled={!pickerDirectory || pickerLoading}
-                className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-35"
-              >
-                <ArrowUp className="h-3 w-3" /> Up
-              </button>
-              <span>Choose an existing UTF-8 text file. Contents stay read-only and bounded.</span>
+              <div className="inline-flex rounded-lg border border-white/10 p-0.5">
+                <button onClick={() => setPickerMode("browse")} className={`rounded-md px-2 py-0.5 ${pickerMode === "browse" ? "bg-white/10 text-white" : "hover:text-zinc-200"}`}>Browse</button>
+                {canSearchWorkspace && (
+                  <button onClick={() => { setPickerMode("search"); void refreshSearchStatus(); }} className={`rounded-md px-2 py-0.5 ${pickerMode === "search" ? "bg-white/10 text-white" : "hover:text-zinc-200"}`}>Search</button>
+                )}
+              </div>
+              {pickerMode === "browse" ? (
+                <>
+                  <button
+                    onClick={() => { void loadContextDirectory(parentPath(pickerDirectory)); }}
+                    disabled={!pickerDirectory || pickerLoading}
+                    className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-35"
+                  >
+                    <ArrowUp className="h-3 w-3" /> Up
+                  </button>
+                  <span>Choose an existing UTF-8 text file. Contents stay read-only and bounded.</span>
+                </>
+              ) : (
+                <span>Native in-memory lexical index (SQLite FTS5). Build it explicitly; hits attach through the same audited read path.</span>
+              )}
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto p-2">
+            {pickerMode === "search" && canSearchWorkspace && (
+              <div className="min-h-0 flex-1 overflow-y-auto p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void runSearch(); } }}
+                    placeholder={searchStatus?.available ? "Search words in indexed files (prefix match, AND)" : "Build the index first"}
+                    disabled={!searchStatus?.available || searchBusy}
+                    maxLength={searchStatus?.limits.maxQueryChars ?? 256}
+                    className="min-w-[200px] flex-1 rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2 text-[12.5px] text-zinc-100 outline-none focus:border-cyan-500/50 disabled:opacity-50"
+                  />
+                  <button onClick={() => { void runSearch(); }} disabled={!searchStatus?.available || searchBusy || !searchQuery.trim()}
+                    className="rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/20 disabled:opacity-40">
+                    Search
+                  </button>
+                  <button onClick={() => { void buildIndex(); }} disabled={searchBusy}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-white/5 disabled:opacity-40">
+                    {searchBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />} {searchStatus?.available ? "Rebuild index" : "Build index"}
+                  </button>
+                </div>
+                <div className="mt-2 text-[10.5px] text-zinc-600">
+                  {searchStatus?.available && searchStatus.stats
+                    ? `Index: ${describeIndexStats(searchStatus.stats)}`
+                    : searchStatus
+                      ? `No index for this workspace yet. Limits: ${searchStatus.limits.maxFiles} files, ${Math.round(searchStatus.limits.maxFileBytes / 1024)} KiB per file, ${Math.round(searchStatus.limits.maxTotalBytes / (1024 * 1024))} MiB total. Secret-pattern files, binaries and generated folders are never indexed.`
+                      : "Search index status unavailable."}
+                </div>
+                {searchStatus?.stats?.skippedSamples.length ? (
+                  <details className="mt-1 text-[10.5px] text-zinc-600">
+                    <summary className="cursor-pointer select-none">Skipped samples ({searchStatus.stats.skippedSamples.length})</summary>
+                    <ul className="mt-1 space-y-0.5 font-mono">{searchStatus.stats.skippedSamples.map((s) => <li key={s}>{s}</li>)}</ul>
+                  </details>
+                ) : null}
+                {searchStale && searchStatus?.available && <div className="mt-1 text-[10.5px] text-amber-300/80">Workspace files changed since the index was built. Rebuild to refresh results.</div>}
+                {searchMeta && <div className="mt-2 text-[11px] text-emerald-300/80">{searchMeta}</div>}
+                {searchError && <div className="mt-2 text-[11px] text-rose-300">{searchError}</div>}
+                <div className="mt-3 space-y-1">
+                  {searchHits.map((hit) => (
+                    <button
+                      key={hit.path}
+                      onClick={() => { void attachWorkspacePath(hit.path); }}
+                      disabled={contextBusy}
+                      className="group flex w-full items-start gap-3 rounded-lg px-3 py-2 text-left text-[12px] text-zinc-300 hover:bg-white/[0.05] disabled:opacity-40"
+                    >
+                      <FileCode2 className="mt-0.5 h-4 w-4 shrink-0 text-zinc-500 group-hover:text-violet-300" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate font-mono">{hit.path}</span>
+                          <span className="shrink-0 text-[10px] text-zinc-600">{hit.size} B · bm25 {hit.rank.toFixed(2)}</span>
+                        </div>
+                        {hit.snippet && <div className="mt-0.5 truncate font-mono text-[10.5px] text-zinc-500">{hit.snippet}</div>}
+                      </div>
+                      <span className="text-[10.5px] text-violet-300 opacity-0 group-hover:opacity-100">Attach</span>
+                    </button>
+                  ))}
+                  {!searchBusy && searchStatus?.available && searchHits.length === 0 && searchMeta && !searchError && (
+                    <div className="py-6 text-center text-[12px] text-zinc-600">No indexed file matches.</div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {(pickerMode === "browse" || !canSearchWorkspace) && <div className="min-h-0 flex-1 overflow-y-auto p-2">
               {pickerLoading && (
                 <div className="flex items-center justify-center gap-2 py-10 text-[12px] text-zinc-500">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" /> Reading workspace…
@@ -905,7 +1046,7 @@ export function AgentPanel({
                   {entry.kind === "file" && <span className="text-[10.5px] text-violet-300 opacity-0 group-hover:opacity-100">Attach</span>}
                 </button>
               ))}
-            </div>
+            </div>}
           </div>
         </div>
       )}
