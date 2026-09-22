@@ -60,6 +60,10 @@ const ApiPanel = lazy(() => import("./panels/ApiPanel").then((module) => ({
   default: module.ApiPanel,
 })));
 
+const ToolsPanel = lazy(() => import("./panels/ToolsPanel").then((module) => ({
+  default: module.ToolsPanel,
+})));
+
 interface NavItem { id: ViewId; icon: typeof Sparkles; label: string; shortcut?: string }
 
 const NAV: NavItem[] = [
@@ -409,9 +413,13 @@ export default function App() {
           "Docker & Containers", "docker", "Phase 5A.1 · Docker engine and safe creation",
         );
       case "preview":  return <PreviewPanel />;
-      case "tools":    return nativeFeature(
-        "Toolchain", "toolchain", "Phase 6 · detect and manage real local developer tools",
-      );
+      case "tools":    return hasNativeCapability(runtime, "toolchain")
+        ? <Suspense fallback={<NativePanelLoading label="Loading native toolchain detection…" />}>
+          <ToolsPanel />
+        </Suspense>
+        : nativeFeature(
+          "Toolchain", "toolchain", "Phase 6V · read-only native local tool detection",
+        );
       case "setup":    return <SetupPanel />;
       case "settings": return (
         <SettingsPanel key={keyVersion} onKeyChange={refreshKey} onSettingsChange={refreshSettings} />
@@ -511,7 +519,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 6U reviewed draft ledger</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 6V toolchain detection</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}

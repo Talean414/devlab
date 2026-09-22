@@ -8,6 +8,7 @@ mod http;
 mod postgres;
 mod terminal;
 mod test_runner;
+mod toolchain;
 mod workspace;
 
 use agent_tools::{agent_tools_record_context, agent_tools_record_draft};
@@ -37,6 +38,7 @@ use terminal::{
     terminal_resize, terminal_snapshot, terminal_write, TerminalService,
 };
 use test_runner::{test_runner_run, test_runner_snapshot};
+use toolchain::toolchain_snapshot;
 use workspace::{
     workspace_apply_reviewed_draft, workspace_close, workspace_create_directory, workspace_create_file,
     workspace_current, workspace_delete, workspace_list, workspace_read, workspace_rename,
@@ -75,6 +77,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
             "test-runner",
             "agent-audit",
             "agent-tools",
+            "toolchain",
         ],
     }
 }
@@ -160,6 +163,7 @@ pub fn run() {
             http_request,
             test_runner_snapshot,
             test_runner_run,
+            toolchain_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevLab");

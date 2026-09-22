@@ -66,6 +66,7 @@
     "allow-database-postgres-forget-password",
     "allow-http-request",
     "allow-test-runner-snapshot",
-    "allow-test-runner-run"
+    "allow-test-runner-run",
+    "allow-toolchain-snapshot"
   ]
 }

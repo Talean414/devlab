@@ -60,6 +60,7 @@ const APP_COMMANDS: &[&str] = &[
     "http_request",
     "test_runner_snapshot",
     "test_runner_run",
+    "toolchain_snapshot",
 ];
 
 fn main() {
