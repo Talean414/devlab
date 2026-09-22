@@ -1,6 +1,7 @@
 // BYOK Gemini client — the key lives only in the user's browser localStorage.
 // Nothing is hardcoded or sent anywhere except Google's official endpoint.
 
+import { starterBlueprintInstruction } from "./generationBlueprints";
 import { loadSettings } from "./settings";
 import {
   generationGuardrailInstruction,
@@ -252,6 +253,7 @@ export async function* streamChat(
     SYSTEM_PROMPT,
     routeInstruction(route.task),
     generationGuardrailInstruction(route.task),
+    starterBlueprintInstruction(route.task),
     customPrompt ? `Developer preferences:\n${customPrompt}` : "",
   ].filter(Boolean).join("\n\n");
   const body = {
@@ -291,7 +293,8 @@ export async function* streamVision(
     SYSTEM_PROMPT,
     routeInstruction("vision"),
     generationGuardrailInstruction("vision"),
-  ].join("\n\n");
+    starterBlueprintInstruction("vision"),
+  ].filter(Boolean).join("\n\n");
 
   const body = {
     systemInstruction: { parts: [{ text: systemText }] },
