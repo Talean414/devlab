@@ -121,6 +121,7 @@ export function EditorPanel({
   const [draftIndex, setDraftIndex] = useState(0);
   const [draftInspection, setDraftInspection] = useState<DraftInspection | null>(null);
   const [appliedDraftKeys, setAppliedDraftKeys] = useState<string[]>([]);
+  const [draftReviewCopyNotice, setDraftReviewCopyNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const ignoredEvents = useRef(new Map<string, number>());
   const eventTimer = useRef<number | null>(null);
   const settings = loadSettings();
@@ -137,6 +138,11 @@ export function EditorPanel({
   const selectedDraft = incomingDrafts[draftIndex];
   const selectedDraftKey = selectedDraft ? draftKey(selectedDraft, draftIndex) : "";
   const selectedDraftApplied = selectedDraftKey ? appliedDraftKeys.includes(selectedDraftKey) : false;
+  const draftReviewSummary = useMemo(
+    () => summarizeReviewedDrafts(incomingDrafts, appliedDraftKeys),
+    [incomingDrafts, appliedDraftKeys],
+  );
+  const selectedDraftMetadata = selectedDraft ? draftReviewSummary.files[draftIndex] : undefined;
 
   useEffect(() => {
     if (incomingDrafts.length === 0) {
@@ -144,10 +150,12 @@ export function EditorPanel({
       setDraftIndex(0);
       setAppliedDraftKeys([]);
       setDraftInspection(null);
+      setDraftReviewCopyNotice(null);
       return;
     }
     setDraftIndex(0);
     setAppliedDraftKeys([]);
+    setDraftReviewCopyNotice(null);
     setDraftReviewOpen(true);
   }, [incomingDrafts]);
 
@@ -529,6 +537,28 @@ export function EditorPanel({
     }
   }
 
+  async function copyReviewedDraftSummary() {
+    setDraftReviewCopyNotice(null);
+    if (incomingDrafts.length === 0) {
+      setDraftReviewCopyNotice({ kind: "error", text: "No reviewed-draft metadata is available to copy." });
+      return;
+    }
+    if (!navigator.clipboard?.writeText) {
+      setDraftReviewCopyNotice({ kind: "error", text: "Clipboard access is unavailable in this environment. Nothing was copied." });
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(buildReviewedDraftSummaryExport(incomingDrafts, appliedDraftKeys));
+      const copyMessage = `Copied metadata for ${incomingDrafts.length} reviewed draft${incomingDrafts.length === 1 ? "" : "s"}.`;
+      setDraftReviewCopyNotice({ kind: "ok", text: copyMessage });
+      setNotice(copyMessage);
+    } catch (commandError) {
+      const copyError = `Could not copy reviewed-draft metadata: ${errorMessage(commandError)}`;
+      setDraftReviewCopyNotice({ kind: "error", text: copyError });
+      setError(copyError);
+    }
+  }
+
   async function reloadDocument(path: string) {
     const existing = documents[path];
     if (existing?.dirty && !confirm(`Discard unsaved changes to ${path} and reload from disk?`)) return;
@@ -703,8 +733,11 @@ export function EditorPanel({
         <div className="flex items-center gap-2 border-b border-violet-500/20 bg-violet-500/[0.08] px-4 py-2 text-[12px] text-violet-100">
           <Sparkles className="h-3.5 w-3.5 shrink-0 text-violet-300" />
           <span className="min-w-0 flex-1">
-            {incomingDrafts.length} generated {incomingDrafts.length === 1 ? "draft is" : "drafts are"} ready for review. Nothing was written to disk.
+            {incomingDrafts.length} generated {incomingDrafts.length === 1 ? "draft is" : "drafts are"} ready for review · {draftReviewSummary.appliedCount} applied / {draftReviewSummary.pendingCount} pending · {formatBytes(draftReviewSummary.totalBytes)} metadata. Nothing was written to disk.
           </span>
+          <button onClick={() => void copyReviewedDraftSummary()} className="rounded-md border border-violet-400/20 px-2.5 py-1 font-medium text-violet-200 hover:bg-violet-500/15">
+            Copy summary
+          </button>
           <button onClick={() => setDraftReviewOpen(true)} className="rounded-md bg-violet-500/15 px-2.5 py-1 font-medium text-violet-200 hover:bg-violet-500/25">
             Review drafts
           </button>
@@ -932,8 +965,19 @@ export function EditorPanel({
                   <Sparkles className="h-4 w-4 text-violet-300" /> Generated drafts
                 </div>
                 <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
-                  Review-only memory. These files do not exist in the workspace.
+                  Review-only memory. {draftReviewSummary.appliedCount} applied / {draftReviewSummary.pendingCount} pending. Draft contents are copied only into the Editor preview, never the metadata summary.
                 </p>
+                <button
+                  onClick={() => void copyReviewedDraftSummary()}
+                  className="mt-3 w-full rounded-lg border border-white/10 px-3 py-2 text-[11.5px] text-violet-200 hover:bg-white/5"
+                >
+                  Copy metadata summary
+                </button>
+                {draftReviewCopyNotice && (
+                  <div className={`mt-2 text-[10.5px] ${draftReviewCopyNotice.kind === "ok" ? "text-emerald-300" : "text-rose-300"}`}>
+                    {draftReviewCopyNotice.text}
+                  </div>
+                )}
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto p-2">
                 {incomingDrafts.map((draft, index) => {
@@ -972,7 +1016,7 @@ export function EditorPanel({
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-mono text-[12px] text-zinc-200">{selectedDraft.path}</div>
                   <div className="mt-0.5 text-[10.5px] text-zinc-600">
-                    {draftInspection?.key === selectedDraftKey ? draftStatusLabel(draftInspection) : "Inspecting draft…"} · {selectedDraft.language}
+                    {draftInspection?.key === selectedDraftKey ? draftStatusLabel(draftInspection) : "Inspecting draft…"} · {selectedDraft.language} · {selectedDraftMetadata ? `${formatBytes(selectedDraftMetadata.bytes)} · ${selectedDraftMetadata.lines} line${selectedDraftMetadata.lines === 1 ? "" : "s"}` : "metadata pending"}
                   </div>
                 </div>
                 <button onClick={() => setDraftReviewOpen(false)} className="rounded-lg p-2 text-zinc-500 hover:bg-white/5 hover:text-white" aria-label="Close draft review">
@@ -1014,9 +1058,14 @@ export function EditorPanel({
               </pre>
               <div className="flex items-center gap-3 border-t border-white/10 bg-amber-500/[0.04] px-4 py-3 text-[11.5px] leading-relaxed text-amber-100/75">
                 <div className="min-w-0 flex-1">
-                  {selectedDraftApplied
-                    ? "This draft has already been applied in this review session. Other generated drafts still require their own explicit Apply click."
-                    : "Review the diff and generated output before using it. DevLab writes only when you explicitly apply this one reviewed draft; existing files are protected by the native revision check."}
+                  <div>
+                    {selectedDraftApplied
+                      ? "This draft has already been applied in this review session. Other generated drafts still require their own explicit Apply click."
+                      : "Review the diff and generated output before using it. DevLab writes only when you explicitly apply this one reviewed draft; existing files are protected by the native revision check."}
+                  </div>
+                  <div className="mt-1 font-mono text-[10.5px] text-amber-100/50">
+                    Review progress: {draftReviewSummary.appliedCount}/{draftReviewSummary.fileCount} applied · {draftReviewSummary.pendingCount} pending · metadata only in copied summaries.
+                  </div>
                 </div>
                 <button
                   onClick={() => void applyDraftToWorkspace(selectedDraft)}
@@ -1039,6 +1088,70 @@ export function EditorPanel({
 const MAX_DIFF_PREVIEW_LINES = 240;
 const MAX_DIFF_CONTEXT_LINES = 3;
 const MAX_DIFF_LINE_CHARS = 240;
+
+interface ReviewedDraftSummaryItem {
+  index: number;
+  path: string;
+  language: string;
+  bytes: number;
+  lines: number;
+  applied: boolean;
+}
+
+interface ReviewedDraftSummary {
+  fileCount: number;
+  appliedCount: number;
+  pendingCount: number;
+  totalBytes: number;
+  files: ReviewedDraftSummaryItem[];
+}
+
+function summarizeReviewedDrafts(drafts: VFile[], appliedKeys: string[]): ReviewedDraftSummary {
+  const files = drafts.map((draft, index) => ({
+    index,
+    path: normalizeDraftPath(draft.path) || draft.path,
+    language: draft.language || languageForDraftPath(draft.path),
+    bytes: textBytes(draft.content),
+    lines: countLines(draft.content),
+    applied: appliedKeys.includes(draftKey(draft, index)),
+  }));
+  const appliedCount = files.filter((file) => file.applied).length;
+  return {
+    fileCount: files.length,
+    appliedCount,
+    pendingCount: Math.max(0, files.length - appliedCount),
+    totalBytes: files.reduce((sum, file) => sum + file.bytes, 0),
+    files,
+  };
+}
+
+function buildReviewedDraftSummaryExport(drafts: VFile[], appliedKeys: string[]): string {
+  const summary = summarizeReviewedDrafts(drafts, appliedKeys);
+  return JSON.stringify({
+    label: "DevLab reviewed-draft Editor summary",
+    generatedAt: new Date().toISOString(),
+    note: "Metadata only. Draft contents are omitted; workspace writes require explicit per-file Editor apply.",
+    fileCount: summary.fileCount,
+    appliedCount: summary.appliedCount,
+    pendingCount: summary.pendingCount,
+    totalBytes: summary.totalBytes,
+    files: summary.files,
+  }, null, 2);
+}
+
+function textBytes(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MiB`;
+}
+
+function languageForDraftPath(path: string): string {
+  return LANGUAGE_BY_EXTENSION[path.toLowerCase().split(".").pop() ?? ""] ?? "plaintext";
+}
 
 function normalizeDraftPath(path: string): string {
   return path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").trim();
