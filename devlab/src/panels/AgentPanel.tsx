@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 
 import type { AgentContextFile, ChatMessage, OpenGeneratedDrafts, VFile } from "../types";
 import { Markdown } from "../components/CodeBlock";
 import { getApiKey, streamChat, getModel, type GenTurn } from "../lib/gemini";
+import { recordAgentContext } from "../lib/agentTools";
 import { readWorkspaceFile } from "../lib/workspace";
 import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight, Paperclip, X } from "lucide-react";
 
@@ -195,22 +196,27 @@ export function AgentPanel({
       const document = await readWorkspaceFile(cleanPath);
       const totalWithoutExisting = contextFiles
         .filter((file) => file.path !== document.path)
-        .reduce((sum, file) => sum + file.content.length, 0);
+        .reduce((sum, file) => sum + textBytes(file.content), 0);
       const remaining = Math.max(0, MAX_AGENT_CONTEXT_TOTAL_CHARS - totalWithoutExisting);
       if (remaining === 0) {
         setContextError("Attached workspace context is at the total size limit. Remove a file before attaching another.");
         return;
       }
       const limit = Math.min(MAX_AGENT_CONTEXT_CHARS, remaining);
-      const content = document.content.length > limit ? document.content.slice(0, limit) : document.content;
+      const content = boundTextByBytes(document.content, limit);
       const contextFile: AgentContextFile = {
         path: document.path,
         content,
         language: languageForPath(document.path),
         revision: document.revision,
         size: document.size,
-        truncated: content.length < document.content.length,
+        truncated: textBytes(content) < textBytes(document.content),
       };
+      await recordAgentContext([{
+        path: contextFile.path,
+        bytes: textBytes(contextFile.content),
+        truncated: contextFile.truncated,
+      }]);
       setContextFiles((current) => [
         ...current.filter((file) => file.path !== contextFile.path),
         contextFile,
@@ -466,6 +472,23 @@ export function PanelHeader({
   );
 }
 
+
+function textBytes(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
+function boundTextByBytes(value: string, maxBytes: number): string {
+  const encoder = new TextEncoder();
+  let used = 0;
+  let output = "";
+  for (const char of value) {
+    const bytes = encoder.encode(char).length;
+    if (used + bytes > maxBytes) break;
+    output += char;
+    used += bytes;
+  }
+  return output;
+}
 
 function buildWorkspaceContext(files: AgentContextFile[]): string {
   const body = files.map((file) => [
