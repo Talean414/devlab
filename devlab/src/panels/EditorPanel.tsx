@@ -122,6 +122,7 @@ export function EditorPanel({
   const [draftIndex, setDraftIndex] = useState(0);
   const [draftInspection, setDraftInspection] = useState<DraftInspection | null>(null);
   const [appliedDraftKeys, setAppliedDraftKeys] = useState<string[]>([]);
+  const [appliedDraftRecords, setAppliedDraftRecords] = useState<Record<string, ReviewedDraftApplicationRecord>>({});
   const [draftReviewCopyNotice, setDraftReviewCopyNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const ignoredEvents = useRef(new Map<string, number>());
   const eventTimer = useRef<number | null>(null);
@@ -140,10 +141,11 @@ export function EditorPanel({
   const selectedDraftKey = selectedDraft ? draftKey(selectedDraft, draftIndex) : "";
   const selectedDraftApplied = selectedDraftKey ? appliedDraftKeys.includes(selectedDraftKey) : false;
   const draftReviewSummary = useMemo(
-    () => summarizeReviewedDrafts(incomingDrafts, appliedDraftKeys),
-    [incomingDrafts, appliedDraftKeys],
+    () => summarizeReviewedDrafts(incomingDrafts, appliedDraftKeys, appliedDraftRecords),
+    [incomingDrafts, appliedDraftKeys, appliedDraftRecords],
   );
   const selectedDraftMetadata = selectedDraft ? draftReviewSummary.files[draftIndex] : undefined;
+  const selectedDraftApplication = selectedDraftKey ? appliedDraftRecords[selectedDraftKey] : undefined;
   const selectedDraftApplyBlockReason = selectedDraft
     ? reviewedDraftApplyBlockReason({
       working,
@@ -158,12 +160,14 @@ export function EditorPanel({
       setDraftReviewOpen(false);
       setDraftIndex(0);
       setAppliedDraftKeys([]);
+      setAppliedDraftRecords({});
       setDraftInspection(null);
       setDraftReviewCopyNotice(null);
       return;
     }
     setDraftIndex(0);
     setAppliedDraftKeys([]);
+    setAppliedDraftRecords({});
     setDraftReviewCopyNotice(null);
     setDraftReviewOpen(true);
   }, [incomingDrafts]);
@@ -509,7 +513,7 @@ export function EditorPanel({
     try {
       ignoredEvents.current.set(path, Date.now() + 2_000);
       let saved: WorkspaceDocument;
-      let action = "Created";
+      let action: "Created" | "Updated" = "Created";
       try {
         saved = await applyReviewedDraftToWorkspace(path, draft.content, null);
       } catch (commandError) {
@@ -535,10 +539,12 @@ export function EditorPanel({
       setCurrentDirectory(parentPath(path));
       setRefreshVersion((version) => version + 1);
       const appliedKey = draftKey(draft, draftIndex);
+      const appliedRecord = buildReviewedDraftApplicationRecord(draft, draftIndex, appliedKey, action, saved);
       const nextAppliedKeys = appliedDraftKeys.includes(appliedKey)
         ? appliedDraftKeys
         : [...appliedDraftKeys, appliedKey];
       setAppliedDraftKeys(nextAppliedKeys);
+      setAppliedDraftRecords((current) => ({ ...current, [appliedKey]: appliedRecord }));
       const nextDraftIndex = nextUnappliedDraftIndex(incomingDrafts, nextAppliedKeys, draftIndex);
       if (nextDraftIndex >= 0) setDraftIndex(nextDraftIndex);
       else setDraftReviewOpen(false);
@@ -562,7 +568,7 @@ export function EditorPanel({
       return;
     }
     try {
-      await navigator.clipboard.writeText(buildReviewedDraftSummaryExport(incomingDrafts, appliedDraftKeys));
+      await navigator.clipboard.writeText(buildReviewedDraftSummaryExport(incomingDrafts, appliedDraftKeys, appliedDraftRecords));
       const copyMessage = `Copied metadata for ${incomingDrafts.length} reviewed draft${incomingDrafts.length === 1 ? "" : "s"}.`;
       setDraftReviewCopyNotice({ kind: "ok", text: copyMessage });
       setNotice(copyMessage);
@@ -754,7 +760,7 @@ export function EditorPanel({
         <div className="flex items-center gap-2 border-b border-violet-500/20 bg-violet-500/[0.08] px-4 py-2 text-[12px] text-violet-100">
           <Sparkles className="h-3.5 w-3.5 shrink-0 text-violet-300" />
           <span className="min-w-0 flex-1">
-            {incomingDrafts.length} generated {incomingDrafts.length === 1 ? "draft is" : "drafts are"} ready for review · {draftReviewSummary.appliedCount} applied / {draftReviewSummary.pendingCount} pending · {formatBytes(draftReviewSummary.totalBytes)} metadata. Nothing was written to disk.
+            {incomingDrafts.length} generated {incomingDrafts.length === 1 ? "draft is" : "drafts are"} ready for review · {draftReviewSummary.appliedCount} applied / {draftReviewSummary.pendingCount} pending · {formatBytes(draftReviewSummary.totalBytes)} metadata{draftReviewSummary.lastAppliedAtMs ? ` · last applied ${formatReviewTime(draftReviewSummary.lastAppliedAtMs)}` : ""}. Nothing was written automatically.
           </span>
           <button onClick={() => void copyReviewedDraftSummary()} className="rounded-md border border-violet-400/20 px-2.5 py-1 font-medium text-violet-200 hover:bg-violet-500/15">
             Copy summary
@@ -1008,6 +1014,7 @@ export function EditorPanel({
                     <button
                       key={key}
                       onClick={() => setDraftIndex(index)}
+                      title={appliedDraftRecords[key] ? `${appliedDraftRecords[key].action} ${appliedDraftRecords[key].path} at ${formatReviewTime(appliedDraftRecords[key].appliedAtMs)}` : "Pending reviewed draft"}
                       className={`mb-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left font-mono text-[11px] transition ${
                         index === draftIndex
                           ? "bg-violet-500/15 text-violet-100"
@@ -1037,7 +1044,7 @@ export function EditorPanel({
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-mono text-[12px] text-zinc-200">{selectedDraft.path}</div>
                   <div className="mt-0.5 text-[10.5px] text-zinc-600">
-                    {draftInspection?.key === selectedDraftKey ? draftStatusLabel(draftInspection) : "Inspecting draft…"} · {selectedDraft.language} · {selectedDraftMetadata ? `${formatBytes(selectedDraftMetadata.bytes)} · ${selectedDraftMetadata.lines} line${selectedDraftMetadata.lines === 1 ? "" : "s"}` : "metadata pending"}
+                    {draftInspection?.key === selectedDraftKey ? draftStatusLabel(draftInspection) : "Inspecting draft…"} · {selectedDraft.language} · {selectedDraftMetadata ? `${formatBytes(selectedDraftMetadata.bytes)} · ${selectedDraftMetadata.lines} line${selectedDraftMetadata.lines === 1 ? "" : "s"}` : "metadata pending"}{selectedDraftApplication ? ` · ${selectedDraftApplication.action} ${formatReviewTime(selectedDraftApplication.appliedAtMs)}` : ""}
                   </div>
                 </div>
                 <button
@@ -1100,6 +1107,11 @@ export function EditorPanel({
                   <div className="mt-1 font-mono text-[10.5px] text-amber-100/50">
                     Review progress: {draftReviewSummary.appliedCount}/{draftReviewSummary.fileCount} applied · {draftReviewSummary.pendingCount} pending · metadata only in copied summaries.
                   </div>
+                  {selectedDraftApplication && (
+                    <div className="mt-1 font-mono text-[10.5px] text-emerald-200/70">
+                      Applied ledger: {selectedDraftApplication.action} · {formatReviewTime(selectedDraftApplication.appliedAtMs)} · revision {selectedDraftApplication.revision.slice(0, 12)} · {formatBytes(selectedDraftApplication.size)}.
+                    </div>
+                  )}
                   {selectedDraftApplyBlockReason && !selectedDraftApplied && (
                     <div className="mt-1 text-[10.5px] text-amber-100/60">{selectedDraftApplyBlockReason}</div>
                   )}
@@ -1127,6 +1139,19 @@ const MAX_DIFF_PREVIEW_LINES = 240;
 const MAX_DIFF_CONTEXT_LINES = 3;
 const MAX_DIFF_LINE_CHARS = 240;
 
+interface ReviewedDraftApplicationRecord {
+  key: string;
+  index: number;
+  path: string;
+  language: string;
+  bytes: number;
+  lines: number;
+  action: "Created" | "Updated";
+  appliedAtMs: number;
+  revision: string;
+  size: number;
+}
+
 interface ReviewedDraftSummaryItem {
   index: number;
   path: string;
@@ -1134,6 +1159,7 @@ interface ReviewedDraftSummaryItem {
   bytes: number;
   lines: number;
   applied: boolean;
+  application?: ReviewedDraftApplicationRecord;
 }
 
 interface ReviewedDraftSummary {
@@ -1141,30 +1167,47 @@ interface ReviewedDraftSummary {
   appliedCount: number;
   pendingCount: number;
   totalBytes: number;
+  lastAppliedAtMs?: number;
   files: ReviewedDraftSummaryItem[];
 }
 
-function summarizeReviewedDrafts(drafts: VFile[], appliedKeys: string[]): ReviewedDraftSummary {
-  const files = drafts.map((draft, index) => ({
-    index,
-    path: normalizeDraftPath(draft.path) || draft.path,
-    language: draft.language || languageForDraftPath(draft.path),
-    bytes: textBytes(draft.content),
-    lines: countLines(draft.content),
-    applied: appliedKeys.includes(draftKey(draft, index)),
-  }));
+function summarizeReviewedDrafts(
+  drafts: VFile[],
+  appliedKeys: string[],
+  appliedRecords: Record<string, ReviewedDraftApplicationRecord>,
+): ReviewedDraftSummary {
+  const files = drafts.map((draft, index) => {
+    const key = draftKey(draft, index);
+    return {
+      index,
+      path: normalizeDraftPath(draft.path) || draft.path,
+      language: draft.language || languageForDraftPath(draft.path),
+      bytes: textBytes(draft.content),
+      lines: countLines(draft.content),
+      applied: appliedKeys.includes(key),
+      application: appliedRecords[key],
+    };
+  });
   const appliedCount = files.filter((file) => file.applied).length;
+  const lastAppliedAtMs = files
+    .map((file) => file.application?.appliedAtMs ?? 0)
+    .reduce((latest, value) => Math.max(latest, value), 0) || undefined;
   return {
     fileCount: files.length,
     appliedCount,
     pendingCount: Math.max(0, files.length - appliedCount),
     totalBytes: files.reduce((sum, file) => sum + file.bytes, 0),
+    lastAppliedAtMs,
     files,
   };
 }
 
-function buildReviewedDraftSummaryExport(drafts: VFile[], appliedKeys: string[]): string {
-  const summary = summarizeReviewedDrafts(drafts, appliedKeys);
+function buildReviewedDraftSummaryExport(
+  drafts: VFile[],
+  appliedKeys: string[],
+  appliedRecords: Record<string, ReviewedDraftApplicationRecord>,
+): string {
+  const summary = summarizeReviewedDrafts(drafts, appliedKeys, appliedRecords);
   return JSON.stringify({
     label: "DevLab reviewed-draft Editor summary",
     generatedAt: new Date().toISOString(),
@@ -1173,8 +1216,30 @@ function buildReviewedDraftSummaryExport(drafts: VFile[], appliedKeys: string[])
     appliedCount: summary.appliedCount,
     pendingCount: summary.pendingCount,
     totalBytes: summary.totalBytes,
+    lastAppliedAtMs: summary.lastAppliedAtMs,
     files: summary.files,
   }, null, 2);
+}
+
+function buildReviewedDraftApplicationRecord(
+  draft: VFile,
+  index: number,
+  key: string,
+  action: "Created" | "Updated",
+  saved: WorkspaceDocument,
+): ReviewedDraftApplicationRecord {
+  return {
+    key,
+    index,
+    path: normalizeDraftPath(draft.path) || draft.path,
+    language: draft.language || languageForDraftPath(draft.path),
+    bytes: textBytes(draft.content),
+    lines: countLines(draft.content),
+    action,
+    appliedAtMs: Date.now(),
+    revision: saved.revision,
+    size: saved.size,
+  };
 }
 
 function textBytes(value: string): number {
