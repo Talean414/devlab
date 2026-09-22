@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import type { AgentContextFile, BuilderPhase, BuilderPlan, ChatMessage, OpenGeneratedDrafts, VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import { loadDeploy, loadGit, loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
+import { resolveAiRoute } from "./lib/modelRouting";
 import {
   buildSessionRecovery, clearSessionRecovery, loadSessionRecovery, saveSessionRecovery,
   sessionRecoverySummary, type SessionRecoverySnapshot,
@@ -118,8 +119,11 @@ export default function App() {
   const [pendingRecovery, setPendingRecovery] = useState<SessionRecoverySnapshot | null>(() => loadSessionRecovery());
   const [recoveryReady, setRecoveryReady] = useState(() => !loadSessionRecovery());
 
-  const hasKey = !!getApiKey();
-  const model = getPicked() || getModel();
+  const aiRoute = resolveAiRoute("chat", {
+    selectedModel: getModel(),
+    pickedModel: getPicked(),
+  }, settings);
+  const hasKey = aiRoute.status === "active" && !!getApiKey();
   const theme = getTheme(settings.theme);
 
   function navigate(next: ViewId) {
@@ -149,8 +153,9 @@ export default function App() {
 
   useEffect(() => {
     if (!firstRun && !pendingRecovery) {
-      if (!getApiKey()) setShowModal(true);
-      else pickBestModel();
+      const startupSettings = loadSettings();
+      if (startupSettings.aiProvider === "gemini" && !getApiKey()) setShowModal(true);
+      else if (getApiKey()) pickBestModel();
       setFirstRun(true);
     }
   }, [firstRun, pendingRecovery]);
@@ -468,14 +473,20 @@ export default function App() {
               {runtime.runtime === "tauri" ? `Native · ${runtime.os}` : "Web preview"}
             </span>
           </span>
-          {hasKey ? (
+          {aiRoute.status !== "active" ? (
+            <span className="flex items-center gap-1.5" title={aiRoute.reason}>
+              <Circle className="h-3 w-3 text-amber-400" />
+              <span className="text-amber-300">{aiRoute.providerName} future</span>
+              <span className="font-mono text-zinc-600">{aiRoute.modelLabel}</span>
+            </span>
+          ) : hasKey ? (
             <span className="flex items-center gap-1.5">
               <span className="relative flex h-2 w-2">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
               </span>
-              <span className="text-zinc-400">Gemini</span>
-              <span className="font-mono text-zinc-600">{model}</span>
+              <span className="text-zinc-400">{aiRoute.providerName}</span>
+              <span className="font-mono text-zinc-600">{aiRoute.modelLabel}</span>
             </span>
           ) : (
             <span className="flex items-center gap-1.5">
@@ -519,14 +530,14 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 6V toolchain detection</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 6W model routing</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}
             </span>
           </div>
           <div className="flex items-center gap-4">
-            <span className="hidden font-mono md:inline">{model}</span>
+            <span className="hidden font-mono md:inline">{aiRoute.modelLabel}</span>
             <span className="font-mono">DevLab v{runtime.appVersion}</span>
           </div>
         </footer>

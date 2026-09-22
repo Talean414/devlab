@@ -2,6 +2,12 @@
 // Nothing is hardcoded or sent anywhere except Google's official endpoint.
 
 import { loadSettings } from "./settings";
+import {
+  resolveAiRoute,
+  routeInstruction,
+  type AiRoute,
+  type AiTaskKind,
+} from "./modelRouting";
 
 const KEY_STORAGE = "devlab.gemini.key";
 const MODEL_STORAGE = "devlab.gemini.model";
@@ -132,6 +138,13 @@ export function setPicked(model: string) {
   localStorage.setItem(PICKED_STORAGE, model);
 }
 
+export function getCurrentAiRoute(task: AiTaskKind = "chat"): AiRoute {
+  return resolveAiRoute(task, {
+    selectedModel: getModel(),
+    pickedModel: getPicked(),
+  });
+}
+
 function readCooldowns(): Record<string, Cooldown> {
   try {
     const parsed = JSON.parse(localStorage.getItem(COOLDOWN_STORAGE) || "{}") as Record<string, Cooldown>;
@@ -219,6 +232,7 @@ Be concise, practical and code-first. When asked to scaffold or configure things
 interface StreamChatOptions {
   maxOutputTokens?: number;
   temperature?: number;
+  task?: AiTaskKind;
 }
 
 export async function* streamChat(
@@ -226,10 +240,21 @@ export async function* streamChat(
   options: StreamChatOptions = {},
 ): AsyncGenerator<string, void, unknown> {
   const settings = loadSettings();
+  const route = resolveAiRoute(options.task ?? "chat", {
+    selectedModel: getModel(),
+    pickedModel: getPicked(),
+  }, settings);
+  if (route.status !== "active") throw new Error(route.reason);
+
   const customPrompt = settings.systemPrompt.trim();
+  const systemText = [
+    SYSTEM_PROMPT,
+    routeInstruction(route.task),
+    customPrompt ? `Developer preferences:\n${customPrompt}` : "",
+  ].filter(Boolean).join("\n\n");
   const body = {
     systemInstruction: {
-      parts: [{ text: customPrompt ? `${SYSTEM_PROMPT}\n\nDeveloper preferences:\n${customPrompt}` : SYSTEM_PROMPT }],
+      parts: [{ text: systemText }],
     },
     contents: limitHistory(history).map((turn) => ({
       role: turn.role,
@@ -241,7 +266,7 @@ export async function* streamChat(
     },
   };
 
-  yield* streamAcrossModels(body);
+  yield* streamAcrossModels(body, route);
 }
 
 export async function* streamVision(
@@ -249,13 +274,19 @@ export async function* streamVision(
   images: ImagePart[],
 ): AsyncGenerator<string, void, unknown> {
   const settings = loadSettings();
+  const route = resolveAiRoute("vision", {
+    selectedModel: getModel(),
+    pickedModel: getPicked(),
+  }, settings);
+  if (route.status !== "active") throw new Error(route.reason);
+
   const parts: Record<string, unknown>[] = images.map((image) => ({
     inline_data: { mime_type: image.mime, data: image.data },
   }));
   parts.push({ text: prompt });
 
   const body = {
-    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    systemInstruction: { parts: [{ text: `${SYSTEM_PROMPT}\n\n${routeInstruction("vision")}` }] },
     contents: [{ role: "user", parts }],
     generationConfig: {
       temperature: clamp(settings.temperature, 0, 2),
@@ -263,14 +294,14 @@ export async function* streamVision(
     },
   };
 
-  yield* streamAcrossModels(body);
+  yield* streamAcrossModels(body, route);
 }
 
-async function* streamAcrossModels(body: object): AsyncGenerator<string, void, unknown> {
+async function* streamAcrossModels(body: object, route: AiRoute): AsyncGenerator<string, void, unknown> {
   const key = getApiKey();
   if (!key) throw new Error("NO_KEY");
 
-  const { candidates, cooled } = await buildCandidateModels();
+  const { candidates, cooled } = await buildCandidateModels(route.task);
   if (candidates.length === 0) {
     const soonest = cooled.sort((a, b) => a.cooldown.until - b.cooldown.until)[0];
     if (soonest) {
@@ -642,7 +673,7 @@ export async function listAvailableModels(): Promise<ModelInfo[]> {
   }
 }
 
-async function buildCandidateModels(): Promise<{
+async function buildCandidateModels(task: AiTaskKind = "chat"): Promise<{
   candidates: string[];
   cooled: { model: string; cooldown: Cooldown }[];
 }> {
@@ -664,11 +695,56 @@ async function buildCandidateModels(): Promise<{
     else ordered.push(model);
   };
 
-  push(getModel());
-  push(getPicked());
+  const settings = loadSettings();
+  if (settings.modelRouting === "fixed") {
+    push(getModel());
+    push(getPicked());
+  } else {
+    push(getPicked());
+    push(getModel());
+    for (const model of taskPreferredGeminiModels(task)) push(model);
+  }
   for (const model of FALLBACK_CHAIN) push(model);
   for (const model of supportedIds) push(model);
   return { candidates: ordered, cooled };
+}
+
+function taskPreferredGeminiModels(task: AiTaskKind): string[] {
+  switch (task) {
+    case "planning":
+    case "architecture":
+    case "migration":
+      return [
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-2.5-flash",
+        "gemini-3.5-flash-lite",
+      ];
+    case "coding":
+      return [
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+      ];
+    case "repair":
+      return [
+        "gemini-3.5-flash-lite",
+        "gemini-2.5-flash-lite",
+        "gemini-3.5-flash",
+        "gemini-2.5-flash",
+      ];
+    case "vision":
+      return [
+        "gemini-2.5-flash",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+      ];
+    default:
+      return FALLBACK_CHAIN;
+  }
 }
 
 // Pick the configured model when it is available, otherwise the most economical

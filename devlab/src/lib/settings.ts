@@ -26,6 +26,8 @@ export const THEMES: Theme[] = [
 
 export type Density = "comfortable" | "compact";
 export type Autonomy = "ask" | "suggest" | "auto";
+export type AiProviderId = "gemini" | "deepseek" | "openai" | "anthropic" | "ollama" | "custom";
+export type ModelRoutingMode = "auto" | "fixed";
 
 export interface DevLabSettings {
   theme: ThemeId;
@@ -44,7 +46,11 @@ export interface DevLabSettings {
   showTooltips: boolean;
   fontSize: number;
   /** provider config */
-  aiProvider: "gemini" | "openai" | "anthropic" | "ollama" | "custom";
+  aiProvider: AiProviderId;
+  modelRouting: ModelRoutingMode;
+  deepseekModel: string;
+  ollamaModel: string;
+  customModel: string;
   customEndpoint: string;
   temperature: number;
   maxTokens: number;
@@ -89,6 +95,10 @@ export const DEFAULT_SETTINGS: DevLabSettings = {
   showTooltips: true,
   fontSize: 14,
   aiProvider: "gemini",
+  modelRouting: "auto",
+  deepseekModel: "deepseek-chat",
+  ollamaModel: "llama3.1",
+  customModel: "",
   customEndpoint: "",
   temperature: 0.7,
   maxTokens: 4096,

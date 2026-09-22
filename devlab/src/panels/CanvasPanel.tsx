@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { PanelHeader } from "./AgentPanel";
-import { getApiKey, streamChat, type GenTurn } from "../lib/gemini";
+import { getApiKey, getCurrentAiRoute, streamChat, type GenTurn } from "../lib/gemini";
 import type { OpenGeneratedDrafts, VFile } from "../types";
 import {
   Monitor, Server, Database, DatabaseZap, ListOrdered, HardDrive, ShieldCheck,
@@ -127,6 +127,8 @@ export function CanvasPanel({ onOpenFiles }: { onOpenFiles: OpenGeneratedDrafts 
   }
 
   async function generate() {
+    const route = getCurrentAiRoute("architecture");
+    if (route.status !== "active") { setStatus(route.reason); return; }
     if (!getApiKey()) { setStatus("Add your Gemini key in Settings first."); return; }
     if (!nodes.length) { setStatus("Add some nodes to the canvas first (or load the sample)."); return; }
     setBusy(true); setGenLog([]); setBuilt([]);
@@ -151,7 +153,7 @@ Respond with ONLY valid JSON (no fences):
 }
 Rules: 6 to 12 files that form a coherent monorepo matching EVERY node in the diagram. Include one file per major component plus docker-compose.yml and README.md. Paths must be realistic.`;
       let acc = "";
-      for await (const ch of streamChat([{ role: "user", text: planPrompt } as GenTurn])) acc += ch;
+      for await (const ch of streamChat([{ role: "user", text: planPrompt } as GenTurn], { task: "architecture" })) acc += ch;
       const json = acc.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
       const plan = JSON.parse(json.slice(json.indexOf("{"), json.lastIndexOf("}") + 1)) as {
         summary: string; projectName: string;
@@ -165,7 +167,7 @@ Rules: 6 to 12 files that form a coherent monorepo matching EVERY node in the di
         log(`  drafting ${f.path}…`);
         let content = "";
         const p = `Write the complete file \`${f.path}\` for the project "${plan.projectName}".\n\nSystem: ${plan.summary}\nArchitecture:\n${describe()}\n\nThis file's role: ${f.description}\n\nOutput ONLY raw file contents — no markdown fences or commentary. Keep it under 120 lines, production-quality, consistent with the other files in this monorepo.`;
-        for await (const ch of streamChat([{ role: "user", text: p }])) content += ch;
+        for await (const ch of streamChat([{ role: "user", text: p }], { task: "coding" })) content += ch;
         out.push({
           path: `${plan.projectName}/${f.path}`,
           content: content.replace(/^```[\w]*\n?/, "").replace(/```\s*$/, "").trim(),

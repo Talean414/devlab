@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AgentAuditCard } from "../components/AgentAuditCard";
 import { PanelHeader } from "./AgentPanel";
-import { getApiKey, streamChat } from "../lib/gemini";
+import { getApiKey, getCurrentAiRoute, streamChat } from "../lib/gemini";
 import {
   AGENT_AUDIT_METADATA_NOTE,
   formatAgentAuditShortTime,
@@ -366,6 +366,11 @@ export function HealerPanel({
       setError("Enter the failing source-file path to draft a repair.");
       return;
     }
+    const route = getCurrentAiRoute("repair");
+    if (route.status !== "active") {
+      setError(route.reason);
+      return;
+    }
     if (!getApiKey()) {
       onNeedKey();
       return;
@@ -435,7 +440,7 @@ ${document.content}
 \`\`\``;
 
       let raw = "";
-      for await (const chunk of streamChat([{ role: "user", text: prompt }], { maxOutputTokens: 16_384, temperature: 0.2 })) raw += chunk;
+      for await (const chunk of streamChat([{ role: "user", text: prompt }], { task: "repair", maxOutputTokens: 16_384, temperature: 0.2 })) raw += chunk;
       const draft = parseRepairDraft(raw, targetPath, document.content);
       setRepairDraft(draft);
       setRepairNotice("Repair draft generated in memory. Review it before sending it to the editor draft flow.");

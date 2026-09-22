@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 
 import type { AgentContextFile, ChatMessage, OpenGeneratedDrafts, VFile } from "../types";
 import { AgentAuditCard } from "../components/AgentAuditCard";
 import { Markdown } from "../components/CodeBlock";
-import { getApiKey, streamChat, getModel, type GenTurn } from "../lib/gemini";
+import { getApiKey, streamChat, getModel, getPicked, type GenTurn } from "../lib/gemini";
+import { describeAiRoute, resolveAiRoute } from "../lib/modelRouting";
 import {
   AGENT_AUDIT_KIND_FILTERS,
   buildAgentAuditMetadataExport,
@@ -98,7 +99,11 @@ export function AgentPanel({
   const [auditCopyNotice, setAuditCopyNotice] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const recRef = useRef<SpeechRecognitionLike | null>(null);
-  const hasKey = !!getApiKey();
+  const chatRoute = resolveAiRoute("chat", {
+    selectedModel: getModel(),
+    pickedModel: getPicked(),
+  });
+  const hasKey = chatRoute.status === "active" && !!getApiKey();
   const SpeechAPI = getSpeechRecognition();
 
   function toggleVoice() {
@@ -153,6 +158,19 @@ export function AgentPanel({
 
   async function send(text: string) {
     if (!text.trim() || busy) return;
+    const route = resolveAiRoute("chat", {
+      selectedModel: getModel(),
+      pickedModel: getPicked(),
+    });
+    if (route.status !== "active") {
+      setMessages((m) => [
+        ...m,
+        { id: crypto.randomUUID(), role: "user", content: text, ts: Date.now() },
+        { id: crypto.randomUUID(), role: "model", content: route.reason, ts: Date.now() },
+      ]);
+      setInput("");
+      return;
+    }
     if (!getApiKey()) { onNeedKey(); return; }
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
@@ -182,7 +200,7 @@ export function AgentPanel({
 
     try {
       let acc = "";
-      for await (const chunk of streamChat(history)) {
+      for await (const chunk of streamChat(history, { task: "chat" })) {
         acc += chunk;
         setMessages((m) =>
           m.map((msg) => (msg.id === modelId ? { ...msg, content: acc } : msg)),
@@ -401,8 +419,8 @@ export function AgentPanel({
     <div className="flex h-full flex-col">
       <PanelHeader
         title="AI Agent Hub"
-        subtitle={`Streaming chat powered by Gemini (${getModel()})`}
-        badge={hasKey ? "Connected" : "No key"}
+        subtitle={`Streaming chat route: ${describeAiRoute(chatRoute)}`}
+        badge={chatRoute.status !== "active" ? "Future provider" : hasKey ? "Connected" : "No key"}
         badgeOk={hasKey}
       />
 
@@ -681,7 +699,7 @@ export function AgentPanel({
               }
             }}
             rows={1}
-            placeholder={hasKey ? "Ask the DevLab agent, or click the mic and talk…" : "Add your Gemini key in Settings to start."}
+            placeholder={chatRoute.status !== "active" ? "Selected provider is a future adapter; switch Settings → Providers to Gemini for chat." : hasKey ? "Ask the DevLab agent, or click the mic and talk…" : "Add your Gemini key in Settings to start."}
             className="max-h-40 flex-1 resize-none bg-transparent px-3 py-2 text-[14px] text-zinc-100 outline-none placeholder:text-zinc-600"
           />
           {SpeechAPI && (

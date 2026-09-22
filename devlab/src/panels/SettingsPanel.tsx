@@ -7,8 +7,14 @@ import {
 import type { ModelInfo } from "../lib/gemini";
 import {
   loadSettings, saveSettings, DEFAULT_SETTINGS, THEMES, ALL_PANELS,
-  type DevLabSettings, type ThemeId, type Autonomy, type Density,
+  type DevLabSettings, type ThemeId, type Autonomy, type Density, type AiProviderId, type ModelRoutingMode,
 } from "../lib/settings";
+import {
+  AI_PROVIDER_PROFILES,
+  AI_TASK_PROFILES,
+  describeAiRoute,
+  resolveAiRoute,
+} from "../lib/modelRouting";
 import {
   Eye, EyeOff, Save, RefreshCw, Trash2, Shield, KeyRound, CheckCircle2,
   Sparkles, Palette, LayoutGrid, Bot, SlidersHorizontal, RotateCcw, Cpu, ExternalLink,
@@ -34,6 +40,11 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
   const [status, setStatus] = useState<"idle" | "checking" | "ok" | "bad">("idle");
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [autoPicked, setAutoPicked] = useState<string | null>(getPicked());
+  const providerProfile = AI_PROVIDER_PROFILES.find((profile) => profile.id === s.aiProvider) ?? AI_PROVIDER_PROFILES[0];
+  const routePreview = AI_TASK_PROFILES.map((task) => resolveAiRoute(task.id, {
+    selectedModel: model,
+    pickedModel: autoPicked,
+  }, s));
 
   function update(patch: Partial<DevLabSettings>) {
     const next = { ...s, ...patch };
@@ -224,30 +235,117 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                 </div>
               </div>
 
-              <Card title="AI provider" desc="Gemini works out of the box. Others require the native build or a local proxy.">
+              <Card title="AI provider routing" desc="Gemini is the active provider today; future providers store only non-secret profile metadata until native adapters exist.">
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                  {([
-                    ["gemini", "Google Gemini"], ["openai", "OpenAI"], ["anthropic", "Anthropic"],
-                    ["ollama", "Ollama (local)"], ["custom", "Custom endpoint"],
-                  ] as const).map(([id, label]) => (
-                    <button key={id} onClick={() => update({ aiProvider: id })}
-                      className={`rounded-lg border px-3 py-2.5 text-[12.5px] transition ${
-                        s.aiProvider === id ? "border-cyan-500/50 bg-cyan-500/10 text-white" : "border-white/10 text-zinc-400 hover:bg-white/5"
-                      }`}>{label}</button>
+                  {AI_PROVIDER_PROFILES.map((profile) => (
+                    <button key={profile.id} onClick={() => update({ aiProvider: profile.id as AiProviderId })}
+                      className={`rounded-lg border px-3 py-2.5 text-left transition ${
+                        s.aiProvider === profile.id ? "border-cyan-500/50 bg-cyan-500/10 text-white" : "border-white/10 text-zinc-400 hover:bg-white/5"
+                      }`}>
+                      <span className="block text-[12.5px] font-semibold">{profile.shortName}</span>
+                      <span className={`mt-0.5 block text-[10.5px] ${profile.availableNow ? "text-emerald-300" : "text-amber-300/80"}`}>
+                        {profile.statusLabel}
+                      </span>
+                    </button>
                   ))}
                 </div>
-                {s.aiProvider !== "gemini" && (
-                  <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.02] p-3 text-[12.5px] text-zinc-400">
-                    {s.aiProvider === "ollama"
-                      ? "Run `ollama serve` locally, then set the endpoint to http://localhost:11434/v1."
-                      : "Browser CORS blocks direct calls to this provider. Use it in the native DevLab build or via a local proxy."}
+
+                <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.02] p-3 text-[12.5px] leading-relaxed text-zinc-400">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="font-semibold text-zinc-200">{providerProfile.name}</div>
+                      <div className="mt-1">{providerProfile.note}</div>
+                    </div>
+                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${providerProfile.availableNow ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/15 text-amber-300"}`}>
+                      {providerProfile.statusLabel}
+                    </span>
+                  </div>
+                  <dl className="mt-3 grid gap-2 text-[11.5px] sm:grid-cols-2">
+                    <div>
+                      <dt className="text-zinc-600">Credential storage</dt>
+                      <dd className="text-zinc-300">{providerProfile.credentialStorage}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-zinc-600">Transport</dt>
+                      <dd className="text-zinc-300">{providerProfile.transport}</dd>
+                    </div>
+                  </dl>
+                </div>
+
+                {s.aiProvider === "deepseek" && (
+                  <label className="mt-3 block text-[12px] text-zinc-400">
+                    DeepSeek model id
+                    <input value={s.deepseekModel} onChange={(e) => update({ deepseekModel: e.target.value })}
+                      placeholder="deepseek-chat or deepseek-reasoner"
+                      className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                    <span className="mt-1 block text-[11px] text-amber-300/80">Stored as non-secret roadmap metadata only; no DeepSeek request is sent yet.</span>
+                  </label>
+                )}
+                {s.aiProvider === "ollama" && (
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    <label className="block text-[12px] text-zinc-400">
+                      Ollama endpoint profile
+                      <input value={s.customEndpoint} onChange={(e) => update({ customEndpoint: e.target.value })}
+                        placeholder="http://localhost:11434"
+                        className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                    </label>
+                    <label className="block text-[12px] text-zinc-400">
+                      Local model id
+                      <input value={s.ollamaModel} onChange={(e) => update({ ollamaModel: e.target.value })}
+                        placeholder="llama3.1, qwen2.5-coder, deepseek-r1"
+                        className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                    </label>
                   </div>
                 )}
-                {(s.aiProvider === "custom" || s.aiProvider === "ollama") && (
-                  <input value={s.customEndpoint} onChange={(e) => update({ customEndpoint: e.target.value })}
-                    placeholder="http://localhost:11434/v1"
-                    className="mt-3 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                {s.aiProvider === "custom" && (
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    <label className="block text-[12px] text-zinc-400">
+                      Endpoint profile
+                      <input value={s.customEndpoint} onChange={(e) => update({ customEndpoint: e.target.value })}
+                        placeholder="https://provider.example/v1"
+                        className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                    </label>
+                    <label className="block text-[12px] text-zinc-400">
+                      Model id
+                      <input value={s.customModel} onChange={(e) => update({ customModel: e.target.value })}
+                        placeholder="provider-specific model"
+                        className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                    </label>
+                  </div>
                 )}
+              </Card>
+
+              <Card title="Task-aware model router" desc="Routes are explicit metadata today. Auto mode can bias Gemini fallback candidates by task; future providers remain closed until native adapters land.">
+                <div className="mb-3 grid gap-2 sm:grid-cols-2">
+                  {([
+                    ["auto", "Auto route by task", "Planning, coding, repair and vision prompts get task-specific route instructions and fallback order."],
+                    ["fixed", "Fixed selected model", "Always try the selected Gemini model first before fallback handling."],
+                  ] as const).map(([id, label, desc]) => (
+                    <button key={id} onClick={() => update({ modelRouting: id as ModelRoutingMode })}
+                      className={`rounded-lg border p-3 text-left transition ${
+                        s.modelRouting === id ? "border-cyan-500/50 bg-cyan-500/10" : "border-white/10 hover:bg-white/5"
+                      }`}>
+                      <span className="block text-[12.5px] font-semibold text-zinc-100">{label}</span>
+                      <span className="mt-1 block text-[11px] leading-relaxed text-zinc-500">{desc}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="space-y-1.5">
+                  {routePreview.map((route) => (
+                    <div key={route.task} className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-[11.5px]">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="font-semibold text-zinc-200">{route.taskLabel}</span>
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${route.status === "active" ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/15 text-amber-300"}`}>
+                          {route.status === "active" ? "Active" : "Future"}
+                        </span>
+                      </div>
+                      <div className="mt-1 text-zinc-500">{describeAiRoute(route)}</div>
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-3 text-[11px] leading-relaxed text-zinc-500">
+                  This router does not install models, run commands, store non-Gemini secrets, or send requests to future providers. It only selects the current approved Gemini path unless a future native adapter is implemented.
+                </p>
               </Card>
 
               <Card title="Google AI Studio API key" desc="Bring your own key; Google's per-project free-tier limits still apply.">
@@ -364,7 +462,7 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
 
               <Card title="Local data" desc="Non-secret preferences remain WebView-local; Git credentials are separate.">
                 <ul className="space-y-1.5 text-[12.5px] text-zinc-400">
-                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.settings.v1</code> — preferences</li>
+                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.settings.v1</code> — preferences and non-secret provider/router metadata</li>
                   <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.gemini.key</code> — Gemini key used by the renderer</li>
                   <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.git.v1</code> — commit-message preference only; no token</li>
                   <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.deploy.v1</code> — disabled deployment preference only; legacy tokens are purged</li>

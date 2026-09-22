@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { PanelHeader } from "./AgentPanel";
 import { CodeBlock } from "../components/CodeBlock";
-import { getApiKey, streamChat } from "../lib/gemini";
+import { getApiKey, getCurrentAiRoute, streamChat } from "../lib/gemini";
 import type { OpenGeneratedDrafts, VFile } from "../types";
 import { Database, Wand2, Loader2, ArrowRight, FileDiff, ScrollText, Plug, ListChecks } from "lucide-react";
 
@@ -31,7 +31,10 @@ export function MigratePanel({ onOpenFiles }: { onOpenFiles: OpenGeneratedDrafts
   const [error, setError] = useState("");
 
   async function generate(text: string) {
-    if (!getApiKey() || !text.trim() || busy) return;
+    if (!text.trim() || busy) return;
+    const route = getCurrentAiRoute("migration");
+    if (route.status !== "active") { setError(route.reason); return; }
+    if (!getApiKey()) { setError("Add your Gemini key in Settings first."); return; }
     setBusy(true); setError(""); setResult(null);
     try {
       let acc = "";
@@ -52,7 +55,7 @@ Respond with ONLY valid JSON (no fences):
   "checklist": ["step 1 to deploy this safely", "..."]
 }
 Keep to the existing schema's conventions. Use snake_case columns in SQL. Escape newlines properly in JSON strings.`;
-      for await (const ch of streamChat([{ role: "user", text: prompt }])) acc += ch;
+      for await (const ch of streamChat([{ role: "user", text: prompt }], { task: "migration" })) acc += ch;
       const clean = acc.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
       setResult(JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1)));
     } catch (e) {
@@ -100,7 +103,7 @@ Keep to the existing schema's conventions. Use snake_case columns in SQL. Escape
               placeholder='Describe the change… e.g. "Add a vendors table linked to users, with Stripe subscription IDs and a status enum"'
               className="w-full resize-none rounded-lg border border-white/10 bg-[#0d1017] p-3 text-[13px] text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-cyan-500/50" />
             <div className="mt-2 flex items-center gap-2">
-              <button onClick={() => generate(req)} disabled={busy || !req.trim() || !getApiKey()}
+              <button onClick={() => generate(req)} disabled={busy || !req.trim()}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 px-4 py-2 text-[12.5px] font-semibold text-white hover:from-cyan-400 hover:to-blue-500 disabled:opacity-40">
                 {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
                 Migrate

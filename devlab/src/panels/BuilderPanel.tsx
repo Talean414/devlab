@@ -1,7 +1,7 @@
 import { useRef, type Dispatch, type SetStateAction } from "react";
 import { PanelHeader } from "./AgentPanel";
 import { Markdown } from "../components/CodeBlock";
-import { getApiKey, streamChat, type GenTurn } from "../lib/gemini";
+import { getApiKey, getCurrentAiRoute, streamChat, type GenTurn } from "../lib/gemini";
 import { loadSettings } from "../lib/settings";
 import { projectTemplates } from "../data/templates";
 import type { BuilderPhase, BuilderPlan, OpenGeneratedDrafts, VFile } from "../types";
@@ -106,6 +106,8 @@ export function BuilderPanel({
 
   async function generatePlan(text: string) {
     if (!text.trim()) return;
+    const route = getCurrentAiRoute("planning");
+    if (route.status !== "active") { setError(route.reason); return; }
     if (!getApiKey()) { onNeedKey(); return; }
     setBusy(true); setError(""); setRaw(""); setPlan(null); setPhase("planning");
 
@@ -132,7 +134,7 @@ Rules:
     const history: GenTurn[] = [{ role: "user", text: prompt }];
     try {
       let acc = "";
-      for await (const chunk of streamChat(history)) {
+      for await (const chunk of streamChat(history, { task: "planning" })) {
         acc += chunk;
         setRaw(acc);
         outRef.current?.scrollTo({ top: outRef.current.scrollHeight });
@@ -161,6 +163,8 @@ Rules:
   }
 
   async function generateFile(path: string, description: string) {
+    const route = getCurrentAiRoute("coding");
+    if (route.status !== "active") { setError(route.reason); return; }
     if (!getApiKey()) { onNeedKey(); return; }
     setGenerating(path);
     const prompt = `Write the complete contents of the file \`${path}\` for this project:
@@ -172,7 +176,7 @@ This file's purpose: ${description}
 Output ONLY the raw file contents. No markdown fences, no explanation, no commentary.`;
     try {
       let acc = "";
-      for await (const chunk of streamChat([{ role: "user", text: prompt }], { maxOutputTokens: 12_000, temperature: 0.25 })) {
+      for await (const chunk of streamChat([{ role: "user", text: prompt }], { task: "coding", maxOutputTokens: 12_000, temperature: 0.25 })) {
         acc += chunk;
         if (acc.length > MAX_FILE_OUTPUT_CHARS) throw new Error("Generated file exceeded DevLab's reviewed-draft staging limit.");
       }
