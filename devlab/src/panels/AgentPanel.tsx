@@ -3,8 +3,8 @@ import type { AgentContextFile, ChatMessage, OpenGeneratedDrafts, VFile } from "
 import { Markdown } from "../components/CodeBlock";
 import { getApiKey, streamChat, getModel, type GenTurn } from "../lib/gemini";
 import { recordAgentContext } from "../lib/agentTools";
-import { readWorkspaceFile } from "../lib/workspace";
-import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight, Paperclip, X } from "lucide-react";
+import { readWorkspaceFile, type WorkspaceDocument } from "../lib/workspace";
+import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight, Paperclip, RefreshCw, X } from "lucide-react";
 
 interface SpeechRecognitionLike {
   continuous: boolean;
@@ -69,6 +69,7 @@ export function AgentPanel({
   const [stageError, setStageError] = useState("");
   const [contextBusy, setContextBusy] = useState(false);
   const [contextError, setContextError] = useState("");
+  const [contextNotice, setContextNotice] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const recRef = useRef<SpeechRecognitionLike | null>(null);
   const hasKey = !!getApiKey();
@@ -192,6 +193,7 @@ export function AgentPanel({
     }
     setContextBusy(true);
     setContextError("");
+    setContextNotice("");
     try {
       const document = await readWorkspaceFile(cleanPath);
       const totalWithoutExisting = contextFiles
@@ -202,25 +204,13 @@ export function AgentPanel({
         setContextError("Attached workspace context is at the total size limit. Remove a file before attaching another.");
         return;
       }
-      const limit = Math.min(MAX_AGENT_CONTEXT_CHARS, remaining);
-      const content = boundTextByBytes(document.content, limit);
-      const contextFile: AgentContextFile = {
-        path: document.path,
-        content,
-        language: languageForPath(document.path),
-        revision: document.revision,
-        size: document.size,
-        truncated: textBytes(content) < textBytes(document.content),
-      };
-      await recordAgentContext([{
-        path: contextFile.path,
-        bytes: textBytes(contextFile.content),
-        truncated: contextFile.truncated,
-      }]);
+      const contextFile = contextFileFromDocument(document, Math.min(MAX_AGENT_CONTEXT_CHARS, remaining));
+      await recordContextMetadata([contextFile]);
       setContextFiles((current) => [
         ...current.filter((file) => file.path !== contextFile.path),
         contextFile,
       ].slice(-MAX_AGENT_CONTEXT_FILES));
+      setContextNotice(`Attached ${contextFile.path} as read-only context. Metadata was recorded in the audit log.`);
     } catch (error) {
       setContextError(formatContextError(error));
     } finally {
@@ -228,8 +218,45 @@ export function AgentPanel({
     }
   }
 
+  async function refreshContextFiles() {
+    if (contextFiles.length === 0 || contextBusy) return;
+    setContextBusy(true);
+    setContextError("");
+    setContextNotice("");
+    try {
+      const refreshed: AgentContextFile[] = [];
+      let remaining = MAX_AGENT_CONTEXT_TOTAL_CHARS;
+      for (const file of contextFiles) {
+        const document = await readWorkspaceFile(file.path);
+        if (remaining <= 0) break;
+        const contextFile = contextFileFromDocument(document, Math.min(MAX_AGENT_CONTEXT_CHARS, remaining));
+        refreshed.push(contextFile);
+        remaining -= textBytes(contextFile.content);
+      }
+      if (refreshed.length === 0) {
+        setContextError("No attached workspace context could be refreshed within the size limit.");
+        return;
+      }
+      await recordContextMetadata(refreshed);
+      setContextFiles(refreshed);
+      setContextNotice(`Refreshed ${refreshed.length} read-only context file${refreshed.length === 1 ? "" : "s"}; latest revisions will be used on the next prompt.`);
+    } catch (error) {
+      setContextError(`Could not refresh attached context: ${formatContextError(error)}`);
+    } finally {
+      setContextBusy(false);
+    }
+  }
+
   function removeContextFile(path: string) {
     setContextFiles((current) => current.filter((file) => file.path !== path));
+    setContextNotice("");
+    setContextError("");
+  }
+
+  function clearContextFiles() {
+    setContextFiles([]);
+    setContextNotice("");
+    setContextError("");
   }
 
   async function stageDraftsFromMessage(message: ChatMessage, drafts: VFile[]) {
@@ -375,9 +402,18 @@ export function AgentPanel({
                     </button>
                   </span>
                 ))}
-                <button onClick={() => setContextFiles([])} className="text-zinc-500 hover:text-zinc-200">Clear</button>
+                <button
+                  onClick={() => { void refreshContextFiles(); }}
+                  disabled={contextBusy}
+                  className="inline-flex items-center gap-1 text-zinc-500 hover:text-zinc-200 disabled:opacity-40"
+                >
+                  {contextBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                  Refresh
+                </button>
+                <button onClick={clearContextFiles} className="text-zinc-500 hover:text-zinc-200">Clear</button>
               </div>
             )}
+            {contextNotice && <div className="mt-1 text-emerald-300">{contextNotice}</div>}
             {contextError && <div className="mt-1 text-rose-300">{contextError}</div>}
           </div>
         )}
@@ -472,6 +508,26 @@ export function PanelHeader({
   );
 }
 
+
+function contextFileFromDocument(document: WorkspaceDocument, maxBytes: number): AgentContextFile {
+  const content = boundTextByBytes(document.content, maxBytes);
+  return {
+    path: document.path,
+    content,
+    language: languageForPath(document.path),
+    revision: document.revision,
+    size: document.size,
+    truncated: textBytes(content) < textBytes(document.content),
+  };
+}
+
+async function recordContextMetadata(files: AgentContextFile[]) {
+  await recordAgentContext(files.map((file) => ({
+    path: file.path,
+    bytes: textBytes(file.content),
+    truncated: file.truncated,
+  })));
+}
 
 function textBytes(value: string): number {
   return new TextEncoder().encode(value).length;
