@@ -166,13 +166,13 @@ export const AI_PROVIDER_PROFILES: AiProviderProfile[] = [
     id: "custom",
     name: "Custom OpenAI-compatible endpoint",
     shortName: "Custom",
-    statusLabel: "Future native adapter",
-    availableNow: false,
-    credentialStorage: "Planned OS credential store entry when credentials are required",
-    transport: "Planned bounded native HTTP adapter with explicit host policy",
+    statusLabel: "Available in native DevLab",
+    availableNow: NATIVE_RUNTIME,
+    credentialStorage: "Optional bearer token in the OS credential store, scoped to the normalized endpoint; never returned to the WebView",
+    transport: "Rust-owned bounded HTTP adapter with an explicit host policy (https:// required unless loopback; fixed /chat/completions suffix; 120 s non-streamed bound)",
     defaultModel: "",
-    modelExamples: ["provider-specific model id"],
-    note: "Future advanced profile. Endpoint/model metadata is non-secret; arbitrary browser fetches are not enabled.",
+    modelExamples: ["vLLM/LM Studio/LiteLLM model id"],
+    note: "Phase 9E native adapter for self-hosted or gateway servers speaking the OpenAI chat protocol. Endpoint and model are non-secret settings; the WebView never fetches the endpoint itself. Unavailable in the plain web preview.",
   },
 ];
 
@@ -198,9 +198,7 @@ export function resolveAiRoute(
   const modelLabel = model || provider.defaultModel || "not configured";
 
   if (!provider.availableNow) {
-    const reason = provider.id === "ollama" || provider.id === "deepseek" || provider.id === "openai" || provider.id === "anthropic"
-      ? `${provider.name} routing is configured for ${task.label.toLowerCase()}, but its native adapter is only available inside the DevLab desktop app, not the web preview. No request was sent.`
-      : `${provider.name} routing is configured for ${task.label.toLowerCase()}, but this provider is a future phase. DevLab has not enabled its native credential store and bounded transport yet, so no request was sent. Switch Settings → Providers back to Gemini for current AI generation.`;
+    const reason = `${provider.name} routing is configured for ${task.label.toLowerCase()}, but its native adapter is only available inside the DevLab desktop app, not the web preview. No request was sent.`;
     return {
       task: task.id,
       taskLabel: task.label,
@@ -233,6 +231,8 @@ export function resolveAiRoute(
       ? `Routing ${task.label.toLowerCase()} to the local Ollama model "${modelLabel}" through the native loopback adapter; no cloud request is made and there is no fallback to Gemini.`
       : provider.id === "deepseek" || provider.id === "openai" || provider.id === "anthropic"
         ? `Routing ${task.label.toLowerCase()} to ${provider.shortName} model "${modelLabel}" through the native HTTPS adapter; the key stays in the OS credential store and there is no fallback to Gemini.`
+        : provider.id === "custom"
+        ? `Routing ${task.label.toLowerCase()} to model "${modelLabel}" at the custom OpenAI-compatible endpoint through the native adapter's host policy; any bearer token stays in the OS credential store and there is no fallback to Gemini.`
         : settings.modelRouting === "fixed"
         ? `Using the selected ${provider.shortName} model for ${task.label.toLowerCase()}.`
         : `Routing ${task.label.toLowerCase()} through ${provider.shortName}; Gemini fallback candidates are ordered for this task class when live model metadata is available.`,

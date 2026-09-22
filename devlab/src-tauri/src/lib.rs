@@ -2,6 +2,7 @@ mod agent_tools;
 mod ai_providers;
 mod audit;
 mod credentials;
+mod custom_endpoint;
 mod database;
 mod docker;
 mod git;
@@ -40,6 +41,10 @@ use postgres::{
 use search_index::{
     search_index_build, search_index_clear, search_index_embed, search_index_query, search_index_status,
     SearchIndexService,
+};
+use custom_endpoint::{
+    custom_credential_delete, custom_credential_status, custom_credential_store, custom_endpoint_chat,
+    custom_endpoint_validate,
 };
 use serde::Serialize;
 use terminal::{
@@ -91,6 +96,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
             "ai-providers",
             "search-index",
             "semantic-search",
+            "custom-endpoint",
         ],
     }
 }
@@ -186,6 +192,11 @@ pub fn run() {
             search_index_query,
             search_index_embed,
             search_index_clear,
+            custom_endpoint_validate,
+            custom_credential_status,
+            custom_credential_store,
+            custom_credential_delete,
+            custom_endpoint_chat,
             test_runner_snapshot,
             test_runner_run,
             toolchain_snapshot,

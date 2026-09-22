@@ -14,6 +14,7 @@ export type NativeCapability =
   | "ai-providers"
   | "search-index"
   | "semantic-search"
+  | "custom-endpoint"
   | "agent-tools"
   | "test-runner"
   | "agent-audit"
@@ -34,7 +35,7 @@ export const WEB_RUNTIME: RuntimeInfo = {
   runtime: "web",
   os: "browser",
   arch: "unknown",
-  appVersion: "1.65.0",
+  appVersion: "1.66.0",
   debug: import.meta.env.DEV,
   capabilities: [],
 };

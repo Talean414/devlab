@@ -143,7 +143,7 @@ export default function App() {
     selectedModel: getModel(),
     pickedModel: getPicked(),
   }, settings);
-  const hasKey = aiRoute.status === "active" && (aiRoute.provider === "ollama" || !!getApiKey());
+  const hasKey = aiRoute.status === "active" && (aiRoute.provider === "ollama" || aiRoute.provider === "custom" || !!getApiKey());
   const theme = getTheme(settings.theme);
 
   function navigate(next: ViewId) {
@@ -610,7 +610,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 9D native semantic workspace search</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 9E native custom endpoint adapter</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}

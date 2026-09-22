@@ -22,7 +22,7 @@ use zeroize::Zeroizing;
 use crate::http::{blocking, send_request_with_timeout, HttpHeader, HttpRequest};
 use crate::workspace::CommandError;
 
-const KEYRING_SERVICE: &str = "io.github.talean414.devlab.ai";
+pub(crate) const KEYRING_SERVICE: &str = "io.github.talean414.devlab.ai";
 const MAX_KEY_BYTES: usize = 4 * 1024;
 const MIN_KEY_BYTES: usize = 8;
 const MAX_MODEL_ID_BYTES: usize = 128;
@@ -30,10 +30,10 @@ const MAX_MESSAGES: usize = 64;
 const MAX_MESSAGE_CHARS: usize = 64 * 1024;
 const MAX_PROMPT_CHARS: usize = 192 * 1024;
 const MAX_SYSTEM_CHARS: usize = 16 * 1024;
-const MAX_REPLY_CHARS: usize = 256 * 1024;
+pub(crate) const MAX_REPLY_CHARS: usize = 256 * 1024;
 const MIN_OUTPUT_TOKENS: u64 = 64;
 const MAX_OUTPUT_TOKENS: u64 = 16_384;
-const GENERATE_TIMEOUT_SECS: u64 = 120;
+pub(crate) const GENERATE_TIMEOUT_SECS: u64 = 120;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 static KEYRING_LOCK: Mutex<()> = Mutex::new(());
 
@@ -133,7 +133,7 @@ pub struct AiChatResponse {
     elapsed_ms: u64,
 }
 
-fn keyring_backend() -> &'static str {
+pub(crate) fn keyring_backend() -> &'static str {
     #[cfg(target_os = "windows")]
     {
         "Windows Credential Manager"
@@ -156,14 +156,14 @@ fn entry(provider: AiProvider) -> Result<Entry, CommandError> {
     Entry::new(KEYRING_SERVICE, provider.account()).map_err(keyring_error)
 }
 
-fn keyring_error(error: KeyringError) -> CommandError {
+pub(crate) fn keyring_error(error: KeyringError) -> CommandError {
     CommandError::new(
         "secure_storage_error",
         format!("The operating-system credential store could not complete the request: {error}"),
     )
 }
 
-fn lock_keyring() -> Result<MutexGuard<'static, ()>, CommandError> {
+pub(crate) fn lock_keyring() -> Result<MutexGuard<'static, ()>, CommandError> {
     KEYRING_LOCK.lock().map_err(|_| {
         CommandError::new(
             "secure_storage_unavailable",
@@ -285,7 +285,7 @@ pub(crate) fn validate_messages(messages: &[AiMessage]) -> Result<Vec<(&'static 
     Ok(output)
 }
 
-fn validate_system(system: &str) -> Result<Option<String>, CommandError> {
+pub(crate) fn validate_system(system: &str) -> Result<Option<String>, CommandError> {
     let trimmed = system.trim();
     if trimmed.is_empty() {
         return Ok(None);
@@ -306,7 +306,7 @@ fn clamp_temperature(provider: AiProvider, value: Option<f64>) -> f64 {
     }
 }
 
-fn clamp_output_tokens(value: Option<u64>) -> u64 {
+pub(crate) fn clamp_output_tokens(value: Option<u64>) -> u64 {
     value.unwrap_or(4096).clamp(MIN_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS)
 }
 
@@ -435,7 +435,7 @@ pub(crate) fn parse_reply(provider: AiProvider, body: &Value) -> Result<(String,
     }
 }
 
-fn provider_error_detail(body: &Value) -> String {
+pub(crate) fn provider_error_detail(body: &Value) -> String {
     // OpenAI/DeepSeek: {"error":{"message":..}}; Anthropic: {"error":{"message":..}} or {"error":".."}
     let detail = body
         .get("error")
@@ -512,7 +512,7 @@ fn parse_json_body(provider: AiProvider, body: &str, truncated: bool) -> Result<
     })
 }
 
-fn bound_text(text: &str, max_chars: usize) -> (String, bool) {
+pub(crate) fn bound_text(text: &str, max_chars: usize) -> (String, bool) {
     if text.chars().count() <= max_chars {
         return (text.to_string(), false);
     }

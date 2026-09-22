@@ -6,6 +6,7 @@ import { componentScaffoldInstruction, designSystemInstruction, qualityChecklist
 import { loadSettings } from "./settings";
 import { ollamaChat } from "./ollama";
 import { aiProviderChat, credentialKnownConfigured, isCloudAiProvider } from "./aiProviders";
+import { customEndpointChat } from "./customEndpoint";
 import {
   generationGuardrailInstruction,
   resolveAiRoute,
@@ -159,6 +160,8 @@ export function hasGenerationAccess(task: AiTaskKind = "chat"): boolean {
   const route = getCurrentAiRoute(task);
   if (route.status !== "active") return false;
   if (route.provider === "ollama") return true;
+  // Custom endpoints may be anonymous; Rust decides whether a token is required for the profile.
+  if (route.provider === "custom") return !!route.model;
   // Cloud adapters: the key lives in the OS store; the renderer only knows whether one is configured.
   // Unknown (cache not yet populated) is treated as available so Rust gives the authoritative answer.
   if (isCloudAiProvider(route.provider)) return credentialKnownConfigured(route.provider) !== false;
@@ -293,6 +296,21 @@ export async function* streamChat(
     });
     yield reply.text;
     if (reply.textTruncated) yield "\n\n… local model reply truncated at DevLab's response bound.";
+    return;
+  }
+
+  if (route.provider === "custom") {
+    // Native adapter with an explicit host policy; the optional bearer token never enters the renderer.
+    const reply = await customEndpointChat({
+      endpoint: settings.customEndpoint,
+      model: route.model,
+      system: systemText,
+      messages: limitHistory(history),
+      temperature,
+      maxOutputTokens,
+    });
+    yield reply.text;
+    if (reply.textTruncated) yield "\n\n… endpoint reply truncated at DevLab's response bound.";
     return;
   }
 

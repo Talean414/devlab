@@ -24,6 +24,10 @@ import {
   type OllamaModelInfo,
 } from "../lib/ollama";
 import {
+  customAdapterAvailable, customCredentialDelete, customCredentialStatus, customCredentialStore, describeCustomEndpoint,
+  type CustomCredentialStatus,
+} from "../lib/customEndpoint";
+import {
   AI_PROVIDER_PROFILES,
   AI_TASK_PROFILES,
   describeAiRoute,
@@ -118,6 +122,59 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
       setCloudNotice({ kind: "error", text: nativeErrorText(error) });
     } finally {
       setCloudBusy(false);
+    }
+  }
+
+  // Phase 9E: custom OpenAI-compatible endpoint token, scoped to the normalized endpoint profile.
+  const customEndpointCheck = describeCustomEndpoint(s.customEndpoint);
+  const [customTokenInput, setCustomTokenInput] = useState("");
+  const [customStatus, setCustomStatus] = useState<CustomCredentialStatus | null>(null);
+  const [customBusy, setCustomBusy] = useState(false);
+  const [customNotice, setCustomNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+
+  useEffect(() => {
+    setCustomStatus(null);
+    setCustomNotice(null);
+    if (s.aiProvider !== "custom" || !customAdapterAvailable() || !customEndpointCheck.ok) return;
+    let cancelled = false;
+    const handle = window.setTimeout(() => {
+      customCredentialStatus(s.customEndpoint)
+        .then((status) => { if (!cancelled) setCustomStatus(status); })
+        .catch((error) => { if (!cancelled) setCustomNotice({ kind: "error", text: nativeErrorText(error) }); });
+    }, 350);
+    return () => { cancelled = true; window.clearTimeout(handle); };
+  }, [s.aiProvider, s.customEndpoint, customEndpointCheck.ok]);
+
+  async function storeCustomToken() {
+    setCustomNotice(null);
+    if (!customAdapterAvailable()) {
+      setCustomNotice({ kind: "error", text: "Endpoint tokens can only be stored inside the DevLab desktop app, where the OS credential store is available." });
+      return;
+    }
+    setCustomBusy(true);
+    try {
+      const status = await customCredentialStore(s.customEndpoint, customTokenInput);
+      setCustomStatus(status);
+      setCustomTokenInput("");
+      setCustomNotice({ kind: "ok", text: `Token stored in the ${status.backend} for ${status.profile.id} only. Rust attaches it solely to ${status.profile.chatUrl}.` });
+    } catch (error) {
+      setCustomNotice({ kind: "error", text: nativeErrorText(error) });
+    } finally {
+      setCustomBusy(false);
+    }
+  }
+
+  async function deleteCustomToken() {
+    setCustomNotice(null);
+    setCustomBusy(true);
+    try {
+      const status = await customCredentialDelete(s.customEndpoint);
+      setCustomStatus(status);
+      setCustomNotice({ kind: "ok", text: `Removed the stored token for ${status.profile.id}.` });
+    } catch (error) {
+      setCustomNotice({ kind: "error", text: nativeErrorText(error) });
+    } finally {
+      setCustomBusy(false);
     }
   }
 
@@ -408,7 +465,8 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                 <div>
                   <strong>Security:</strong> the Gemini key is currently held in WebView localStorage and sent
                   only to Google's official endpoint. DeepSeek, OpenAI and Anthropic keys are written through Rust into the
-                  operating system's protected credential store and never returned to this interface; Ollama needs no key.
+                  operating system's protected credential store and never returned to this interface; Ollama needs no key; custom
+                  OpenAI-compatible endpoints may store an optional bearer token there, scoped to that endpoint.
                   Git tokens likewise live only in the OS credential store.
                 </div>
               </div>
@@ -572,24 +630,59 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                   </div>
                 )}
                 {s.aiProvider === "custom" && (
-                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                    <label className="block text-[12px] text-zinc-400">
-                      Endpoint profile
-                      <input value={s.customEndpoint} onChange={(e) => update({ customEndpoint: e.target.value })}
-                        placeholder="https://provider.example/v1"
-                        className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
-                    </label>
-                    <label className="block text-[12px] text-zinc-400">
-                      Model id
-                      <input value={s.customModel} onChange={(e) => update({ customModel: e.target.value })}
-                        placeholder="provider-specific model"
-                        className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
-                    </label>
+                  <div className="mt-3 space-y-2">
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <label className="block text-[12px] text-zinc-400">
+                        OpenAI-compatible base URL
+                        <input value={s.customEndpoint} onChange={(e) => update({ customEndpoint: e.target.value })}
+                          placeholder="https://llm.example.com/v1 or http://localhost:1234/v1"
+                          className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                        <span className={`mt-1 block text-[11px] ${customEndpointCheck.ok ? "text-emerald-300/80" : "text-amber-300/90"}`}>
+                          {customEndpointCheck.reason}{customStatus ? ` · Rust will call ${customStatus.profile.chatUrl}` : ""}
+                        </span>
+                      </label>
+                      <label className="block text-[12px] text-zinc-400">
+                        Model id
+                        <input value={s.customModel} onChange={(e) => update({ customModel: e.target.value })}
+                          placeholder="e.g. meta-llama/Llama-3.1-8B-Instruct"
+                          className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                      </label>
+                    </div>
+                    {customEndpointCheck.ok && customEndpointCheck.tls && (
+                      <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3">
+                        <div className="text-[12px] text-zinc-400">
+                          Bearer token for this endpoint {customStatus ? (customStatus.configured ? <span className="text-emerald-300">· stored</span> : <span className="text-zinc-500">· none stored</span>) : null}
+                        </div>
+                        <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                          <input type="password" value={customTokenInput} onChange={(e) => setCustomTokenInput(e.target.value)}
+                            placeholder="optional; leave empty for anonymous servers" autoComplete="off" spellCheck={false}
+                            className="min-w-[220px] flex-1 rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                          <button type="button" onClick={() => { void storeCustomToken(); }} disabled={customBusy || !customTokenInput.trim()}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/20 disabled:opacity-40">
+                            <Save className="h-3.5 w-3.5" /> Store in OS credential store
+                          </button>
+                          <button type="button" onClick={() => { void deleteCustomToken(); }} disabled={customBusy || !customStatus?.configured}
+                            className="rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-white/5 disabled:opacity-40">
+                            Remove
+                          </button>
+                        </div>
+                        <p className="mt-2 text-[11px] text-zinc-500">
+                          The token is written once through Rust into the OS credential store under an account derived from the normalized endpoint, so it is never sent to a different host or path. It is never returned to this interface, logged, or persisted in localStorage or recovery snapshots.
+                        </p>
+                      </div>
+                    )}
+                    {customEndpointCheck.ok && !customEndpointCheck.tls && (
+                      <p className="text-[11px] text-zinc-500">Loopback http:// servers run without a token: Rust refuses to attach bearer tokens in clear text.</p>
+                    )}
+                    {customNotice && <div className={`text-[11px] ${customNotice.kind === "ok" ? "text-emerald-300/80" : "text-rose-300"}`}>{customNotice.text}</div>}
+                    <p className="text-[11px] text-zinc-500">
+                      Chat, planning, coding, architecture, migration and repair go through Rust to <code>{"<base>"}/chat/completions</code> with a 120 s non-streamed bound and the OpenAI response shape. Self-signed certificates are not trusted; vision stays on Gemini; there is no fallback to Gemini.
+                    </p>
                   </div>
                 )}
               </Card>
 
-              <Card title="Task-aware model router" desc="Routes are explicit metadata today. Auto mode can bias Gemini fallback candidates by task; future providers remain closed until native adapters land.">
+              <Card title="Task-aware model router" desc="Routes are explicit metadata today. Auto mode can bias Gemini fallback candidates by task; every native adapter (Ollama, DeepSeek, OpenAI, Anthropic, custom endpoint) is desktop-only and never falls back to Gemini.">
                 <div className="mb-3 grid gap-2 sm:grid-cols-2">
                   {([
                     ["auto", "Auto route by task", "Planning, coding, repair and vision prompts get task-specific route instructions and fallback order."],

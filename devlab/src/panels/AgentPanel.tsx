@@ -129,7 +129,7 @@ export function AgentPanel({
     selectedModel: getModel(),
     pickedModel: getPicked(),
   });
-  const hasKey = chatRoute.status === "active" && (chatRoute.provider === "ollama" || !!getApiKey());
+  const hasKey = chatRoute.status === "active" && (chatRoute.provider === "ollama" || chatRoute.provider === "custom" || !!getApiKey());
   const SpeechAPI = getSpeechRecognition();
   const attachedRepoMap = contextFiles.find(isRepoMapContext) ?? null;
   const repoMapPreview = attachedRepoMap ? buildRepoMapContextPreview(attachedRepoMap, repoMapQuery) : null;
@@ -597,7 +597,7 @@ export function AgentPanel({
       <PanelHeader
         title="AI Agent Hub"
         subtitle={`Streaming chat route: ${describeAiRoute(chatRoute)}`}
-        badge={chatRoute.status !== "active" ? "Future provider" : hasKey ? "Connected" : "No key"}
+        badge={chatRoute.status !== "active" ? "Desktop only" : hasKey ? "Connected" : "No key"}
         badgeOk={hasKey}
       />
 
@@ -919,7 +919,7 @@ export function AgentPanel({
               }
             }}
             rows={1}
-            placeholder={chatRoute.status !== "active" ? "Selected provider is a future adapter; switch Settings → Providers to Gemini for chat." : hasKey ? "Ask the DevLab agent, or click the mic and talk…" : "Add your Gemini key in Settings to start."}
+            placeholder={chatRoute.status !== "active" ? "Selected provider's native adapter is available only in the DevLab desktop app; switch Settings → Providers to Gemini for chat here." : hasKey ? "Ask the DevLab agent, or click the mic and talk…" : "Add your Gemini key in Settings to start."}
             className="max-h-40 flex-1 resize-none bg-transparent px-3 py-2 text-[14px] text-zinc-100 outline-none placeholder:text-zinc-600"
           />
           {SpeechAPI && (

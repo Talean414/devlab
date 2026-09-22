@@ -76,6 +76,11 @@
     "allow-search-index-query",
     "allow-search-index-embed",
     "allow-search-index-clear",
+    "allow-custom-endpoint-validate",
+    "allow-custom-credential-status",
+    "allow-custom-credential-store",
+    "allow-custom-credential-delete",
+    "allow-custom-endpoint-chat",
     "allow-test-runner-snapshot",
     "allow-test-runner-run",
     "allow-toolchain-snapshot"
