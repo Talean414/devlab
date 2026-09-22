@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 
 import type { AgentContextFile, ChatMessage, OpenGeneratedDrafts, VFile } from "../types";
 import { Markdown } from "../components/CodeBlock";
 import { getApiKey, streamChat, getModel, type GenTurn } from "../lib/gemini";
+import { listAgentAudit, type AgentAuditEvent } from "../lib/agentAudit";
 import { recordAgentContext } from "../lib/agentTools";
 import { listDirectory, readWorkspaceFile, type WorkspaceDocument, type WorkspaceEntry } from "../lib/workspace";
 import { Bot, User, Send, Sparkles, AlertTriangle, Mic, MicOff, FileCode2, Loader2, ArrowRight, ArrowUp, Folder, Paperclip, RefreshCw, X } from "lucide-react";
@@ -42,6 +43,7 @@ export function AgentPanel({
   onNeedKey,
   onOpenFiles,
   canAttachWorkspace,
+  canShowAudit,
   contextFiles,
   setContextFiles,
   messages,
@@ -54,6 +56,7 @@ export function AgentPanel({
   onNeedKey: () => void;
   onOpenFiles: OpenGeneratedDrafts;
   canAttachWorkspace: boolean;
+  canShowAudit: boolean;
   contextFiles: AgentContextFile[];
   setContextFiles: Dispatch<SetStateAction<AgentContextFile[]>>;
   messages: ChatMessage[];
@@ -74,6 +77,10 @@ export function AgentPanel({
   const [pickerDirectory, setPickerDirectory] = useState("");
   const [pickerEntries, setPickerEntries] = useState<WorkspaceEntry[]>([]);
   const [pickerLoading, setPickerLoading] = useState(false);
+  const [auditOpen, setAuditOpen] = useState(false);
+  const [auditEvents, setAuditEvents] = useState<AgentAuditEvent[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const recRef = useRef<SpeechRecognitionLike | null>(null);
   const hasKey = !!getApiKey();
@@ -108,6 +115,24 @@ export function AgentPanel({
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    if (canShowAudit) void refreshAgentAudit();
+  }, [canShowAudit]);
+
+  async function refreshAgentAudit() {
+    if (!canShowAudit) return;
+    setAuditLoading(true);
+    setAuditError("");
+    try {
+      const events = await listAgentAudit(20);
+      setAuditEvents(events.filter(isAgentRelevantAudit).slice(0, 8));
+    } catch (error) {
+      setAuditError(formatContextError(error));
+    } finally {
+      setAuditLoading(false);
+    }
+  }
 
   async function send(text: string) {
     if (!text.trim() || busy) return;
@@ -227,6 +252,7 @@ export function AgentPanel({
       }
       const contextFile = contextFileFromDocument(document, Math.min(MAX_AGENT_CONTEXT_CHARS, remaining));
       await recordContextMetadata([contextFile]);
+      void refreshAgentAudit();
       setContextFiles((current) => [
         ...current.filter((file) => file.path !== contextFile.path),
         contextFile,
@@ -260,6 +286,7 @@ export function AgentPanel({
         return;
       }
       await recordContextMetadata(refreshed);
+      void refreshAgentAudit();
       setContextFiles(refreshed);
       setContextNotice(`Refreshed ${refreshed.length} read-only context file${refreshed.length === 1 ? "" : "s"}; latest revisions will be used on the next prompt.`);
     } catch (error) {
@@ -291,8 +318,10 @@ export function AgentPanel({
         drafts,
         `AI Agent reviewed drafts from ${new Date(message.ts).toLocaleString()}`,
       );
-      if (opened) setStageNotice(`Staged ${drafts.length} AI Agent draft${drafts.length === 1 ? "" : "s"} for editor review.`);
-      else setStageError("AI Agent drafts were not staged for editor review. Nothing was written.");
+      if (opened) {
+        setStageNotice(`Staged ${drafts.length} AI Agent draft${drafts.length === 1 ? "" : "s"} for editor review.`);
+        void refreshAgentAudit();
+      } else setStageError("AI Agent drafts were not staged for editor review. Nothing was written.");
     } finally {
       setStagingMessageId(null);
     }
@@ -409,6 +438,46 @@ export function AgentPanel({
       </div>
 
       <div className="border-t border-white/5 p-4">
+        {canShowAudit && (
+          <div className="mb-2 rounded-xl border border-white/10 bg-white/[0.02] p-2.5 text-[11.5px]">
+            <div className="flex items-center gap-2">
+              <span className="min-w-0 flex-1 font-semibold uppercase tracking-wider text-zinc-500">Recent Agent audit activity</span>
+              <button
+                onClick={() => setAuditOpen((open) => !open)}
+                className="text-zinc-500 hover:text-zinc-200"
+              >
+                {auditOpen ? "Hide" : "Show"}
+              </button>
+              <button
+                onClick={() => { void refreshAgentAudit(); }}
+                disabled={auditLoading}
+                className="inline-flex items-center gap-1 text-zinc-500 hover:text-zinc-200 disabled:opacity-40"
+                title="Refresh Agent audit activity"
+              >
+                {auditLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                Refresh
+              </button>
+            </div>
+            {auditOpen && (
+              <div className="mt-2 space-y-1.5">
+                {auditError && <div className="text-rose-300">{auditError}</div>}
+                {!auditError && auditEvents.length === 0 && <div className="text-zinc-600">No Agent audit events yet.</div>}
+                {!auditError && auditEvents.map((event) => (
+                  <div key={event.id} className="rounded-lg border border-white/10 bg-black/15 p-2">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-[10.5px] text-zinc-500">{auditTime(event.timestampMs)}</span>
+                      <span className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[10.5px] text-cyan-200">{event.kind}</span>
+                      <span className={`ml-auto font-semibold ${auditTone(event.outcome)}`}>{event.outcome}</span>
+                    </div>
+                    <div className="mt-1 truncate font-mono text-[10.5px] text-zinc-500">{event.target}</div>
+                    <div className="mt-1 text-zinc-300/80">{event.summary}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {(contextFiles.length > 0 || contextError) && (
           <div className="mb-2 rounded-xl border border-white/10 bg-white/[0.025] p-2.5 text-[11.5px]">
             {contextFiles.length > 0 && (
@@ -594,6 +663,20 @@ export function PanelHeader({
   );
 }
 
+
+function isAgentRelevantAudit(event: AgentAuditEvent): boolean {
+  return event.kind === "agent-context" || event.kind === "multi-file-draft" || event.kind === "reviewed-draft";
+}
+
+function auditTime(timestampMs: number): string {
+  return new Date(timestampMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function auditTone(outcome: string): string {
+  if (outcome === "success" || outcome === "passed" || outcome === "review" || outcome === "read-only") return "text-emerald-300";
+  if (outcome === "failed" || outcome === "error") return "text-rose-300";
+  return "text-amber-300";
+}
 
 function parentPath(path: string): string {
   const parts = path.split("/").filter(Boolean);
