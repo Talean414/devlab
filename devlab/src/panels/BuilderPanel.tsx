@@ -107,15 +107,18 @@ export function BuilderPanel({
   const outRef = useRef<HTMLDivElement>(null);
   const [specNotice, setSpecNotice] = useState("");
   const [specPreviewNotice, setSpecPreviewNotice] = useState("");
+  const [taskPlanNotice, setTaskPlanNotice] = useState("");
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const settings = loadSettings();
   const specPreview = plan ? buildSpecMetadataPreview(plan, brief) : null;
+  const taskPlanPreview = plan ? buildTaskPlanPreview(plan, builtFiles) : null;
 
   async function generatePlan(text: string) {
     if (!text.trim()) return;
     const route = getCurrentAiRoute("planning");
     if (route.status !== "active") { setError(route.reason); return; }
     if (!getApiKey()) { onNeedKey(); return; }
-    setBusy(true); setError(""); setRaw(""); setPlan(null); setSpecNotice(""); setSpecPreviewNotice(""); setPhase("planning");
+    setBusy(true); setError(""); setRaw(""); setPlan(null); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setActiveTaskId(null); setPhase("planning");
 
     const templateList = projectTemplates.map((t) => `${t.id} (${t.stack}, ${t.lang})`).join(", ");
     const prompt = `You are DevLab's project architect. The developer wants to build:
@@ -168,16 +171,19 @@ Rules:
     }
   }
 
-  async function generateFile(path: string, description: string) {
+  async function generateFile(path: string, description: string, taskContext?: SpecTaskNode): Promise<boolean> {
     const route = getCurrentAiRoute("coding");
-    if (route.status !== "active") { setError(route.reason); return; }
-    if (!getApiKey()) { onNeedKey(); return; }
+    if (route.status !== "active") { setError(route.reason); return false; }
+    if (!getApiKey()) { onNeedKey(); return false; }
     setGenerating(path);
+    const taskGuidance = taskContext
+      ? `Current reviewed task: ${taskContext.id} — ${taskContext.title}\nTask detail: ${taskContext.detail}\nTask acceptance notes: ${taskContext.acceptance.join("; ")}\nTask review gate: ${taskContext.reviewGate}\n`
+      : "";
     const prompt = `Write the complete contents of the file \`${path}\` for this project:
 
 Project: ${plan?.summary}
 Stack: ${plan?.stack.join(", ")}
-This file's purpose: ${description}
+${taskGuidance}This file's purpose: ${description}
 
 Output ONLY the raw file contents. No markdown fences, no explanation, no commentary.`;
     try {
@@ -190,8 +196,10 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
       if (textBytes(content) > MAX_DRAFT_BYTES) throw new Error("Generated file exceeded DevLab's reviewed-draft staging limit.");
       const vfile: VFile = { path, content, language: languageForPath(path) };
       setBuiltFiles((f) => [...f.filter((x) => x.path !== path), vfile]);
+      return true;
     } catch (e) {
       setError((e as Error).message);
+      return false;
     } finally {
       setGenerating(null);
     }
@@ -208,6 +216,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setStaging(true);
     setError("");
     setStageNotice("");
+    setTaskPlanNotice("");
     try {
       const opened = await onOpenFiles(builtFiles, plan.summary);
       if (opened) {
@@ -227,6 +236,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setError("");
     setSpecNotice("");
     setSpecPreviewNotice("");
+    setTaskPlanNotice("");
     if (!navigator.clipboard?.writeText) {
       setError("Clipboard access is unavailable in this environment. Nothing was copied.");
       return;
@@ -244,6 +254,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setError("");
     setSpecNotice("");
     setSpecPreviewNotice("");
+    setTaskPlanNotice("");
     if (!navigator.clipboard?.writeText) {
       setError("Clipboard access is unavailable in this environment. Nothing was copied.");
       return;
@@ -256,6 +267,64 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     }
   }
 
+  async function copyTaskPlanPreview() {
+    if (!taskPlanPreview) return;
+    setError("");
+    setSpecNotice("");
+    setSpecPreviewNotice("");
+    setTaskPlanNotice("");
+    if (!navigator.clipboard?.writeText) {
+      setError("Clipboard access is unavailable in this environment. Nothing was copied.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(taskPlanPreview.exportText);
+      setTaskPlanNotice(`Copied task DAG implementation preview for ${taskPlanPreview.tasks.length} task batch${taskPlanPreview.tasks.length === 1 ? "" : "es"}.`);
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
+  async function generateTaskFiles(taskId: string) {
+    if (!plan || !taskPlanPreview) return;
+    const task = taskPlanPreview.tasks.find((item) => item.id === taskId);
+    if (!task) return;
+    setError("");
+    setSpecNotice("");
+    setSpecPreviewNotice("");
+    setTaskPlanNotice("");
+    const targetFiles = task.reviewedFileTargets
+      .map((targetPath) => plan.files.find((file) => file.path === targetPath))
+      .filter((file): file is BuilderPlan["files"][number] => Boolean(file));
+    if (targetFiles.length === 0) {
+      setTaskPlanNotice(`${task.id} has no reviewed file targets yet. Nothing was generated or written.`);
+      return;
+    }
+    const generatedPaths = new Set(builtFiles.map((file) => file.path));
+    const pendingFiles = targetFiles.filter((file) => !generatedPaths.has(file.path));
+    if (pendingFiles.length === 0) {
+      setTaskPlanNotice(`${task.id} already has in-memory drafts for all assigned file targets. Nothing was written.`);
+      return;
+    }
+    setActiveTaskId(task.id);
+    let generatedCount = 0;
+    try {
+      for (const file of pendingFiles) {
+        const generatedDraft = await generateFile(file.path, file.description, task);
+        if (!generatedDraft) break;
+        generatedCount += 1;
+      }
+      if (generatedCount > 0) setPhase("done");
+      setTaskPlanNotice(
+        generatedCount === pendingFiles.length
+          ? `Generated ${generatedCount} in-memory draft target${generatedCount === 1 ? "" : "s"} for ${task.id}. Nothing was written; use Editor review to apply.`
+          : `Generated ${generatedCount} of ${pendingFiles.length} pending draft target${pendingFiles.length === 1 ? "" : "s"} for ${task.id}. Review the reported error before continuing.`,
+      );
+    } finally {
+      setActiveTaskId(null);
+    }
+  }
+
   async function openSpecInEditorReview() {
     if (!plan) return;
     setStaging(true);
@@ -263,6 +332,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     setStageNotice("");
     setSpecNotice("");
     setSpecPreviewNotice("");
+    setTaskPlanNotice("");
     try {
       const content = buildSpecMarkdown(plan, brief);
       const opened = await onOpenFiles([
@@ -282,14 +352,14 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
 
   function reset() {
     setPhase("brief"); setBrief(""); setPlan(null); setRaw("");
-    setBuiltFiles([]); setError(""); setStageNotice(""); setSpecNotice(""); setSpecPreviewNotice("");
+    setBuiltFiles([]); setError(""); setStageNotice(""); setSpecNotice(""); setSpecPreviewNotice(""); setTaskPlanNotice(""); setActiveTaskId(null);
   }
 
   return (
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Agentic Project Builder"
-        subtitle="Phase 6Y · spec-first reviewed planning"
+        subtitle="Phase 8J · task DAG batches"
         badge={settings.autonomy === "auto" ? "Autonomous" : settings.autonomy === "suggest" ? "Suggest mode" : "Ask first"}
         badgeOk={settings.autonomy !== "ask"}
       />
@@ -416,7 +486,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                   </button>
                   <button
                     onClick={() => { void openSpecInEditorReview(); }}
-                    disabled={staging}
+                    disabled={staging || !!activeTaskId}
                     className="inline-flex items-center gap-1.5 rounded-lg border border-violet-400/40 bg-violet-400/10 px-3 py-1.5 text-xs font-semibold text-violet-100 hover:bg-violet-400/20 disabled:opacity-40"
                   >
                     {staging ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowRight className="h-3.5 w-3.5" />}
@@ -484,6 +554,102 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
               {specNotice && <div className="mt-3 text-[12px] text-emerald-300">{specNotice}</div>}
             </div>
 
+            {taskPlanPreview && (
+              <div className="mt-4 rounded-xl border border-cyan-500/20 bg-cyan-500/[0.05] p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <h3 className="flex items-center gap-2 text-sm font-semibold text-cyan-100">
+                      <ClipboardList className="h-4 w-4 text-cyan-300" />
+                      Task DAG implementation batches
+                    </h3>
+                    <p className="mt-1 max-w-2xl text-[12.5px] leading-relaxed text-cyan-100/70">
+                      Turn the approved plan into discrete sequential batches. Each batch only generates missing in-memory drafts for its assigned file targets; commands remain references, and workspace writes still require Editor reviewed apply.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => { void copyTaskPlanPreview(); }}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/20"
+                  >
+                    <Copy className="h-3.5 w-3.5" /> Copy task DAG preview
+                  </button>
+                </div>
+                <div className="mt-3 grid gap-2 text-[11.5px] sm:grid-cols-3">
+                  <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-cyan-100/65">
+                    <span className="block text-cyan-100">{taskPlanPreview.tasks.length} implementation batch{taskPlanPreview.tasks.length === 1 ? "" : "es"}</span>
+                    Sequential dependency chain
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-cyan-100/65">
+                    <span className="block text-cyan-100">{taskPlanPreview.generatedFileCount}/{taskPlanPreview.fileTargetCount} draft target{taskPlanPreview.fileTargetCount === 1 ? "" : "s"} generated</span>
+                    Renderer memory only
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-cyan-100/65">
+                    <span className="block text-cyan-100">{taskPlanPreview.pendingFileCount} pending draft target{taskPlanPreview.pendingFileCount === 1 ? "" : "s"}</span>
+                    Apply remains per-file review
+                  </div>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {taskPlanPreview.tasks.map((task) => {
+                    const generatingTask = activeTaskId === task.id;
+                    const canGenerateTask = !generating && !activeTaskId && task.pendingFileTargets.length > 0;
+                    return (
+                      <div key={task.id} className="rounded-lg border border-white/10 bg-black/15 p-3">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="rounded-md bg-cyan-400/10 px-2 py-0.5 font-mono text-[10.5px] font-semibold text-cyan-200 ring-1 ring-cyan-400/20">{task.id}</span>
+                              <span className="text-[12.5px] font-semibold text-cyan-50">{task.title}</span>
+                              <span className="rounded-full border border-white/10 px-2 py-0.5 text-[10.5px] text-cyan-100/60">{task.statusLabel}</span>
+                            </div>
+                            <p className="mt-1 text-[11.5px] leading-relaxed text-cyan-100/60">{task.detail}</p>
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                              {task.reviewedFileTargets.length > 0 ? task.reviewedFileTargets.map((targetPath) => {
+                                const isGenerated = task.generatedFileTargets.includes(targetPath);
+                                return (
+                                  <span
+                                    key={`${task.id}-${targetPath}`}
+                                    className={`rounded-md border px-2 py-0.5 font-mono text-[10.5px] ${isGenerated ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : "border-cyan-400/20 bg-cyan-400/10 text-cyan-200"}`}
+                                  >
+                                    {isGenerated ? "draft" : "pending"} · {targetPath}
+                                  </span>
+                                );
+                              }) : (
+                                <span className="rounded-md border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10.5px] text-cyan-100/45">No reviewed file target assigned yet</span>
+                              )}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => { void generateTaskFiles(task.id); }}
+                            disabled={!canGenerateTask}
+                            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/20 disabled:opacity-40"
+                          >
+                            {generatingTask ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+                            Generate missing drafts
+                          </button>
+                        </div>
+                        <details className="mt-2 text-[11px] text-cyan-100/60">
+                          <summary className="cursor-pointer select-none text-cyan-100/80">Acceptance and review gate</summary>
+                          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                            <div>
+                              <div className="text-[10px] font-semibold uppercase tracking-wide text-cyan-200/60">Acceptance</div>
+                              <ul className="mt-1 space-y-1">
+                                {task.acceptance.map((item) => <li key={`${task.id}-${item}`}>- {item}</li>)}
+                              </ul>
+                            </div>
+                            <div>
+                              <div className="text-[10px] font-semibold uppercase tracking-wide text-cyan-200/60">Review gate</div>
+                              <p className="mt-1">{task.reviewGate}</p>
+                              <p className="mt-1 text-cyan-100/45">Depends on: {task.dependsOn.length > 0 ? task.dependsOn.join(", ") : "none"}</p>
+                            </div>
+                          </div>
+                        </details>
+                      </div>
+                    );
+                  })}
+                </div>
+                {taskPlanNotice && <div className="mt-3 text-[12px] text-emerald-300">{taskPlanNotice}</div>}
+              </div>
+            )}
+
             {/* Steps */}
             <h3 className="mb-3 mt-8 text-sm font-semibold text-white">Execution plan</h3>
             <div className="relative space-y-4 pl-7">
@@ -515,7 +681,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
               <div className="flex gap-2">
                 <button
                   onClick={generateAll}
-                  disabled={!!generating}
+                  disabled={!!generating || !!activeTaskId}
                   className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:from-cyan-400 hover:to-blue-500 disabled:opacity-40"
                 >
                   {generating ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />}
@@ -524,7 +690,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                 {builtFiles.length > 0 && (
                   <button
                     onClick={openInEditorReview}
-                    disabled={staging}
+                    disabled={staging || !!activeTaskId}
                     className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-40"
                   >
                     {staging ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArrowRight className="h-3 w-3" />}
@@ -562,7 +728,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                     </div>
                     <button
                       onClick={() => generateFile(f.path, f.description)}
-                      disabled={!!generating}
+                      disabled={!!generating || !!activeTaskId}
                       className="shrink-0 rounded-md bg-white/5 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-white/10 disabled:opacity-40"
                     >
                       {built ? "Regenerate" : "Generate"}
@@ -609,6 +775,73 @@ interface SpecMetadataPreview {
   reviewGates: string[];
   taskSummaries: string[];
   exportText: string;
+}
+
+interface TaskPlanPreviewTask extends SpecTaskNode {
+  generatedFileTargets: string[];
+  pendingFileTargets: string[];
+  statusLabel: string;
+}
+
+interface TaskPlanPreview {
+  summary: string;
+  tasks: TaskPlanPreviewTask[];
+  fileTargetCount: number;
+  generatedFileCount: number;
+  pendingFileCount: number;
+  exportText: string;
+}
+
+function buildTaskPlanPreview(plan: BuilderPlan, builtFiles: VFile[]): TaskPlanPreview {
+  const boundedPlan = boundPlanForSpec(plan);
+  const generatedPaths = new Set(builtFiles.map((file) => file.path));
+  const taskDag = buildTaskDag(boundedPlan);
+  const tasks = taskDag.map((task) => {
+    const generatedFileTargets = task.reviewedFileTargets.filter((path) => generatedPaths.has(path));
+    const pendingFileTargets = task.reviewedFileTargets.filter((path) => !generatedPaths.has(path));
+    const statusLabel = task.reviewedFileTargets.length === 0
+      ? "no file target"
+      : pendingFileTargets.length === 0
+        ? "draft targets generated"
+        : `${pendingFileTargets.length} pending draft target${pendingFileTargets.length === 1 ? "" : "s"}`;
+    return { ...task, generatedFileTargets, pendingFileTargets, statusLabel };
+  });
+  const allTargets = new Set(tasks.flatMap((task) => task.reviewedFileTargets));
+  const generatedTargets = new Set(tasks.flatMap((task) => task.generatedFileTargets));
+  const fileTargetCount = allTargets.size;
+  const generatedFileCount = generatedTargets.size;
+  const pendingFileCount = Math.max(0, fileTargetCount - generatedFileCount);
+  const summary = `${tasks.length} task batch${tasks.length === 1 ? "" : "es"} · ${generatedFileCount}/${fileTargetCount} draft target${fileTargetCount === 1 ? "" : "s"} generated`;
+  const taskSections = tasks.flatMap((task) => [
+    `### ${task.id} — ${task.title}`,
+    `Depends on: ${task.dependsOn.length > 0 ? task.dependsOn.join(", ") : "none"}`,
+    `Status: ${task.statusLabel}`,
+    `Detail: ${task.detail}`,
+    `Draft targets: ${task.reviewedFileTargets.length > 0 ? task.reviewedFileTargets.map((target) => {
+      const state = task.generatedFileTargets.includes(target) ? "generated in memory" : "pending in-memory generation";
+      return `${target} (${state})`;
+    }).join(", ") : "none assigned"}`,
+    "Acceptance:",
+    ...task.acceptance.map((item) => `- ${item}`),
+    `Review gate: ${task.reviewGate}`,
+    "",
+  ]);
+  const exportText = [
+    "DevLab Builder task DAG implementation preview",
+    `Generated: ${new Date().toISOString()}`,
+    "Source: Project Builder approved plan metadata plus current in-memory draft generation status",
+    "Safety: preview-only renderer metadata; task generation creates in-memory drafts only, with no command execution, persistence or workspace write.",
+    "",
+    "## Summary",
+    `- ${summary}`,
+    "- Task dependencies are sequential and review-oriented.",
+    "- Setup commands remain manual references only.",
+    "- Workspace writes still require explicit Editor reviewed-draft apply per file.",
+    "",
+    "## Task batches",
+    ...taskSections,
+  ].join("\n");
+  return { summary, tasks, fileTargetCount, generatedFileCount, pendingFileCount, exportText };
 }
 
 function buildSpecMetadataPreview(plan: BuilderPlan, brief: string): SpecMetadataPreview {
