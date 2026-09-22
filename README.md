@@ -20,6 +20,71 @@ Database opens an existing SQLite file only through the native picker and only w
 
 PostgreSQL connectivity, schema inspection, bounded reads and separately confirmed writes are now native: DevLab opens a real process-memory session with a five-second per-address connection timeout, an explicit `verify-full` or `disable` TLS policy, server-enforced session timeouts, read-only-by-default configuration, and optional password storage in the operating-system credential store. A fixed Rust-owned catalog query returns genuine schema metadata. Every statement runs as exactly one parameter-free statement, and the server rather than a string parser classifies it: DevLab first attempts the statement inside a read-only transaction, where PostgreSQL rejects any mutation with SQLSTATE 25006 before it can change data. Reads return directly from that transaction, so a read is never executed twice. A mutation re-runs in a bounded write transaction only when writes are enabled for that in-memory session and the user confirms that exact statement. Accepted classes are `SELECT`, `WITH`, `VALUES`, `TABLE`, `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `CALL` and `REFRESH`; `CALL` and `MERGE` are accepted when they do not return a result set. Writes can be turned off again at any time, which sends `SET default_transaction_read_only = on` for the session. Time, row, column, cell and encoded-output bounds apply to reads and to `RETURNING` results alike, while statements without a result set report the server's real affected-row count. Identifiers, bound parameters and stacked statements remain rejected. Two statement classes are refused before they run when they would return a result set: PostgreSQL allows neither `CALL` nor `MERGE` inside a `FROM` sub-query or a `WITH` body, so DevLab has no way to apply its server-side cell bounds to their rows, and reports `postgres_result_set_unbounded` instead of running them with weaker bounds. Both work normally when they return no result set, which is the usual case. No sample server, schema or result is substituted. Native HTTP is also implemented: the API Client sends real `http://` and verified `https://` HTTP/1.1 requests from Rust instead of browser `fetch`, so browser CORS does not apply. The client accepts structured method, URL, header, body and timeout fields; rejects non-HTTP schemes, embedded URL credentials, raw spaces/control characters, hop-by-hop framing headers and unsupported methods; forces `Connection: close` and `Accept-Encoding: identity`; and bounds custom headers to 32 KiB, response headers to 64 KiB, request bodies to 2 MiB and response bodies to 5 MiB. Redirects are reported honestly with their status and `Location` header and are not followed automatically in this checkpoint. Native test execution is also implemented as the first Phase 6 slice: Rust discovers package.json test scripts, Cargo, Go and pytest profiles from the selected workspace, exposes only those backend-owned profile IDs to React, runs the chosen command without a shell, captures bounded output, and kills the process after 60 seconds. Phase 6B adds a reviewed repair-draft loop on top: after a real failing test run, the user chooses one existing workspace file, React reads it through the native workspace boundary, Gemini receives bounded test-output excerpts plus that file, and DevLab opens the complete patched file as an in-memory editor draft. Phase 6C adds an explicit reviewed-draft application button in the editor: new files are created only after the user clicks Apply, existing files are read first and overwritten only after a second confirmation with the native revision check. Phase 6D adds a bounded native in-memory audit trail for test runs and reviewed-draft writes; file contents and captured output are not stored in that log. Phase 6E enables the Project Builder as a permission-gated multi-file draft staging tool: generated files remain in memory, Rust validates bounded draft metadata before editor review, and writes still require the existing explicit reviewed-draft apply path. Phase 6F adds bounded reviewed-draft diff inspection in the editor before each explicit per-file apply click. Phase 6G routes generated drafts from Project Builder, Architecture Canvas, migrations, reverse engineering and self-healing repairs through the same native agent-tools staging/audit gate before editor review. Phase 6H lets the AI Agent surface explicitly labeled complete file blocks as reviewed drafts through that same staging path. Phase 6I lets the AI Agent attach bounded existing workspace files as read-only context through the native workspace read path; this context is memory-scoped and not included in localStorage recovery. Phase 6J records bounded metadata for those read-only context attachments in the native audit log without storing file contents. Phase 6K adds an explicit refresh action so attached context can be re-read through the native workspace boundary, re-bounded, re-audited and updated to latest revisions before the next prompt. Phase 6L replaces manual Agent context paths with a native workspace browser backed by bounded `workspace_list` and `workspace_read` calls. Phase 6M surfaces recent metadata-only Agent audit activity inside the Agent panel. Phase 6N adds Agent-side audit filtering and metadata search for context, draft staging and reviewed-write records. Phase 6O adds expandable metadata-only event details for those Agent audit records. Phase 6P batches the audit polish: shared metadata-only audit rendering across Agent and Self-Healing surfaces, refresh/count status and explicit copy of visible metadata summaries. Phase 6Q adds metadata-only AI Agent reviewed-draft manifests with file counts, sizes, languages and line counts before staging. Phase 6R adds metadata-only draft extraction diagnostics for ignored duplicate, unsafe or over-limit blocks. Phase 6S adds metadata-only reviewed-draft summaries in the Editor review gate with applied/pending counts and explicit copy support. Phase 6T adds explicit selected-draft recompare, comparison timestamps and apply-button guidance at the final review gate. Phase 6U adds a session-scoped applied-draft ledger with applied action, time, revision and size metadata in Editor summaries. Phase 6V adds read-only native toolchain detection through fixed bounded version probes without a shell. Deployment, CI, toolchain install/update management and autonomous patch application remain disabled. The normal Vite server remains available strictly as a UI preview.
 
+## Future phases and next-level roadmap
+
+The following roadmap items are proposed future phases. They are not advertised as current runtime capability until the native command, capability ACL, build manifest, renderer wrapper, UI, documentation and validation are all implemented. Existing safeguards still apply: secrets stay out of React state, file writes remain behind reviewed Editor apply, terminal/command execution requires explicit user action, and CI/deploy/toolchain install or update management remains disabled until a dedicated bounded backend exists.
+
+### Multi-provider BYOK and model routing
+
+- Add a provider-router layer for multiple bring-your-own-key models beyond Gemini, including DeepSeek V3/R1 and other compatible cloud endpoints.
+- Add local Ollama support for offline model execution, with explicit endpoint configuration, bounded timeouts, honest connection errors and no implicit network fallback.
+- Introduce task-aware model routing: reasoning models for architecture/spec work, fast code models for implementation drafts, and lightweight models for diagnostic repair loops, with pricing-aware usage metadata instead of hard-coded cost assumptions.
+- Keep provider credentials scoped to the existing secret-handling policy: API keys and tokens must not be logged, stored in generated files, included in recovery snapshots or returned by native commands.
+
+### Repository-wide context engine
+
+- Build a Rust-side Tree-Sitter repository map that extracts imports, exports, classes, types, symbols and function signatures across the selected workspace.
+- Generate compact token-bounded code maps, roughly 1,000-2,000 tokens, so Agent context can use structural understanding instead of raw full-file attachment when appropriate.
+- Add a repo-importance layer, such as dependency graph ranking or PageRank, to prioritize central modules and reduce prompt noise.
+- Add local hybrid search over the workspace using lexical search plus locally stored semantic embeddings, with an embedded store such as SQLite VSS or LanceDB when the privacy and storage model is defined.
+- Keep indexing scoped to the selected workspace, reject symlink/path traversal, bound file count/bytes, and make index refresh explicit and auditable.
+
+### Spec-driven planning and task decomposition
+
+- Add a spec-first workflow for complex features where the Architect Agent drafts a `spec.md` before implementation.
+- Include architecture breakdown, data flow, API contracts, database changes, changed-file plan, risk notes and out-of-scope boundaries.
+- Convert approved specs into an ordered task DAG so work can proceed as discrete sub-tasks instead of one large prompt.
+- Route each sub-task through reviewed-draft staging and preserve the invariant that workspace writes happen only after explicit Editor review/apply.
+- Track task status and hand off bounded diffs/metadata between steps so context remains focused as the codebase changes.
+
+### Closed-loop verification and self-healing
+
+- Extend the current native test runner into a bounded closed-loop verification system for generated drafts.
+- Detect available project checks from trusted profiles such as `tsc --noEmit`, `cargo check`, `biome check`, `eslint`, `pytest`, Go tests or package-manager scripts.
+- Run verification only through backend-owned profiles with explicit bounds, timeout/kill behavior and captured-output limits.
+- Feed diagnostics and targeted source context back into a repair loop for a small bounded number of attempts, for example up to three repair iterations.
+- Surface final drafts, diagnostic metadata and any unresolved failures to the user before reviewed Editor apply rather than silently writing changes.
+
+### Inline Monaco diff and patch review UX
+
+- Replace or augment the current reviewed-draft diff drawer with Monaco's native `monaco.editor.createDiffEditor` inside the active review tab.
+- Support side-by-side file comparison, inline decorations, line-level navigation and per-file apply state directly where the developer is reviewing code.
+- Preserve the existing reviewed-draft apply path, native revision checks, recompare guidance and applied-draft ledger.
+- Keep generated content in memory until explicit apply; do not introduce automatic patch writes.
+
+### Modern UI and architecture guardrails
+
+- Add design-system prompt injection for frontend generation: modern Tailwind CSS, subtle elevation/glass effects, Lucide iconography, Framer Motion micro-interactions and mobile-first responsive layouts.
+- Provide production-grade starter blueprints such as Next.js App Router, Vite + React + Tailwind, Rust Axum/Actix and full-stack API templates.
+- Add Component-driven scaffolding rules with small single-responsibility files, strict TypeScript interfaces, custom hooks and clean state-management patterns such as TanStack Query or Zustand where appropriate.
+- Include style-guide and quality defaults: strict TypeScript, Biome or ESLint/Prettier configs, sensible test setup, accessibility checks and conventional project structure.
+
+### Enterprise agent architecture
+
+- Add a durable Agent run model with explicit phases: plan, approve, execute draft, verify, repair, review and apply.
+- Support larger enterprise repositories through repo maps, hybrid search, task DAGs, scoped memory and metadata-only audit trails.
+- Add policy packs for teams: allowed file patterns, forbidden actions, required checks, branch/PR naming, dependency rules and review gates.
+- Add PR/branch orchestration only after GitHub/GitLab operations, CI status reads and write actions are bounded, audited and confirmation-gated.
+
+### Additional future upgrades
+
+- Add local model health checks for Ollama and other local inference servers, including model availability, context window metadata and honest offline errors.
+- Add dependency vulnerability and license scanning as read-only metadata first, then gate any remediation drafts behind reviewed Editor apply.
+- Add database migration safety planning: dry-run SQL, rollback notes, lock-risk warnings and environment separation before any migration draft is staged.
+- Add workspace architecture diagrams generated from the Tree-Sitter repo map and dependency graph.
+- Add benchmark and performance profiling profiles for projects that opt into them through explicit backend-owned commands.
+- Add extension/plugin APIs only after a strict permission model exists for commands, filesystem access, secrets, network access and UI contribution points.
+
 ## Current working features
 
 - Streaming Gemini chat
