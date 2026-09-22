@@ -6,10 +6,11 @@ import { loadSettings } from "../lib/settings";
 import { projectTemplates } from "../data/templates";
 import { testRunnerSnapshot, type TestRunnerSnapshot } from "../lib/testRunner";
 import { recommendVerificationProfiles, type VerificationProfileRecommendation } from "../lib/verificationGuidance";
+import { buildTaskTimelineSummary, TIMELINE_PHASES, type TimelinePhaseState } from "../lib/taskTimeline";
 import type { BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, OpenGeneratedDrafts, ReviewedDraftApplyOutcome, VerificationHandoffRequest, VerificationRunOutcome, VFile } from "../types";
 import {
   Wand2, Loader2, CheckCircle2, FileCode2, TerminalSquare,
-  Sparkles, RotateCcw, FolderPlus, ArrowRight, ClipboardList, Copy, ListChecks, ShieldCheck, RefreshCw, Play,
+  Sparkles, RotateCcw, FolderPlus, ArrowRight, ClipboardList, Copy, ListChecks, ShieldCheck, RefreshCw, Play, History,
 } from "lucide-react";
 
 const MAX_PLAN_FILES = 12;
@@ -97,6 +98,7 @@ export function BuilderPanel({
   onOpenVerification,
   onRequestVerification,
   verificationOutcomes,
+  handoffHistory = [],
 }: {
   onNeedKey: () => void;
   onOpenFiles: OpenGeneratedDrafts;
@@ -128,12 +130,14 @@ export function BuilderPanel({
   onOpenVerification: () => void;
   onRequestVerification: (request: VerificationHandoffRequest) => void;
   verificationOutcomes: VerificationRunOutcome[];
+  handoffHistory?: VerificationHandoffRequest[];
 }) {
   const outRef = useRef<HTMLDivElement>(null);
   const [specNotice, setSpecNotice] = useState("");
   const [specPreviewNotice, setSpecPreviewNotice] = useState("");
   const [taskPlanNotice, setTaskPlanNotice] = useState("");
   const [taskHandoffNotice, setTaskHandoffNotice] = useState("");
+  const [timelineNotice, setTimelineNotice] = useState("");
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [stagingTaskId, setStagingTaskId] = useState<string | null>(null);
   const [taskStagingNotice, setTaskStagingNotice] = useState("");
@@ -147,6 +151,16 @@ export function BuilderPanel({
   const taskApplyProgress = taskPlanPreview ? buildTaskApplyProgress(taskPlanPreview, builtFiles, applyOutcomes) : null;
   const taskHandoffPreview = taskPlanPreview && plan ? buildTaskHandoffPreview(taskPlanPreview, builtFiles, plan.summary, taskStagingLedger, taskApplyProgress ?? undefined) : null;
   const taskStagingLedgerPreview = buildTaskStagingLedgerPreview(taskStagingLedger);
+  const taskTimeline = taskPlanPreview
+    ? buildTaskTimelineSummary({
+      tasks: taskPlanPreview.tasks.map((task) => ({ id: task.id, title: task.title, dependsOn: task.dependsOn, reviewedFileTargets: task.reviewedFileTargets })),
+      draftPaths: builtFiles.map((file) => ({ path: file.path, bytes: textBytes(file.content) })),
+      stagingLedger: taskStagingLedger,
+      applyOutcomes,
+      runOutcomes: verificationOutcomes,
+      handoffHistory,
+    })
+    : null;
   const verificationHandoff = taskPlanPreview && taskApplyProgress
     ? buildTaskVerificationHandoff(taskPlanPreview, taskApplyProgress, applyOutcomes, verificationSnapshot, verificationUnavailable, verificationOutcomes)
     : null;
@@ -485,6 +499,22 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     });
   }
 
+  async function copyTaskTimeline() {
+    if (!taskTimeline) return;
+    setError("");
+    setTimelineNotice("");
+    if (!navigator.clipboard?.writeText) {
+      setError("Clipboard access is unavailable in this environment. Nothing was copied.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(taskTimeline.exportText);
+      setTimelineNotice(`Copied metadata-only run timeline for ${taskTimeline.tasks.length} task${taskTimeline.tasks.length === 1 ? "" : "s"}. Nothing was executed or written.`);
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
   async function copyVerificationHandoff() {
     if (!verificationHandoff) return;
     setError("");
@@ -557,7 +587,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Agentic Project Builder"
-        subtitle="Phase 8R · draft path policy"
+        subtitle="Phase 8Q · task run timeline"
         badge={settings.autonomy === "auto" ? "Autonomous" : settings.autonomy === "suggest" ? "Suggest mode" : "Ask first"}
         badgeOk={settings.autonomy !== "ask"}
       />
@@ -1077,6 +1107,61 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                       </ul>
                     )}
                     {verificationNotice && <div className="mt-2 text-[12px] text-emerald-300">{verificationNotice}</div>}
+                  </details>
+                )}
+
+                {taskTimeline && (
+                  <details className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/[0.04] p-3 text-[11.5px] text-sky-100/70">
+                    <summary className="flex cursor-pointer select-none flex-wrap items-center justify-between gap-2 text-sky-100">
+                      <span className="inline-flex items-center gap-2 font-semibold">
+                        <History className="h-3.5 w-3.5 text-sky-300" />
+                        Task run timeline · {taskTimeline.summary}
+                      </span>
+                      <span className="text-[10.5px] text-sky-100/50">Session-only view of plan → draft → stage → apply → verify → repair</span>
+                    </summary>
+                    <p className="mt-2 leading-relaxed text-sky-100/60">
+                      Derived from metadata already in this session: the task DAG, in-memory draft paths, the staging ledger, Editor apply outcomes and Self-Healing Tests run outcomes. It reads no files, runs nothing and is not saved to recovery snapshots. A "verified" phase means the last real run passed for the current applied state; a later apply or draft change marks it superseded.
+                    </p>
+                    <ul className="mt-2 space-y-1.5">
+                      {taskTimeline.tasks.map((task) => (
+                        <li key={task.taskId} className="rounded-md border border-white/10 bg-black/15 px-2.5 py-1.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="rounded-md bg-sky-400/10 px-2 py-0.5 font-mono text-[10.5px] font-semibold text-sky-200 ring-1 ring-sky-400/20">{task.taskId}</span>
+                            <span className="font-semibold text-sky-50">{task.title}</span>
+                            <span className="text-sky-100/50">current: {task.currentPhase} · {task.loopIterations} apply→run iteration{task.loopIterations === 1 ? "" : "s"}</span>
+                          </div>
+                          <ol className="mt-1.5 flex flex-wrap items-center gap-1">
+                            {task.phases.map((phase, index) => (
+                              <li key={phase.id} className="inline-flex items-center gap-1" title={phase.detail}>
+                                <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${timelinePhaseClass(phase.state, phase.id === task.currentPhase)}`}>{phase.label}: {phase.state}</span>
+                                {index < TIMELINE_PHASES.length - 1 && <span className="text-sky-100/30">→</span>}
+                              </li>
+                            ))}
+                          </ol>
+                          <div className="mt-1 text-[10.5px] text-sky-100/55">{task.nextAction}</div>
+                          {task.events.length > 0 && (
+                            <details className="mt-1">
+                              <summary className="cursor-pointer select-none text-[10.5px] text-sky-100/50">{task.events.length} event{task.events.length === 1 ? "" : "s"}</summary>
+                              <ul className="mt-1 space-y-0.5 font-mono text-[10px] text-sky-100/55">
+                                {task.events.map((event, index) => (
+                                  <li key={`${event.atMs}-${index}`}>{formatStagingTime(event.atMs)} [{event.phase}] {event.label}</li>
+                                ))}
+                              </ul>
+                            </details>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={() => { void copyTaskTimeline(); }}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-sky-400/30 bg-sky-400/10 px-3 py-1.5 text-xs font-semibold text-sky-100 hover:bg-sky-400/20"
+                      >
+                        <Copy className="h-3.5 w-3.5" /> Copy loop summary
+                      </button>
+                      <span className="text-[10.5px] text-sky-100/50">Metadata only; no contents, diffs or captured output are included.</span>
+                    </div>
+                    {timelineNotice && <div className="mt-2 text-[12px] text-emerald-300">{timelineNotice}</div>}
                   </details>
                 )}
               </div>
@@ -1681,6 +1766,18 @@ function buildTaskStagingLedgerPreview(records: BuilderTaskStagingRecord[]): Tas
       : ["- None staged in this session."]),
   ].join("\n");
   return { summary, stagedTaskCount, stagedFileCount, totalBytes, exportText };
+}
+
+function timelinePhaseClass(state: TimelinePhaseState, current: boolean): string {
+  const ring = current ? " ring-1 ring-sky-300/60" : "";
+  switch (state) {
+    case "done": return `bg-emerald-400/15 text-emerald-200${ring}`;
+    case "partial": return `bg-amber-400/15 text-amber-200${ring}`;
+    case "stale": return `bg-orange-400/15 text-orange-200${ring}`;
+    case "failed": return `bg-rose-400/15 text-rose-200${ring}`;
+    case "pending": return `bg-white/5 text-zinc-300${ring}`;
+    default: return `bg-white/5 text-zinc-500${ring}`;
+  }
 }
 
 function formatStagingTime(ms: number) {

@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { evaluateDrafts, loadDraftPolicy } from "./lib/draftPolicy";
+import { MAX_HANDOFF_HISTORY } from "./lib/taskTimeline";
 import type { AgentContextFile, BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, ChatMessage, DraftPolicyGateSummary, OpenGeneratedDrafts, ReviewedDraftApplyOutcome, VerificationHandoffRequest, VerificationRunOutcome, VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import { loadDeploy, loadGit, loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
@@ -130,6 +131,8 @@ export default function App() {
   // (Self-Healing Tests -> Builder). Neither is persisted; outcomes never contain captured output.
   const [verificationHandoffRequest, setVerificationHandoffRequest] = useState<VerificationHandoffRequest | null>(null);
   const [verificationRunOutcomes, setVerificationRunOutcomes] = useState<VerificationRunOutcome[]>([]);
+  // Session-only history of handoff requests (metadata only) so the Builder task timeline can show them.
+  const [verificationHandoffHistory, setVerificationHandoffHistory] = useState<VerificationHandoffRequest[]>([]);
   // Session-only, path-only record of the most recent draft policy evaluation at the staging gate.
   const [lastDraftPolicyEvaluation, setLastDraftPolicyEvaluation] = useState<DraftPolicyGateSummary | null>(null);
   const [pendingRecovery, setPendingRecovery] = useState<SessionRecoverySnapshot | null>(() => loadSessionRecovery());
@@ -246,6 +249,7 @@ export default function App() {
     setReviewedDraftApplyOutcomes([]);
     setVerificationHandoffRequest(null);
     setVerificationRunOutcomes([]);
+    setVerificationHandoffHistory([]);
     setLastDraftPolicyEvaluation(null);
     setGeneratedDrafts([]);
   }
@@ -256,6 +260,7 @@ export default function App() {
 
   function requestVerificationHandoff(request: VerificationHandoffRequest) {
     setVerificationHandoffRequest(request);
+    setVerificationHandoffHistory((current) => [request, ...current].slice(0, MAX_HANDOFF_HISTORY));
     navigate("healer");
   }
 
@@ -403,6 +408,7 @@ export default function App() {
             onOpenVerification={() => navigate("healer")}
             onRequestVerification={requestVerificationHandoff}
             verificationOutcomes={verificationRunOutcomes}
+            handoffHistory={verificationHandoffHistory}
           />
         </Suspense>
         : nativeFeature(
@@ -596,7 +602,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 8R draft path policy</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 8Q task run timeline</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}
