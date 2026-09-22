@@ -682,6 +682,11 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                 )}
               </Card>
 
+              <Card title="Streaming replies (native adapters)" desc="Phase 9F. Ollama, DeepSeek, OpenAI, Anthropic and custom endpoints can stream text deltas through a Rust-owned channel; the WebView never opens the upstream connection. Gemini streams as before.">
+                <Row label="Stream native replies incrementally" desc="Off = one bounded, non-streamed reply per request. Either way the same host policy, credential handling, 120 s bound and reply-size cap apply, and a Stop button cancels at the next line."
+                  on={s.streamReplies} onChange={(v) => update({ streamReplies: v })} />
+              </Card>
+
               <Card title="Task-aware model router" desc="Routes are explicit metadata today. Auto mode can bias Gemini fallback candidates by task; every native adapter (Ollama, DeepSeek, OpenAI, Anthropic, custom endpoint) is desktop-only and never falls back to Gemini.">
                 <div className="mb-3 grid gap-2 sm:grid-cols-2">
                   {([

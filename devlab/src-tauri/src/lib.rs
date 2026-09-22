@@ -1,5 +1,6 @@
 mod agent_tools;
 mod ai_providers;
+mod ai_stream;
 mod audit;
 mod credentials;
 mod custom_endpoint;
@@ -16,7 +17,9 @@ mod toolchain;
 mod workspace;
 
 use agent_tools::{agent_tools_record_context, agent_tools_record_draft};
-use ai_providers::{ai_credential_delete, ai_credential_status, ai_credential_store, ai_provider_chat};
+use ai_providers::{
+    ai_credential_delete, ai_credential_status, ai_credential_store, ai_provider_chat, ai_provider_chat_stream,
+};
 use audit::{agent_audit_list, AgentAuditService};
 use credentials::{git_credential_delete, git_credential_status, git_credential_store};
 use database::{
@@ -32,7 +35,7 @@ use git::{
     git_stage_all, git_stage_paths, git_unstage_all, git_unstage_paths,
 };
 use http::http_request;
-use ollama::{ollama_chat, ollama_list_models};
+use ollama::{ollama_chat, ollama_chat_stream, ollama_list_models};
 use postgres::{
     database_postgres_connect, database_postgres_connections, database_postgres_disconnect,
     database_postgres_execute, database_postgres_forget_password, database_postgres_query,
@@ -44,8 +47,9 @@ use search_index::{
 };
 use custom_endpoint::{
     custom_credential_delete, custom_credential_status, custom_credential_store, custom_endpoint_chat,
-    custom_endpoint_validate,
+    custom_endpoint_chat_stream, custom_endpoint_validate,
 };
+use ai_stream::{ai_stream_cancel, StreamRegistry};
 use serde::Serialize;
 use terminal::{
     terminal_clear, terminal_close, terminal_create, terminal_kill, terminal_list,
@@ -97,6 +101,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
             "search-index",
             "semantic-search",
             "custom-endpoint",
+            "ai-streaming",
         ],
     }
 }
@@ -110,6 +115,7 @@ pub fn run() {
         .manage(DatabaseService::default())
         .manage(PostgresService::default())
         .manage(SearchIndexService::default())
+        .manage(std::sync::Arc::new(StreamRegistry::default()))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -197,6 +203,10 @@ pub fn run() {
             custom_credential_store,
             custom_credential_delete,
             custom_endpoint_chat,
+            ollama_chat_stream,
+            ai_provider_chat_stream,
+            custom_endpoint_chat_stream,
+            ai_stream_cancel,
             test_runner_snapshot,
             test_runner_run,
             toolchain_snapshot,

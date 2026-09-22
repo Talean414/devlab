@@ -7,6 +7,7 @@ import { loadSettings } from "./settings";
 import { ollamaChat } from "./ollama";
 import { aiProviderChat, credentialKnownConfigured, isCloudAiProvider } from "./aiProviders";
 import { customEndpointChat } from "./customEndpoint";
+import { streamNativeReply, streamingAvailable, type StreamTarget } from "./aiStream";
 import {
   generationGuardrailInstruction,
   resolveAiRoute,
@@ -256,6 +257,15 @@ interface StreamChatOptions {
   maxOutputTokens?: number;
   temperature?: number;
   task?: AiTaskKind;
+  /** Aborting asks the native adapter to stop the reply at the next line boundary. */
+  signal?: AbortSignal;
+}
+
+function nativeStreamTarget(provider: string, settings: ReturnType<typeof loadSettings>): StreamTarget | null {
+  if (provider === "ollama") return { kind: "ollama", endpoint: settings.customEndpoint };
+  if (provider === "custom") return { kind: "custom", endpoint: settings.customEndpoint };
+  if (isCloudAiProvider(provider)) return { kind: "cloud", provider };
+  return null;
 }
 
 export async function* streamChat(
@@ -282,6 +292,24 @@ export async function* streamChat(
   ].filter(Boolean).join("\n\n");
   const temperature = clamp(options.temperature ?? settings.temperature, 0, 2);
   const maxOutputTokens = Math.round(clamp(options.maxOutputTokens ?? settings.maxTokens, 256, 16_384));
+
+  const nativeTarget = nativeStreamTarget(route.provider, settings);
+  if (nativeTarget && streamingAvailable() && settings.streamReplies) {
+    // Phase 9F: incremental deltas through a Tauri channel. Same adapter policy and bounds as the
+    // non-streamed commands; no Gemini fallback, no retries, cancellation via the signal.
+    const reply = yield* streamNativeReply({
+      target: nativeTarget,
+      model: route.model,
+      system: systemText,
+      messages: limitHistory(history),
+      temperature,
+      maxOutputTokens,
+      signal: options.signal,
+    });
+    if (reply.summary.textTruncated) yield "\n\n… reply truncated at DevLab's response bound.";
+    if (reply.summary.cancelled) yield "\n\n[stopped]";
+    return;
+  }
 
   if (route.provider === "ollama") {
     // Native loopback adapter: one bounded, non-streamed completion from Rust. No Gemini key,

@@ -27,6 +27,10 @@ use crate::ai_providers::{
     validate_key, validate_messages, validate_model, validate_system, AiMessage, GENERATE_TIMEOUT_SECS,
     KEYRING_SERVICE, MAX_REPLY_CHARS,
 };
+use std::sync::Arc;
+use tauri::ipc::Channel;
+
+use crate::ai_stream::{begin_stream, run_stream, StreamEvent, StreamProtocol, StreamRegistry, StreamResult, StreamedReply};
 use crate::http::{blocking, parse_url, send_request_with_timeout, HttpHeader, HttpRequest};
 use crate::ollama::is_loopback_host;
 use crate::workspace::CommandError;
@@ -192,18 +196,34 @@ pub(crate) fn build_body(
     temperature: f64,
     max_output_tokens: u64,
 ) -> Value {
+    build_body_with_stream(model, system, messages, temperature, max_output_tokens, false)
+}
+
+pub(crate) fn build_body_with_stream(
+    model: &str,
+    system: Option<&str>,
+    messages: &[(&'static str, String)],
+    temperature: f64,
+    max_output_tokens: u64,
+    stream: bool,
+) -> Value {
     let mut chat = Vec::with_capacity(messages.len() + 1);
     if let Some(system) = system {
         chat.push(json!({ "role": "system", "content": system }));
     }
     chat.extend(messages.iter().map(|(role, content)| json!({ "role": role, "content": content })));
-    json!({
+    let mut body = json!({
         "model": model,
         "messages": chat,
         "temperature": temperature,
         "max_tokens": max_output_tokens,
-        "stream": false,
-    })
+        "stream": stream,
+    });
+    if stream {
+        // Widely supported by vLLM/LiteLLM/LM Studio; servers that ignore it simply omit usage.
+        body["stream_options"] = json!({ "include_usage": true });
+    }
+    body
 }
 
 fn request_headers(token: Option<&str>) -> Vec<HttpHeader> {
@@ -302,8 +322,15 @@ fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
-fn chat(request: CustomChatRequest) -> Result<CustomChatResponse, CommandError> {
-    let started = Instant::now();
+struct PreparedChat {
+    profile: EndpointProfile,
+    model: String,
+    authenticated: bool,
+    http: HttpRequest,
+}
+
+/// Validates the endpoint/prompt, loads the profile-scoped token and builds the HTTP request.
+fn prepare_chat(request: &CustomChatRequest, stream: bool) -> Result<PreparedChat, CommandError> {
     let profile = validate_endpoint(&request.endpoint)?;
     let model = validate_model(&request.model)?;
     let system = validate_system(&request.system)?;
@@ -324,19 +351,23 @@ fn chat(request: CustomChatRequest) -> Result<CustomChatResponse, CommandError> 
         ));
     }
 
-    let body = build_body(&model, system.as_deref(), &messages, temperature, max_output_tokens);
-    let response = send_request_with_timeout(
-        HttpRequest {
-            method: "POST".to_string(),
-            url: profile.chat_url.clone(),
-            headers: request_headers(token.as_ref().map(|t| t.as_str())),
-            body: body.to_string(),
-            timeout_secs: None,
-        },
-        Duration::from_secs(GENERATE_TIMEOUT_SECS),
-    )
-    .map_err(|error| transport_error(&profile, error))?;
+    let body = build_body_with_stream(&model, system.as_deref(), &messages, temperature, max_output_tokens, stream);
+    let http = HttpRequest {
+        method: "POST".to_string(),
+        url: profile.chat_url.clone(),
+        headers: request_headers(token.as_ref().map(|t| t.as_str())),
+        body: body.to_string(),
+        timeout_secs: None,
+    };
     drop(token);
+    Ok(PreparedChat { profile, model, authenticated, http })
+}
+
+fn chat(request: CustomChatRequest) -> Result<CustomChatResponse, CommandError> {
+    let started = Instant::now();
+    let PreparedChat { profile, model, authenticated, http } = prepare_chat(&request, false)?;
+    let response = send_request_with_timeout(http, Duration::from_secs(GENERATE_TIMEOUT_SECS))
+        .map_err(|error| transport_error(&profile, error))?;
 
     let parsed = parse_json_body(&profile, &response.body, response.body_truncated)?;
     if !(200..300).contains(&response.status) {
@@ -408,6 +439,38 @@ pub async fn custom_credential_delete(endpoint: String) -> Result<CustomCredenti
 #[tauri::command]
 pub async fn custom_endpoint_chat(request: CustomChatRequest) -> Result<CustomChatResponse, CommandError> {
     blocking(move || chat(request)).await
+}
+
+/// Streamed variant (OpenAI SSE). Same host policy, token scoping and bounds as the non-streamed command.
+#[tauri::command]
+pub async fn custom_endpoint_chat_stream(
+    request: CustomChatRequest,
+    stream_id: String,
+    channel: Channel<StreamEvent>,
+    registry: tauri::State<'_, Arc<StreamRegistry>>,
+) -> Result<StreamedReply, CommandError> {
+    let registry = registry.inner().clone();
+    blocking(move || {
+        let handle = begin_stream(&registry, &stream_id)?;
+        let PreparedChat { profile, model, http, .. } = prepare_chat(&request, true)?;
+        let result = run_stream(
+            http,
+            Duration::from_secs(GENERATE_TIMEOUT_SECS),
+            StreamProtocol::OpenAiSse,
+            MAX_REPLY_CHARS,
+            handle.flag(),
+            &channel,
+        )
+        .map_err(|error| transport_error(&profile, error))?;
+        match result {
+            StreamResult::Completed(summary) => Ok(StreamedReply { target: profile.id, model, summary }),
+            StreamResult::HttpError(error) => {
+                let body = parse_json_body(&profile, &error.body, error.body_truncated).unwrap_or(Value::Null);
+                Err(http_status_error(&profile, error.status, &error.status_text, &body))
+            }
+        }
+    })
+    .await
 }
 
 #[cfg(test)]

@@ -81,6 +81,10 @@
     "allow-custom-credential-store",
     "allow-custom-credential-delete",
     "allow-custom-endpoint-chat",
+    "allow-ollama-chat-stream",
+    "allow-ai-provider-chat-stream",
+    "allow-custom-endpoint-chat-stream",
+    "allow-ai-stream-cancel",
     "allow-test-runner-snapshot",
     "allow-test-runner-run",
     "allow-toolchain-snapshot"

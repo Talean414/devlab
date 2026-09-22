@@ -54,6 +54,8 @@ export interface DevLabSettings {
   ollamaModel: string;
   /** Local embedding model used by semantic workspace search (Ollama, loopback only). */
   ollamaEmbedModel: string;
+  /** Stream native adapter replies incrementally (Ollama, cloud providers, custom endpoint). */
+  streamReplies: boolean;
   customModel: string;
   customEndpoint: string;
   temperature: number;
@@ -105,6 +107,7 @@ export const DEFAULT_SETTINGS: DevLabSettings = {
   anthropicModel: "claude-sonnet-4-5",
   ollamaModel: "llama3.1",
   ollamaEmbedModel: "nomic-embed-text",
+  streamReplies: true,
   customModel: "",
   customEndpoint: "",
   temperature: 0.7,

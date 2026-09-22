@@ -21,6 +21,8 @@ const MIN_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
 const MAX_TIMEOUT_SECS: u64 = 30;
 const PER_ADDRESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_STREAM_LINE_BYTES: usize = 256 * 1024;
+const MAX_STREAM_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 trait ReadWrite: Read + Write {}
 impl<T: Read + Write> ReadWrite for T {}
@@ -822,6 +824,212 @@ pub(crate) fn send_request_with_timeout(
     })
 }
 
+/// Outcome of a streaming request. Non-2xx responses are fully buffered (bounded) so callers can
+/// reuse their normal error mapping; 2xx bodies are delivered line by line to `on_line` and never
+/// buffered as a whole.
+pub(crate) struct StreamOutcome {
+    pub(crate) status: u16,
+    pub(crate) status_text: String,
+    pub(crate) error_body: String,
+    pub(crate) error_body_truncated: bool,
+    pub(crate) lines_delivered: usize,
+    pub(crate) bytes_received: usize,
+    pub(crate) stopped_by_callback: bool,
+    pub(crate) truncated: bool,
+}
+
+/// Incrementally reads a response body (chunked or identity) and hands each line, without its
+/// line terminator, to `on_line`. Returning `false` from the callback stops the read early (the
+/// connection is dropped; `Connection: close` is always sent). Lines longer than
+/// `MAX_STREAM_LINE_BYTES` or bodies over `MAX_STREAM_BODY_BYTES` end the stream as truncated.
+pub(crate) fn send_request_streaming<F>(
+    request: HttpRequest,
+    timeout: Duration,
+    mut on_line: F,
+) -> Result<StreamOutcome, CommandError>
+where
+    F: FnMut(&str) -> bool,
+{
+    let method = validate_method(&request.method)?;
+    let url = parse_url(&request.url)?;
+    let headers = validate_headers(&request.headers)?;
+    let body = request.body.into_bytes();
+    if body.len() > MAX_REQUEST_BODY_BYTES {
+        return Err(CommandError::new(
+            "http_request_body_too_large",
+            "HTTP request bodies are limited to 2 MiB in this checkpoint.",
+        ));
+    }
+    let raw_request = build_request(&method, &url, &headers, &body)?;
+    let mut stream = connect_stream(&url, timeout)?;
+    stream
+        .write_all(&raw_request)
+        .and_then(|_| stream.flush())
+        .map_err(|error| http_io_error("send the HTTP request", error))?;
+
+    let (head, initial_body) = read_response_head(&mut *stream)?;
+    if !(200..300).contains(&head.status) {
+        let (body_bytes, truncated) = read_body(&mut *stream, initial_body, &method, &head)?;
+        let (text, _) = render_body(&body_bytes, &head.headers, truncated);
+        return Ok(StreamOutcome {
+            status: head.status,
+            status_text: head.status_text,
+            error_body: text,
+            error_body_truncated: truncated,
+            lines_delivered: 0,
+            bytes_received: body_bytes.len(),
+            stopped_by_callback: false,
+            truncated,
+        });
+    }
+
+    let chunked = header_value(&head.headers, "Transfer-Encoding")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .split(',')
+        .map(|value| value.trim())
+        .any(|value| value == "chunked");
+    let mut reader = BodyReader::new(&mut *stream, initial_body);
+    let mut splitter = LineSplitter::default();
+    let mut outcome = StreamOutcome {
+        status: head.status,
+        status_text: head.status_text,
+        error_body: String::new(),
+        error_body_truncated: false,
+        lines_delivered: 0,
+        bytes_received: 0,
+        stopped_by_callback: false,
+        truncated: false,
+    };
+
+    if chunked {
+        loop {
+            let line = reader.read_line(1024)?;
+            let line = str::from_utf8(&line).map_err(|_| {
+                CommandError::new("http_protocol_error", "A chunk-size line was not valid UTF-8.")
+            })?;
+            let size_text = line.split(';').next().unwrap_or_default().trim();
+            let size = usize::from_str_radix(size_text, 16).map_err(|_| {
+                CommandError::new("http_protocol_error", "The response contained an invalid chunk size.")
+            })?;
+            if size == 0 {
+                break;
+            }
+            // Read the chunk in bounded pieces so large chunks still stream.
+            let mut remaining = size;
+            while remaining > 0 {
+                let piece = reader.take_exact(remaining.min(16 * 1024))?;
+                remaining -= piece.len();
+                if !deliver_stream_piece(&piece, &mut outcome, &mut splitter, &mut on_line)? {
+                    return Ok(outcome);
+                }
+            }
+            let delimiter = reader.take_exact(2)?;
+            if delimiter.as_slice() != b"\r\n" && delimiter.as_slice() != b"\n\n" {
+                return Err(CommandError::new(
+                    "http_protocol_error",
+                    "A chunk was not followed by the required line break.",
+                ));
+            }
+        }
+    } else {
+        let content_length = header_value(&head.headers, "Content-Length")
+            .and_then(|value| value.trim().parse::<usize>().ok());
+        let mut consumed = 0usize;
+        loop {
+            if let Some(length) = content_length {
+                if consumed >= length {
+                    break;
+                }
+            }
+            if reader.buffer.is_empty() && reader.read_more()? == 0 {
+                break;
+            }
+            let take = match content_length {
+                Some(length) => reader.buffer.len().min(length - consumed),
+                None => reader.buffer.len(),
+            };
+            let piece = reader.buffer.drain(..take).collect::<Vec<u8>>();
+            consumed += piece.len();
+            if !deliver_stream_piece(&piece, &mut outcome, &mut splitter, &mut on_line)? {
+                return Ok(outcome);
+            }
+        }
+    }
+    if let Some(last) = splitter.finish() {
+        outcome.lines_delivered += 1;
+        if !on_line(&last) {
+            outcome.stopped_by_callback = true;
+        }
+    }
+    Ok(outcome)
+}
+
+/// Feeds a payload slice through the line splitter; returns `Ok(false)` when the stream must stop.
+fn deliver_stream_piece<F>(
+    payload: &[u8],
+    outcome: &mut StreamOutcome,
+    splitter: &mut LineSplitter,
+    on_line: &mut F,
+) -> Result<bool, CommandError>
+where
+    F: FnMut(&str) -> bool,
+{
+    outcome.bytes_received += payload.len();
+    if outcome.bytes_received > MAX_STREAM_BODY_BYTES {
+        outcome.truncated = true;
+        return Ok(false);
+    }
+    for line in splitter.push(payload)? {
+        outcome.lines_delivered += 1;
+        if !on_line(&line) {
+            outcome.stopped_by_callback = true;
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Splits a byte stream into UTF-8 lines across arbitrary read boundaries, holding incomplete
+/// UTF-8 sequences and partial lines until more bytes arrive.
+#[derive(Default)]
+struct LineSplitter {
+    pending: Vec<u8>,
+}
+
+impl LineSplitter {
+    fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, CommandError> {
+        self.pending.extend_from_slice(bytes);
+        let mut lines = Vec::new();
+        while let Some(index) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let mut line = self.pending.drain(..=index).collect::<Vec<u8>>();
+            line.pop();
+            if line.ends_with(b"\r") {
+                line.pop();
+            }
+            lines.push(String::from_utf8_lossy(&line).into_owned());
+        }
+        if self.pending.len() > MAX_STREAM_LINE_BYTES {
+            return Err(CommandError::new(
+                "http_stream_line_too_large",
+                "A streamed response line exceeded DevLab's 256 KiB line bound.",
+            ));
+        }
+        Ok(lines)
+    }
+
+    fn finish(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let mut line = std::mem::take(&mut self.pending);
+        if line.ends_with(b"\r") {
+            line.pop();
+        }
+        Some(String::from_utf8_lossy(&line).into_owned())
+    }
+}
+
 pub(crate) async fn blocking<T, F>(work: F) -> Result<T, CommandError>
 where
     T: Send + 'static,
@@ -950,5 +1158,90 @@ mod tests {
         assert_eq!(kind, "binary");
         assert!(body.contains("binary response body"));
         assert!(body.contains("truncated"));
+    }
+
+    #[test]
+    fn line_splitter_handles_partial_lines_and_utf8_boundaries() {
+        let mut splitter = LineSplitter::default();
+        assert!(splitter.push(b"data: a").unwrap().is_empty());
+        assert_eq!(splitter.push(b"bc\r\ndata: d").unwrap(), vec!["data: abc".to_string()]);
+        // Split a multi-byte character ("é" = C3 A9) across pushes.
+        assert!(splitter.push(&[0xC3]).unwrap().is_empty());
+        assert_eq!(splitter.push(&[0xA9, b'\n', b'\n']).unwrap(), vec!["data: dé".to_string(), String::new()]);
+        assert_eq!(splitter.finish(), None);
+        splitter.push(b"tail").unwrap();
+        assert_eq!(splitter.finish(), Some("tail".to_string()));
+        let mut oversized = LineSplitter::default();
+        assert_eq!(oversized.push(&vec![b'x'; MAX_STREAM_LINE_BYTES + 1]).unwrap_err().code, "http_stream_line_too_large");
+    }
+
+    fn serve_once(response: Vec<u8>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut socket, _)) = listener.accept() {
+                let mut sink = [0_u8; 4096];
+                // Read the request head (best effort) before answering.
+                let _ = socket.read(&mut sink);
+                for piece in response.chunks(7) {
+                    let _ = socket.write_all(piece);
+                    let _ = socket.flush();
+                }
+            }
+        });
+        format!("http://{address}/stream")
+    }
+
+    fn post(url: &str) -> HttpRequest {
+        HttpRequest {
+            method: "POST".to_string(),
+            url: url.to_string(),
+            headers: vec![header("Content-Type", "application/json")],
+            body: "{}".to_string(),
+            timeout_secs: None,
+        }
+    }
+
+    #[test]
+    fn streams_chunked_sse_lines_incrementally() {
+        let body = b"data: {\"n\":1}\n\ndata: {\"n\":2}\n\ndata: [DONE]\n\n";
+        let mut raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        for piece in body.chunks(5) {
+            raw.extend_from_slice(format!("{:x}\r\n", piece.len()).as_bytes());
+            raw.extend_from_slice(piece);
+            raw.extend_from_slice(b"\r\n");
+        }
+        raw.extend_from_slice(b"0\r\n\r\n");
+        let url = serve_once(raw);
+        let mut lines = Vec::new();
+        let outcome = send_request_streaming(post(&url), Duration::from_secs(10), |line| {
+            lines.push(line.to_string());
+            true
+        })
+        .unwrap();
+        assert_eq!(outcome.status, 200);
+        assert!(!outcome.truncated && !outcome.stopped_by_callback);
+        let data = lines.iter().filter(|line| line.starts_with("data:")).cloned().collect::<Vec<_>>();
+        assert_eq!(data, vec!["data: {\"n\":1}", "data: {\"n\":2}", "data: [DONE]"]);
+        assert_eq!(outcome.bytes_received, body.len());
+    }
+
+    #[test]
+    fn streaming_stops_early_and_buffers_error_bodies() {
+        let url = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nl1\nl2\nl3\nl4\n".to_vec());
+        let mut seen = 0;
+        let outcome = send_request_streaming(post(&url), Duration::from_secs(10), |_| {
+            seen += 1;
+            seen < 2
+        })
+        .unwrap();
+        assert!(outcome.stopped_by_callback);
+        assert_eq!(seen, 2);
+
+        let url = serve_once(b"HTTP/1.1 429 Too Many\r\nContent-Type: application/json\r\nContent-Length: 21\r\n\r\n{\"error\":\"slow down\"}".to_vec());
+        let outcome = send_request_streaming(post(&url), Duration::from_secs(10), |_| panic!("no lines for errors")).unwrap();
+        assert_eq!(outcome.status, 429);
+        assert_eq!(outcome.error_body, "{\"error\":\"slow down\"}");
+        assert_eq!(outcome.lines_delivered, 0);
     }
 }

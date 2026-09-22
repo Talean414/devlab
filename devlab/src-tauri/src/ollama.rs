@@ -18,6 +18,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
+use std::sync::Arc;
+use tauri::ipc::Channel;
+
+use crate::ai_stream::{begin_stream, run_stream, StreamEvent, StreamProtocol, StreamRegistry, StreamResult, StreamedReply};
 use crate::http::{
     blocking, parse_url, send_request, send_request_with_timeout, HttpHeader, HttpRequest, ParsedUrl,
 };
@@ -371,8 +375,8 @@ fn list_models(request: OllamaListRequest) -> Result<OllamaListResponse, Command
     })
 }
 
-fn chat(request: OllamaChatRequest) -> Result<OllamaChatResponse, CommandError> {
-    let started = Instant::now();
+/// Validates a chat request and builds the `/api/chat` HTTP request (streamed or not).
+fn prepare_chat(request: &OllamaChatRequest, stream: bool) -> Result<(String, String, HttpRequest), CommandError> {
     let (_, origin) = validate_loopback_endpoint(&request.endpoint)?;
     let model = validate_model(&request.model)?;
     let mut messages = Vec::new();
@@ -383,23 +387,27 @@ fn chat(request: OllamaChatRequest) -> Result<OllamaChatResponse, CommandError> 
     let payload = json!({
         "model": model,
         "messages": messages,
-        "stream": false,
+        "stream": stream,
         "options": {
             "temperature": clamp_temperature(request.temperature),
             "num_predict": clamp_predict(request.max_output_tokens),
         },
     });
-    let response = send_request_with_timeout(
-        HttpRequest {
-            method: "POST".to_string(),
-            url: api_url(&origin, "/api/chat"),
-            headers: vec![json_header()],
-            body: payload.to_string(),
-            timeout_secs: None,
-        },
-        Duration::from_secs(GENERATE_TIMEOUT_SECS),
-    )
-    .map_err(|error| transport_error(&origin, GENERATE_TIMEOUT_SECS, error))?;
+    let http = HttpRequest {
+        method: "POST".to_string(),
+        url: api_url(&origin, "/api/chat"),
+        headers: vec![json_header()],
+        body: payload.to_string(),
+        timeout_secs: None,
+    };
+    Ok((origin, model, http))
+}
+
+fn chat(request: OllamaChatRequest) -> Result<OllamaChatResponse, CommandError> {
+    let started = Instant::now();
+    let (origin, model, http) = prepare_chat(&request, false)?;
+    let response = send_request_with_timeout(http, Duration::from_secs(GENERATE_TIMEOUT_SECS))
+        .map_err(|error| transport_error(&origin, GENERATE_TIMEOUT_SECS, error))?;
     let body = parse_json_body(&response.body, response.body_truncated, "chat")?;
     if !(200..300).contains(&response.status) {
         return Err(http_status_error(response.status, &response.status_text, &body));
@@ -565,6 +573,39 @@ pub async fn ollama_list_models(request: OllamaListRequest) -> Result<OllamaList
 #[tauri::command]
 pub async fn ollama_chat(request: OllamaChatRequest) -> Result<OllamaChatResponse, CommandError> {
     blocking(move || chat(request)).await
+}
+
+/// Streamed variant: NDJSON lines from `/api/chat` are forwarded as bounded text deltas through
+/// `channel`; the command resolves with the summary once the stream ends, is cancelled or fails.
+#[tauri::command]
+pub async fn ollama_chat_stream(
+    request: OllamaChatRequest,
+    stream_id: String,
+    channel: Channel<StreamEvent>,
+    registry: tauri::State<'_, Arc<StreamRegistry>>,
+) -> Result<StreamedReply, CommandError> {
+    let registry = registry.inner().clone();
+    blocking(move || {
+        let handle = begin_stream(&registry, &stream_id)?;
+        let (origin, model, http) = prepare_chat(&request, true)?;
+        let result = run_stream(
+            http,
+            Duration::from_secs(GENERATE_TIMEOUT_SECS),
+            StreamProtocol::OllamaNdjson,
+            MAX_REPLY_CHARS,
+            handle.flag(),
+            &channel,
+        )
+        .map_err(|error| transport_error(&origin, GENERATE_TIMEOUT_SECS, error))?;
+        match result {
+            StreamResult::Completed(summary) => Ok(StreamedReply { target: origin, model, summary }),
+            StreamResult::HttpError(error) => {
+                let body = parse_json_body(&error.body, error.body_truncated, "chat").unwrap_or(Value::Null);
+                Err(http_status_error(error.status, &error.status_text, &body))
+            }
+        }
+    })
+    .await
 }
 
 #[cfg(test)]

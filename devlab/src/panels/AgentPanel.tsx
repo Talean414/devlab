@@ -115,6 +115,8 @@ export function AgentPanel({
   const [embedBusy, setEmbedBusy] = useState(false);
   const [embedNotice, setEmbedNotice] = useState("");
   const embedCancelRef = useRef(false);
+  // Phase 9F: lets the user stop a streamed native reply; Rust drops the connection at the next line.
+  const replyAbortRef = useRef<AbortController | null>(null);
   const [auditOpen, setAuditOpen] = useState(false);
   const [auditEvents, setAuditEvents] = useState<AgentAuditEvent[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
@@ -237,9 +239,11 @@ export function AgentPanel({
         .map((m) => ({ role: m.role === "model" ? "model" as const : "user" as const, text: m.content })),
     ];
 
+    const abort = new AbortController();
+    replyAbortRef.current = abort;
     try {
       let acc = "";
-      for await (const chunk of streamChat(history, { task: "chat" })) {
+      for await (const chunk of streamChat(history, { task: "chat", signal: abort.signal })) {
         acc += chunk;
         setMessages((m) =>
           m.map((msg) => (msg.id === modelId ? { ...msg, content: acc } : msg)),
@@ -251,7 +255,7 @@ export function AgentPanel({
         );
       }
     } catch (e) {
-      const err = e as Error;
+      const err = (e && typeof e === "object" && "message" in e ? e : new Error(String(e))) as Error;
       let msg: string;
       if (err.message === "NO_KEY") {
         msg = "No API key set. Add your Google AI Studio key in Settings.";
@@ -274,6 +278,7 @@ export function AgentPanel({
         m.map((x) => (x.id === modelId ? { ...x, content: msg } : x)),
       );
     } finally {
+      replyAbortRef.current = null;
       setBusy(false);
     }
   }
@@ -938,14 +943,25 @@ export function AgentPanel({
               {listening ? <MicOff className="relative h-4 w-4" /> : <Mic className="relative h-4 w-4" />}
             </button>
           )}
-          <button
-            onClick={() => send(input)}
-            disabled={busy || !input.trim()}
-            className="flex items-center gap-1.5 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-cyan-900/30 transition hover:from-cyan-400 hover:to-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <Send className="h-3.5 w-3.5" />
-            Send
-          </button>
+          {busy && replyAbortRef.current && !replyAbortRef.current.signal.aborted ? (
+            <button
+              onClick={() => replyAbortRef.current?.abort()}
+              title="Stop the streamed reply (native adapters)"
+              className="flex items-center gap-1.5 rounded-xl border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-sm font-semibold text-amber-100 transition hover:bg-amber-400/20"
+            >
+              <X className="h-3.5 w-3.5" />
+              Stop
+            </button>
+          ) : (
+            <button
+              onClick={() => send(input)}
+              disabled={busy || !input.trim()}
+              className="flex items-center gap-1.5 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-cyan-900/30 transition hover:from-cyan-400 hover:to-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Send className="h-3.5 w-3.5" />
+              Send
+            </button>
+          )}
         </div>
         <p className="mt-2 px-1 text-[11px] text-zinc-600">
           <kbd className="rounded bg-white/5 px-1 font-mono text-[10px]">Enter</kbd> to send

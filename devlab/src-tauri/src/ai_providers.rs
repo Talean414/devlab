@@ -19,6 +19,10 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
+use std::sync::Arc;
+use tauri::ipc::Channel;
+
+use crate::ai_stream::{begin_stream, run_stream, StreamEvent, StreamProtocol, StreamRegistry, StreamResult, StreamedReply};
 use crate::http::{blocking, send_request_with_timeout, HttpHeader, HttpRequest};
 use crate::workspace::CommandError;
 
@@ -79,6 +83,13 @@ impl AiProvider {
             Self::Deepseek => "DeepSeek",
             Self::Openai => "OpenAI",
             Self::Anthropic => "Anthropic",
+        }
+    }
+
+    fn stream_protocol(self) -> StreamProtocol {
+        match self {
+            Self::Anthropic => StreamProtocol::AnthropicSse,
+            Self::Deepseek | Self::Openai => StreamProtocol::OpenAiSse,
         }
     }
 
@@ -319,6 +330,21 @@ pub(crate) fn build_body(
     temperature: f64,
     max_output_tokens: u64,
 ) -> Value {
+    build_body_with_stream(provider, model, system, messages, temperature, max_output_tokens, false)
+}
+
+/// Same as [`build_body`] with the provider's streaming switch. OpenAI-style APIs also get
+/// `stream_options.include_usage` so the final chunk carries token counts.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_body_with_stream(
+    provider: AiProvider,
+    model: &str,
+    system: Option<&str>,
+    messages: &[(&'static str, String)],
+    temperature: f64,
+    max_output_tokens: u64,
+    stream: bool,
+) -> Value {
     match provider {
         AiProvider::Anthropic => {
             let mut body = json!({
@@ -332,6 +358,9 @@ pub(crate) fn build_body(
             });
             if let Some(system) = system {
                 body["system"] = Value::String(system.to_string());
+            }
+            if stream {
+                body["stream"] = Value::Bool(true);
             }
             body
         }
@@ -349,8 +378,11 @@ pub(crate) fn build_body(
                 "model": model,
                 "messages": chat,
                 "temperature": temperature,
-                "stream": false,
+                "stream": stream,
             });
+            if stream {
+                body["stream_options"] = json!({ "include_usage": true });
+            }
             // OpenAI's newer models reject `max_tokens`; DeepSeek still expects it.
             let key = if provider == AiProvider::Openai { "max_completion_tokens" } else { "max_tokens" };
             body[key] = Value::from(max_output_tokens);
@@ -526,8 +558,9 @@ fn elapsed_ms(started: Instant) -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-fn chat(request: AiChatRequest) -> Result<AiChatResponse, CommandError> {
-    let started = Instant::now();
+/// Validates the request, loads the key and builds the HTTP request. The key lives only inside
+/// the returned request's header buffer.
+fn prepare_chat(request: &AiChatRequest, stream: bool) -> Result<(String, HttpRequest), CommandError> {
     let provider = request.provider;
     let model = validate_model(&request.model)?;
     let system = validate_system(&request.system)?;
@@ -550,19 +583,24 @@ fn chat(request: AiChatRequest) -> Result<AiChatResponse, CommandError> {
         )
     })?;
 
-    let body = build_body(provider, &model, system.as_deref(), &messages, temperature, max_output_tokens);
-    let response = send_request_with_timeout(
-        HttpRequest {
-            method: "POST".to_string(),
-            url: provider.chat_url(),
-            headers: auth_headers(provider, key.as_str()),
-            body: body.to_string(),
-            timeout_secs: None,
-        },
-        Duration::from_secs(GENERATE_TIMEOUT_SECS),
-    )
-    .map_err(|error| transport_error(provider, error))?;
+    let body = build_body_with_stream(provider, &model, system.as_deref(), &messages, temperature, max_output_tokens, stream);
+    let http = HttpRequest {
+        method: "POST".to_string(),
+        url: provider.chat_url(),
+        headers: auth_headers(provider, key.as_str()),
+        body: body.to_string(),
+        timeout_secs: None,
+    };
     drop(key);
+    Ok((model, http))
+}
+
+fn chat(request: AiChatRequest) -> Result<AiChatResponse, CommandError> {
+    let started = Instant::now();
+    let provider = request.provider;
+    let (model, http) = prepare_chat(&request, false)?;
+    let response = send_request_with_timeout(http, Duration::from_secs(GENERATE_TIMEOUT_SECS))
+        .map_err(|error| transport_error(provider, error))?;
 
     let parsed = parse_json_body(provider, &response.body, response.body_truncated)?;
     if !(200..300).contains(&response.status) {
@@ -619,6 +657,39 @@ pub async fn ai_credential_delete(provider: AiProvider) -> Result<AiCredentialSt
 #[tauri::command]
 pub async fn ai_provider_chat(request: AiChatRequest) -> Result<AiChatResponse, CommandError> {
     blocking(move || chat(request)).await
+}
+
+/// Streamed variant (SSE). Same key handling, host policy and bounds as `ai_provider_chat`.
+#[tauri::command]
+pub async fn ai_provider_chat_stream(
+    request: AiChatRequest,
+    stream_id: String,
+    channel: Channel<StreamEvent>,
+    registry: tauri::State<'_, Arc<StreamRegistry>>,
+) -> Result<StreamedReply, CommandError> {
+    let registry = registry.inner().clone();
+    blocking(move || {
+        let handle = begin_stream(&registry, &stream_id)?;
+        let provider = request.provider;
+        let (model, http) = prepare_chat(&request, true)?;
+        let result = run_stream(
+            http,
+            Duration::from_secs(GENERATE_TIMEOUT_SECS),
+            provider.stream_protocol(),
+            MAX_REPLY_CHARS,
+            handle.flag(),
+            &channel,
+        )
+        .map_err(|error| transport_error(provider, error))?;
+        match result {
+            StreamResult::Completed(summary) => Ok(StreamedReply { target: provider.host().to_string(), model, summary }),
+            StreamResult::HttpError(error) => {
+                let body = parse_json_body(provider, &error.body, error.body_truncated).unwrap_or(Value::Null);
+                Err(http_status_error(provider, error.status, &error.status_text, &body))
+            }
+        }
+    })
+    .await
 }
 
 #[cfg(test)]
