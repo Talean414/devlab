@@ -1,5 +1,5 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { loadSettings, type AiProviderId, type DevLabSettings } from "./settings";
+import { loadSettings, type AiProviderId, type DevLabSettings, type TaskProviderOverride } from "./settings";
 
 export type AiTaskKind =
   | "chat"
@@ -54,6 +54,23 @@ export interface AiRoute {
   credentialStorage: string;
   transport: string;
   reason: string;
+  /** "global" = follows Settings → Providers; "task" = an explicit per-task override applied. */
+  source: "global" | "task";
+}
+
+/** Providers that vision can use. Image input is only wired through the Gemini path. */
+export const VISION_CAPABLE_PROVIDERS: AiProviderId[] = ["gemini"];
+
+/**
+ * Returns the per-task override that applies to `task`, or null when the task follows the global
+ * provider. Vision overrides to non-vision providers are ignored (with the reason reported by
+ * `resolveAiRoute`) rather than silently sending images nowhere.
+ */
+export function effectiveTaskOverride(task: AiTaskKind, settings: DevLabSettings): TaskProviderOverride | null {
+  const override = settings.taskProviders?.[task];
+  if (!override) return null;
+  if (!PROFILE_BY_ID.has(override.provider)) return null;
+  return override;
 }
 
 export const AI_TASK_PROFILES: AiTaskProfile[] = [
@@ -193,12 +210,22 @@ export function resolveAiRoute(
   settings: DevLabSettings = loadSettings(),
 ): AiRoute {
   const task = getTaskProfile(taskId);
-  const provider = getProviderProfile(settings.aiProvider);
-  const model = modelForProvider(provider.id, settings, selection);
+  const override = effectiveTaskOverride(task.id, settings);
+  const overrideRejected = override && task.id === "vision" && !VISION_CAPABLE_PROVIDERS.includes(override.provider);
+  const applied = override && !overrideRejected ? override : null;
+  const provider = getProviderProfile(applied ? applied.provider : settings.aiProvider);
+  const source: AiRoute["source"] = applied ? "task" : "global";
+  const overrideModel = applied?.model?.trim() ?? "";
+  const model = overrideModel || modelForProvider(provider.id, settings, selection);
   const modelLabel = model || provider.defaultModel || "not configured";
+  const sourceNote = applied
+    ? " (per-task override)"
+    : overrideRejected
+      ? ` (the ${getProviderProfile(override.provider).shortName} override for vision was ignored: image input is only wired through Gemini)`
+      : "";
 
   if (!provider.availableNow) {
-    const reason = `${provider.name} routing is configured for ${task.label.toLowerCase()}, but its native adapter is only available inside the DevLab desktop app, not the web preview. No request was sent.`;
+    const reason = `${provider.name} routing is configured for ${task.label.toLowerCase()}${sourceNote}, but its native adapter is only available inside the DevLab desktop app, not the web preview. No request was sent.`;
     return {
       task: task.id,
       taskLabel: task.label,
@@ -212,6 +239,7 @@ export function resolveAiRoute(
       credentialStorage: provider.credentialStorage,
       transport: provider.transport,
       reason,
+      source,
     };
   }
 
@@ -227,7 +255,8 @@ export function resolveAiRoute(
     availableNow: true,
     credentialStorage: provider.credentialStorage,
     transport: provider.transport,
-    reason: provider.id === "ollama"
+    source,
+    reason: (provider.id === "ollama"
       ? `Routing ${task.label.toLowerCase()} to the local Ollama model "${modelLabel}" through the native loopback adapter; no cloud request is made and there is no fallback to Gemini.`
       : provider.id === "deepseek" || provider.id === "openai" || provider.id === "anthropic"
         ? `Routing ${task.label.toLowerCase()} to ${provider.shortName} model "${modelLabel}" through the native HTTPS adapter; the key stays in the OS credential store and there is no fallback to Gemini.`
@@ -235,13 +264,14 @@ export function resolveAiRoute(
         ? `Routing ${task.label.toLowerCase()} to model "${modelLabel}" at the custom OpenAI-compatible endpoint through the native adapter's host policy; any bearer token stays in the OS credential store and there is no fallback to Gemini.`
         : settings.modelRouting === "fixed"
         ? `Using the selected ${provider.shortName} model for ${task.label.toLowerCase()}.`
-        : `Routing ${task.label.toLowerCase()} through ${provider.shortName}; Gemini fallback candidates are ordered for this task class when live model metadata is available.`,
+        : `Routing ${task.label.toLowerCase()} through ${provider.shortName}; Gemini fallback candidates are ordered for this task class when live model metadata is available.`) + sourceNote,
   };
 }
 
 export function describeAiRoute(route: AiRoute): string {
-  const status = route.status === "active" ? "active" : "future";
-  return `${route.providerName} · ${route.modelLabel} · ${route.taskLabel} route (${status})`;
+  const status = route.status === "active" ? "active" : "desktop only";
+  const source = route.source === "task" ? " · per-task" : "";
+  return `${route.providerName} · ${route.modelLabel} · ${route.taskLabel} route (${status}${source})`;
 }
 
 export function routeInstruction(taskId: AiTaskKind): string {

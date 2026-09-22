@@ -29,6 +29,17 @@ export type Autonomy = "ask" | "suggest" | "auto";
 export type AiProviderId = "gemini" | "deepseek" | "openai" | "anthropic" | "ollama" | "custom";
 export type ModelRoutingMode = "auto" | "fixed";
 
+/** Phase 9G: an explicit provider (and optional model) for one task class; absent = global provider. */
+export interface TaskProviderOverride {
+  provider: AiProviderId;
+  /** Empty = the provider's configured/default model. */
+  model?: string;
+}
+export type TaskProviderOverrides = Partial<Record<
+  "chat" | "planning" | "coding" | "repair" | "vision" | "migration" | "architecture",
+  TaskProviderOverride
+>>;
+
 export interface DevLabSettings {
   theme: ThemeId;
   density: Density;
@@ -58,6 +69,8 @@ export interface DevLabSettings {
   streamReplies: boolean;
   customModel: string;
   customEndpoint: string;
+  /** Per-task provider overrides (non-secret metadata). Missing tasks follow `aiProvider`. */
+  taskProviders: TaskProviderOverrides;
   temperature: number;
   maxTokens: number;
   systemPrompt: string;
@@ -110,6 +123,7 @@ export const DEFAULT_SETTINGS: DevLabSettings = {
   streamReplies: true,
   customModel: "",
   customEndpoint: "",
+  taskProviders: {},
   temperature: 0.7,
   maxTokens: 4096,
   systemPrompt: "",

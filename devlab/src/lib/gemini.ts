@@ -261,9 +261,20 @@ interface StreamChatOptions {
   signal?: AbortSignal;
 }
 
-function nativeStreamTarget(provider: string, settings: ReturnType<typeof loadSettings>): StreamTarget | null {
-  if (provider === "ollama") return { kind: "ollama", endpoint: settings.customEndpoint };
-  if (provider === "custom") return { kind: "custom", endpoint: settings.customEndpoint };
+/**
+ * The endpoint field is shared by the Ollama (loopback) and custom (https) adapters. When a
+ * per-task Ollama override runs under a custom global provider, the custom URL is not sent to the
+ * loopback adapter (Rust would refuse it anyway); the default loopback origin is used instead.
+ */
+function endpointFor(route: AiRoute, settings: ReturnType<typeof loadSettings>): string {
+  if (route.source === "task" && route.provider === "ollama" && settings.aiProvider === "custom") return "";
+  return settings.customEndpoint;
+}
+
+function nativeStreamTarget(route: AiRoute, settings: ReturnType<typeof loadSettings>): StreamTarget | null {
+  const provider = route.provider;
+  if (provider === "ollama") return { kind: "ollama", endpoint: endpointFor(route, settings) };
+  if (provider === "custom") return { kind: "custom", endpoint: endpointFor(route, settings) };
   if (isCloudAiProvider(provider)) return { kind: "cloud", provider };
   return null;
 }
@@ -293,7 +304,7 @@ export async function* streamChat(
   const temperature = clamp(options.temperature ?? settings.temperature, 0, 2);
   const maxOutputTokens = Math.round(clamp(options.maxOutputTokens ?? settings.maxTokens, 256, 16_384));
 
-  const nativeTarget = nativeStreamTarget(route.provider, settings);
+  const nativeTarget = nativeStreamTarget(route, settings);
   if (nativeTarget && streamingAvailable() && settings.streamReplies) {
     // Phase 9F: incremental deltas through a Tauri channel. Same adapter policy and bounds as the
     // non-streamed commands; no Gemini fallback, no retries, cancellation via the signal.
@@ -315,7 +326,7 @@ export async function* streamChat(
     // Native loopback adapter: one bounded, non-streamed completion from Rust. No Gemini key,
     // cooldown or fallback logic applies; a failure is reported as-is rather than retried elsewhere.
     const reply = await ollamaChat({
-      endpoint: settings.customEndpoint,
+      endpoint: endpointFor(route, settings),
       model: route.model,
       system: systemText,
       messages: limitHistory(history),
@@ -330,7 +341,7 @@ export async function* streamChat(
   if (route.provider === "custom") {
     // Native adapter with an explicit host policy; the optional bearer token never enters the renderer.
     const reply = await customEndpointChat({
-      endpoint: settings.customEndpoint,
+      endpoint: endpointFor(route, settings),
       model: route.model,
       system: systemText,
       messages: limitHistory(history),
@@ -382,7 +393,7 @@ export async function* streamVision(
   }, settings);
   if (route.status !== "active") throw new Error(route.reason);
   if (route.provider !== "gemini") {
-    throw new Error(`Vision generation is not routed through the ${route.providerName} adapter in this phase. Switch Settings → Providers to Gemini for image input.`);
+    throw new Error(`Vision generation is not routed through the ${route.providerName} adapter in this phase. Switch Settings → Providers to Gemini, or set the Vision task to Gemini in the task router, for image input.`);
   }
 
   const parts: Record<string, unknown>[] = images.map((image) => ({

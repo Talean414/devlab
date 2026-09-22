@@ -16,7 +16,7 @@ import {
   describeDraftPolicy, evaluateDraftPath, loadDraftPolicy, parsePatternList, saveDraftPolicy,
 } from "../lib/draftPolicy";
 import {
-  aiCredentialDelete, aiCredentialStatus, aiCredentialStore, cloudAdapterAvailable, isCloudAiProvider,
+  aiCredentialDelete, aiCredentialStatus, aiCredentialStore, cloudAdapterAvailable, credentialKnownConfigured, isCloudAiProvider,
   rememberCredentialConfigured, type AiCredentialStatus, type CloudAiProvider,
 } from "../lib/aiProviders";
 import {
@@ -30,9 +30,11 @@ import {
 import {
   AI_PROVIDER_PROFILES,
   AI_TASK_PROFILES,
+  VISION_CAPABLE_PROVIDERS,
   describeAiRoute,
   generationGuardrailInstruction,
   resolveAiRoute,
+  type AiTaskKind,
 } from "../lib/modelRouting";
 import {
   Eye, EyeOff, Save, RefreshCw, Trash2, Shield, KeyRound, CheckCircle2,
@@ -224,6 +226,30 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
     setPolicyNotice("Cleared user allow/deny patterns. The built-in secret-safe deny list remains enforced.");
   }
   const providerProfile = AI_PROVIDER_PROFILES.find((profile) => profile.id === s.aiProvider) ?? AI_PROVIDER_PROFILES[0];
+  // Phase 9G: per-task provider overrides are non-secret metadata; "global" removes the override.
+  function setTaskProvider(task: AiTaskKind, provider: AiProviderId | "global") {
+    const next = { ...(s.taskProviders ?? {}) };
+    if (provider === "global") delete next[task];
+    else next[task] = { provider, model: next[task]?.provider === provider ? next[task]?.model : "" };
+    update({ taskProviders: next });
+  }
+  function setTaskModel(task: AiTaskKind, model: string) {
+    const current = s.taskProviders?.[task];
+    if (!current) return;
+    update({ taskProviders: { ...s.taskProviders, [task]: { ...current, model } } });
+  }
+  const taskOverrideCount = Object.keys(s.taskProviders ?? {}).length;
+  function taskOverrideHint(provider: AiProviderId): string {
+    if (provider === "ollama") return s.aiProvider === "custom" ? "Uses the default loopback Ollama endpoint (the custom URL is not shared)." : "Uses the Ollama endpoint configured above.";
+    if (provider === "custom") return s.aiProvider === "custom" ? "Uses the custom endpoint configured above." : "Select Custom as the global provider once to set its endpoint and token; the override reuses them.";
+    if (isCloudAiProvider(provider)) {
+      const known = credentialKnownConfigured(provider);
+      if (known === false) return `No ${provider} key in the OS credential store yet — select it as the global provider once to store one.`;
+      if (known === true) return "Key present in the OS credential store.";
+      return "Key status unknown until the desktop app probes the credential store.";
+    }
+    return getApiKey() ? "Gemini key present." : "Add a Gemini key first.";
+  }
   const routePreview = AI_TASK_PROFILES.map((task) => resolveAiRoute(task.id, {
     selectedModel: model,
     pickedModel: autoPicked,
@@ -702,21 +728,58 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                     </button>
                   ))}
                 </div>
+                <div className="mb-2 flex items-center justify-between text-[11.5px] text-zinc-500">
+                  <span>Per-task provider (Phase 9G) · {taskOverrideCount === 0 ? "all tasks follow the global provider" : `${taskOverrideCount} override${taskOverrideCount === 1 ? "" : "s"}`}</span>
+                  {taskOverrideCount > 0 && (
+                    <button onClick={() => update({ taskProviders: {} })} className="rounded-md border border-white/10 px-2 py-0.5 text-[10.5px] hover:bg-white/5">Reset all to global</button>
+                  )}
+                </div>
                 <div className="space-y-1.5">
-                  {routePreview.map((route) => (
-                    <div key={route.task} className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-[11.5px]">
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="font-semibold text-zinc-200">{route.taskLabel}</span>
-                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${route.status === "active" ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/15 text-amber-300"}`}>
-                          {route.status === "active" ? "Active" : "Future"}
-                        </span>
+                  {routePreview.map((route) => {
+                    const override = s.taskProviders?.[route.task];
+                    const choices = route.task === "vision"
+                      ? AI_PROVIDER_PROFILES.filter((profile) => VISION_CAPABLE_PROVIDERS.includes(profile.id))
+                      : AI_PROVIDER_PROFILES;
+                    return (
+                      <div key={route.task} className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-[11.5px]">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-semibold text-zinc-200">{route.taskLabel}</span>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <select
+                              value={override?.provider ?? "global"}
+                              onChange={(e) => setTaskProvider(route.task, e.target.value as AiProviderId | "global")}
+                              className="rounded-md border border-white/10 bg-[#0d1017] px-2 py-1 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/50"
+                              aria-label={`Provider for ${route.taskLabel}`}
+                            >
+                              <option value="global">Global ({providerProfile.shortName})</option>
+                              {choices.map((profile) => (
+                                <option key={profile.id} value={profile.id}>{profile.shortName}{profile.availableNow ? "" : " · desktop only"}</option>
+                              ))}
+                            </select>
+                            {override && (
+                              <input
+                                value={override.model ?? ""}
+                                onChange={(e) => setTaskModel(route.task, e.target.value)}
+                                placeholder={`model (default: ${AI_PROVIDER_PROFILES.find((p) => p.id === override.provider)?.defaultModel || "configured"})`}
+                                maxLength={128}
+                                className="w-44 rounded-md border border-white/10 bg-[#0d1017] px-2 py-1 font-mono text-[11px] text-zinc-200 outline-none focus:border-cyan-500/50"
+                                aria-label={`Model override for ${route.taskLabel}`}
+                              />
+                            )}
+                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${route.status === "active" ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/15 text-amber-300"}`}>
+                              {route.status === "active" ? "Active" : "Desktop only"}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="mt-1 text-zinc-500">{describeAiRoute(route)}</div>
+                        {override && <div className="mt-0.5 text-[10.5px] text-zinc-600">{taskOverrideHint(override.provider)}</div>}
+                        {!override && route.reason.includes("ignored") && <div className="mt-0.5 text-[10.5px] text-amber-300/80">{route.reason}</div>}
                       </div>
-                      <div className="mt-1 text-zinc-500">{describeAiRoute(route)}</div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
                 <p className="mt-3 text-[11px] leading-relaxed text-zinc-500">
-                  This router does not install models, run commands, store non-Gemini secrets, or send requests to future providers. It only selects the current approved Gemini path unless a future native adapter is implemented.
+                  Overrides are non-secret metadata stored with your preferences. Each provider keeps its own credential rules (Gemini key in the WebView, cloud/custom tokens in the OS credential store, Ollama none), host policy and bounds; a task routed to a native adapter is desktop-only and never falls back to Gemini. Vision can only be routed to Gemini because image input is wired there alone.
                 </p>
               </Card>
 
