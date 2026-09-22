@@ -56,6 +56,7 @@ interface OpenDocument extends WorkspaceDocument {
 type DraftInspectionStatus = "loading" | "new" | "update" | "unchanged" | "unavailable" | "error";
 type DiffNavigationTarget = "next" | "previous";
 type ReviewedDraftAnnotationStatus = "unreviewed" | "reviewed" | "needs-changes";
+type ReviewedDraftFilter = "all" | "pending" | "applied" | "reviewed" | "needs-changes";
 
 interface ReviewedDraftAnnotation {
   status: ReviewedDraftAnnotationStatus;
@@ -132,6 +133,7 @@ export function EditorPanel({
   const [notice, setNotice] = useState("");
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [draftReviewOpen, setDraftReviewOpen] = useState(incomingDrafts.length > 0);
+  const [draftReviewFilter, setDraftReviewFilter] = useState<ReviewedDraftFilter>("all");
   const [draftIndex, setDraftIndex] = useState(0);
   const [draftInspection, setDraftInspection] = useState<DraftInspection | null>(null);
   const [appliedDraftKeys, setAppliedDraftKeys] = useState<string[]>([]);
@@ -165,6 +167,15 @@ export function EditorPanel({
     () => summarizeReviewedDrafts(incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations),
     [incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations],
   );
+  const draftReviewFilterOptions = useMemo(
+    () => buildReviewedDraftFilterOptions(draftReviewSummary),
+    [draftReviewSummary],
+  );
+  const filteredDraftEntries = useMemo(
+    () => draftReviewSummary.files.filter((file) => reviewedDraftMatchesFilter(file, draftReviewFilter)),
+    [draftReviewSummary, draftReviewFilter],
+  );
+  const activeDraftReviewFilter = draftReviewFilterOptions.find((option) => option.value === draftReviewFilter);
   const selectedDraftMetadata = selectedDraft ? draftReviewSummary.files[draftIndex] : undefined;
   const selectedDraftApplication = selectedDraftKey ? appliedDraftRecords[selectedDraftKey] : undefined;
   const selectedDraftAnnotation = selectedDraftKey ? draftReviewAnnotations[selectedDraftKey] : undefined;
@@ -202,6 +213,7 @@ export function EditorPanel({
   useEffect(() => {
     if (incomingDrafts.length === 0) {
       setDraftReviewOpen(false);
+      setDraftReviewFilter("all");
       setDraftIndex(0);
       setAppliedDraftKeys([]);
       setAppliedDraftRecords({});
@@ -214,6 +226,7 @@ export function EditorPanel({
       setDiffNavigationNotice("");
       return;
     }
+    setDraftReviewFilter("all");
     setDraftIndex(0);
     setAppliedDraftKeys([]);
     setAppliedDraftRecords({});
@@ -225,6 +238,12 @@ export function EditorPanel({
     setDiffNavigationNotice("");
     setDraftReviewOpen(true);
   }, [incomingDrafts]);
+
+  useEffect(() => {
+    if (!draftReviewOpen || incomingDrafts.length === 0 || filteredDraftEntries.length === 0) return;
+    if (filteredDraftEntries.some((file) => file.index === draftIndex)) return;
+    setDraftIndex(filteredDraftEntries[0].index);
+  }, [draftReviewOpen, incomingDrafts.length, filteredDraftEntries, draftIndex]);
 
   const refreshReviewedDiffChangeCount = useCallback((editor = reviewedDiffEditorRef.current) => {
     if (!editor) {
@@ -1197,6 +1216,30 @@ export function EditorPanel({
                     {draftReviewCopyNotice.text}
                   </div>
                 )}
+                <div className="mt-3 rounded-xl border border-white/10 bg-black/15 p-3 text-[11px] text-zinc-400">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-zinc-200">Review queue filter</span>
+                    <span className="font-mono text-[10px] text-zinc-600">{activeDraftReviewFilter?.count ?? 0} shown</span>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {draftReviewFilterOptions.map((option) => {
+                      const active = option.value === draftReviewFilter;
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          onClick={() => setDraftReviewFilter(option.value)}
+                          className={`rounded-full border px-2 py-1 text-[10px] font-semibold transition ${active ? "border-violet-400/40 bg-violet-400/15 text-violet-100" : "border-white/10 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"}`}
+                        >
+                          {option.label} <span className="font-mono opacity-70">{option.count}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="mt-2 text-[10px] leading-relaxed text-zinc-600">
+                    Filters are session-only UI state. They hide or show draft rows for review but do not change generated content, write files, run commands or alter apply requirements.
+                  </p>
+                </div>
                 <div className="mt-3 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.05] p-3 text-[11px] text-emerald-100/75">
                   <div className="flex items-center gap-2 font-semibold text-emerald-100">
                     <ClipboardList className="h-3.5 w-3.5 text-emerald-300" /> Verification guidance
@@ -1243,21 +1286,21 @@ export function EditorPanel({
                 </div>
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto p-2">
-                {incomingDrafts.map((draft, index) => {
-                  const key = draftKey(draft, index);
-                  const applied = appliedDraftKeys.includes(key);
-                  const annotation = draftReviewAnnotations[key];
-                  const annotationStatus = annotation?.status ?? "unreviewed";
-                  const title = appliedDraftRecords[key]
-                    ? `${appliedDraftRecords[key].action} ${appliedDraftRecords[key].path} at ${formatReviewTime(appliedDraftRecords[key].appliedAtMs)}`
+                {filteredDraftEntries.map((file) => {
+                  const draft = incomingDrafts[file.index];
+                  if (!draft) return null;
+                  const key = draftKey(draft, file.index);
+                  const annotationStatus = file.reviewStatus;
+                  const title = file.application
+                    ? `${file.application.action} ${file.application.path} at ${formatReviewTime(file.application.appliedAtMs)}`
                     : `Pending reviewed draft · ${draftReviewAnnotationStatusLabel(annotationStatus)}`;
                   return (
                     <button
                       key={key}
-                      onClick={() => setDraftIndex(index)}
+                      onClick={() => setDraftIndex(file.index)}
                       title={title}
                       className={`mb-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left font-mono text-[11px] transition ${
-                        index === draftIndex
+                        file.index === draftIndex
                           ? "bg-violet-500/15 text-violet-100"
                           : "text-zinc-500 hover:bg-white/5 hover:text-zinc-300"
                       }`}
@@ -1268,10 +1311,15 @@ export function EditorPanel({
                           {draftReviewAnnotationShortLabel(annotationStatus)}
                         </span>
                       )}
-                      {applied && <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />}
+                      {file.applied && <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />}
                     </button>
                   );
                 })}
+                {filteredDraftEntries.length === 0 && (
+                  <div className="rounded-xl border border-white/10 bg-black/15 px-3 py-6 text-center text-[11px] leading-relaxed text-zinc-600">
+                    No reviewed drafts match the {activeDraftReviewFilter?.label.toLowerCase() ?? "selected"} filter. Change filters to continue reviewing the full in-memory draft set.
+                  </div>
+                )}
               </div>
               <div className="border-t border-white/10 p-3">
                 <button
@@ -1514,6 +1562,12 @@ interface ReviewedDraftApplicationRecord {
   size: number;
 }
 
+interface ReviewedDraftFilterOption {
+  value: ReviewedDraftFilter;
+  label: string;
+  count: number;
+}
+
 interface ReviewedDraftAnnotationCounts {
   reviewedCount: number;
   needsChangesCount: number;
@@ -1604,6 +1658,26 @@ function summarizeReviewedDrafts(
     annotationCounts,
     files,
   };
+}
+
+function buildReviewedDraftFilterOptions(summary: ReviewedDraftSummary): ReviewedDraftFilterOption[] {
+  return [
+    { value: "all", label: "All", count: summary.fileCount },
+    { value: "pending", label: "Pending", count: summary.pendingCount },
+    { value: "applied", label: "Applied", count: summary.appliedCount },
+    { value: "reviewed", label: "Reviewed", count: summary.annotationCounts.reviewedCount },
+    { value: "needs-changes", label: "Needs changes", count: summary.annotationCounts.needsChangesCount },
+  ];
+}
+
+function reviewedDraftMatchesFilter(file: ReviewedDraftSummaryItem, filter: ReviewedDraftFilter): boolean {
+  switch (filter) {
+    case "all": return true;
+    case "pending": return !file.applied;
+    case "applied": return file.applied;
+    case "reviewed": return file.reviewStatus === "reviewed";
+    case "needs-changes": return file.reviewStatus === "needs-changes";
+  }
 }
 
 function summarizeReviewAnnotationCounts(files: ReviewedDraftSummaryItem[]): ReviewedDraftAnnotationCounts {
