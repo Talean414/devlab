@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import Editor, { DiffEditor } from "@monaco-editor/react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Editor, { DiffEditor, type DiffOnMount, type MonacoDiffEditor } from "@monaco-editor/react";
 import { PanelHeader } from "./AgentPanel";
 import { loadSettings, getTheme } from "../lib/settings";
 import { testRunnerSnapshot, type TestProfile, type TestRunnerSnapshot } from "../lib/testRunner";
@@ -24,6 +24,7 @@ import {
 } from "../lib/workspace";
 import {
   AlertTriangle,
+  ArrowDown,
   ArrowUp,
   CheckCircle2,
   ChevronRight,
@@ -53,6 +54,7 @@ interface OpenDocument extends WorkspaceDocument {
 }
 
 type DraftInspectionStatus = "loading" | "new" | "update" | "unchanged" | "unavailable" | "error";
+type DiffNavigationTarget = "next" | "previous";
 
 interface DraftInspection {
   key: string;
@@ -131,8 +133,12 @@ export function EditorPanel({
   const [verificationLoading, setVerificationLoading] = useState(false);
   const [verificationPlan, setVerificationPlan] = useState<ReviewedDraftVerificationPlan | null>(null);
   const [verificationNotice, setVerificationNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const [diffChangeCount, setDiffChangeCount] = useState<number | null>(null);
+  const [diffNavigationNotice, setDiffNavigationNotice] = useState("");
   const ignoredEvents = useRef(new Map<string, number>());
   const eventTimer = useRef<number | null>(null);
+  const reviewedDiffEditorRef = useRef<MonacoDiffEditor | null>(null);
+  const reviewedDiffUpdateRef = useRef<{ dispose: () => void } | null>(null);
   const settings = loadSettings();
   const theme = getTheme(settings.theme);
 
@@ -161,6 +167,26 @@ export function EditorPanel({
       inspection: draftInspection?.key === selectedDraftKey ? draftInspection : null,
     })
     : "No reviewed draft is selected.";
+  const selectedDraftDiffReady = Boolean(
+    selectedDraft
+    && draftInspection?.key === selectedDraftKey
+    && draftInspection.status !== "loading"
+    && draftInspection.status !== "error",
+  );
+  const canNavigateReviewedDiff = Boolean(
+    selectedDraftDiffReady
+    && (diffChangeCount === null
+      ? draftInspection && (draftInspection.status === "new" || draftInspection.status === "update")
+      : diffChangeCount > 0),
+  );
+  const reviewedDiffChangeLabel = diffChangeCount === null
+    ? "Monaco changes pending"
+    : `${diffChangeCount} change block${diffChangeCount === 1 ? "" : "s"}`;
+  const reviewedDiffApplyStateLabel = selectedDraftApplied
+    ? "Applied in this review session"
+    : selectedDraftApplyBlockReason
+      ? `Apply blocked · ${selectedDraftApplyBlockReason}`
+      : "Pending explicit apply";
 
   useEffect(() => {
     if (incomingDrafts.length === 0) {
@@ -172,6 +198,8 @@ export function EditorPanel({
       setDraftReviewCopyNotice(null);
       setVerificationPlan(null);
       setVerificationNotice(null);
+      setDiffChangeCount(null);
+      setDiffNavigationNotice("");
       return;
     }
     setDraftIndex(0);
@@ -180,8 +208,53 @@ export function EditorPanel({
     setDraftReviewCopyNotice(null);
     setVerificationPlan(null);
     setVerificationNotice(null);
+    setDiffChangeCount(null);
+    setDiffNavigationNotice("");
     setDraftReviewOpen(true);
   }, [incomingDrafts]);
+
+  const refreshReviewedDiffChangeCount = useCallback((editor = reviewedDiffEditorRef.current) => {
+    if (!editor) {
+      setDiffChangeCount(null);
+      return;
+    }
+    const lineChanges = editor.getLineChanges();
+    setDiffChangeCount(lineChanges ? lineChanges.length : null);
+  }, []);
+
+  const handleReviewedDiffMount = useCallback<DiffOnMount>((editor) => {
+    reviewedDiffEditorRef.current = editor;
+    reviewedDiffUpdateRef.current?.dispose();
+    reviewedDiffUpdateRef.current = editor.onDidUpdateDiff(() => refreshReviewedDiffChangeCount(editor));
+    refreshReviewedDiffChangeCount(editor);
+  }, [refreshReviewedDiffChangeCount]);
+
+  const navigateReviewedDiffChange = useCallback((target: DiffNavigationTarget) => {
+    const editor = reviewedDiffEditorRef.current;
+    if (!editor) {
+      setDiffNavigationNotice("Diff navigation is still initializing. The reviewed draft remains read-only.");
+      return;
+    }
+    const lineChanges = editor.getLineChanges();
+    if (lineChanges) setDiffChangeCount(lineChanges.length);
+    if (lineChanges && lineChanges.length === 0) {
+      setDiffNavigationNotice("No Monaco change blocks are available for this reviewed draft.");
+      return;
+    }
+    editor.goToDiff(target);
+    setDiffNavigationNotice(`${target === "next" ? "Next" : "Previous"} change selected in the read-only diff. Apply still requires the explicit reviewed-draft button.`);
+  }, []);
+
+  useEffect(() => {
+    setDiffChangeCount(null);
+    setDiffNavigationNotice("");
+  }, [selectedDraftKey]);
+
+  useEffect(() => () => {
+    reviewedDiffUpdateRef.current?.dispose();
+    reviewedDiffUpdateRef.current = null;
+    reviewedDiffEditorRef.current = null;
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1187,10 +1260,42 @@ export function EditorPanel({
                 </div>
                 {draftInspection?.key === selectedDraftKey && draftInspection.status !== "loading" && draftInspection.status !== "error" && (
                   <div className="mt-3 overflow-hidden rounded-xl border border-white/10 bg-black/25">
-                    <div className="flex items-center justify-between border-b border-white/10 px-3 py-2 text-[10.5px] text-zinc-500">
-                      <span>Inline Monaco diff · original workspace content on the left, reviewed draft on the right</span>
-                      <span className="font-mono">read-only</span>
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 px-3 py-2 text-[10.5px] text-zinc-500">
+                      <div className="min-w-0">
+                        <div>Inline Monaco diff · original workspace content on the left, reviewed draft on the right</div>
+                        <div className="mt-0.5 font-mono text-[10px] text-zinc-600">
+                          {reviewedDiffChangeLabel} · {reviewedDiffApplyStateLabel}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 font-mono text-[10px] text-emerald-200">read-only</span>
+                        <button
+                          type="button"
+                          onClick={() => navigateReviewedDiffChange("previous")}
+                          disabled={!canNavigateReviewedDiff}
+                          className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1 text-[10px] font-semibold text-zinc-400 hover:bg-white/5 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
+                          title="Jump to the previous Monaco diff change block"
+                        >
+                          <ArrowUp className="h-3 w-3" />
+                          Previous
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => navigateReviewedDiffChange("next")}
+                          disabled={!canNavigateReviewedDiff}
+                          className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1 text-[10px] font-semibold text-zinc-400 hover:bg-white/5 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
+                          title="Jump to the next Monaco diff change block"
+                        >
+                          <ArrowDown className="h-3 w-3" />
+                          Next
+                        </button>
+                      </div>
                     </div>
+                    {diffNavigationNotice && (
+                      <div className="border-b border-white/10 bg-black/20 px-3 py-2 text-[10.5px] text-zinc-500">
+                        {diffNavigationNotice}
+                      </div>
+                    )}
                     <div className="h-72 min-h-0">
                       <DiffEditor
                         original={draftInspection.originalContent}
@@ -1201,6 +1306,7 @@ export function EditorPanel({
                         theme={theme.editor}
                         originalModelPath={`devlab-reviewed-draft://original/${selectedDraftKey}`}
                         modifiedModelPath={`devlab-reviewed-draft://modified/${selectedDraftKey}`}
+                        onMount={handleReviewedDiffMount}
                         options={{
                           readOnly: true,
                           originalEditable: false,
