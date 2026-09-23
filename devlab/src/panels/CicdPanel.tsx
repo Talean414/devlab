@@ -2,66 +2,68 @@ import { useState } from "react";
 import { ciTemplates } from "../data/catalog";
 import { PanelHeader } from "./AgentPanel";
 import { CodeBlock } from "../components/CodeBlock";
-import { CheckCircle2, Loader2, XCircle, FileCode2, Rocket } from "lucide-react";
+import type { OpenGeneratedDrafts, VFile } from "../types";
+import { FileCode2, Rocket, Unplug, FileDiff } from "lucide-react";
 
-const runs = [
-  { id: 1, name: "Node CI", branch: "main", status: "success", time: "42s", when: "5m ago" },
-  { id: 2, name: "Deploy Pages", branch: "main", status: "running", time: "—", when: "now" },
-  { id: 3, name: "Docker", branch: "v1.2.0", status: "success", time: "1m 18s", when: "2h ago" },
-  { id: 4, name: "Node CI", branch: "fix/auth", status: "failed", time: "31s", when: "4h ago" },
-];
+const RUN_STATUS_RECIPE = `# Run status stays with your CI provider. From the integrated terminal:
+gh run list --limit 10        # recent GitHub Actions runs for this repository
+gh run watch                  # follow the run that is currently in progress
+gh run view --log-failed      # logs of the failed steps of the latest run`;
 
-const statusMap: Record<string, { Icon: typeof CheckCircle2; cls: string }> = {
-  success: { Icon: CheckCircle2, cls: "text-emerald-400" },
-  running: { Icon: Loader2,      cls: "text-amber-400" },
-  failed:  { Icon: XCircle,      cls: "text-rose-400" },
-};
-
-export function CicdPanel() {
+export function CicdPanel({ onOpenFiles }: { onOpenFiles?: OpenGeneratedDrafts }) {
   const [selected, setSelected] = useState(ciTemplates[0]);
+  const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const [staging, setStaging] = useState(false);
+
+  async function stageTemplate() {
+    if (!onOpenFiles || staging) return;
+    setStaging(true);
+    setNotice(null);
+    try {
+      const files: VFile[] = [{ path: selected.filename, content: selected.yaml.endsWith("\n") ? selected.yaml : `${selected.yaml}\n`, language: "yaml" }];
+      const opened = await onOpenFiles(files, `CI workflow template: ${selected.name}`);
+      setNotice(opened
+        ? { kind: "ok", text: `Staged ${selected.filename} for Editor review. Nothing is written until you apply it there; committing and pushing it stays with you.` }
+        : { kind: "error", text: "The workflow template was not staged for editor review. Nothing was written." });
+    } finally {
+      setStaging(false);
+    }
+  }
 
   return (
     <div className="flex h-full flex-col">
-      <PanelHeader title="CI / CD Pipelines" subtitle="Author workflows & monitor runs — no external CI dashboards" />
+      <PanelHeader title="CI / CD Pipelines" subtitle="Workflow templates — authoring only; DevLab does not read or run CI" />
 
       <div className="flex min-h-0 flex-1">
         <div className="flex-1 overflow-y-auto border-r border-white/5 p-6">
           <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-white">
             <Rocket className="h-4 w-4 text-cyan-400" />
-            Recent workflow runs
+            Workflow runs
           </h3>
-          <div className="space-y-2">
-            {runs.map((r) => {
-              const S = statusMap[r.status];
-              return (
-                <div
-                  key={r.id}
-                  className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.02] px-4 py-3 ring-soft transition hover:bg-white/[0.04]"
-                >
-                  <S.Icon className={`h-5 w-5 ${S.cls} ${r.status === "running" ? "animate-spin" : ""}`} />
-                  <div className="flex-1">
-                    <div className="text-sm font-medium text-zinc-100">{r.name}</div>
-                    <div className="text-[11.5px] text-zinc-500">
-                      <span className="font-mono">{r.branch}</span>
-                      <span className="mx-1.5 text-zinc-700">·</span>
-                      {r.when}
-                    </div>
-                  </div>
-                  <span className="font-mono text-[11px] text-zinc-500">{r.time}</span>
-                </div>
-              );
-            })}
+          <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.05] p-4 ring-soft">
+            <div className="flex items-center gap-2 text-[13px] font-semibold text-amber-100">
+              <Unplug className="h-4 w-4 text-amber-300" /> Not connected
+            </div>
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-amber-100/75">
+              DevLab does not read GitHub Actions, GitLab CI or any other provider's run status in this checkpoint, and it
+              never shows sample runs in place of real ones. Reading CI status is planned together with the bounded,
+              audited GitHub operations in the enterprise agent roadmap. Until then, check runs in your provider's
+              dashboard or from the integrated terminal:
+            </p>
+            <div className="mt-3">
+              <CodeBlock code={RUN_STATUS_RECIPE} lang="bash" />
+            </div>
           </div>
 
           <h3 className="mb-3 mt-8 flex items-center gap-2 text-sm font-semibold text-white">
             <FileCode2 className="h-4 w-4 text-cyan-400" />
-            Add a pipeline
+            Workflow templates
           </h3>
           <div className="grid gap-2 sm:grid-cols-2">
             {ciTemplates.map((t) => (
               <button
                 key={t.id}
-                onClick={() => setSelected(t)}
+                onClick={() => { setSelected(t); setNotice(null); }}
                 className={`rounded-xl border p-4 text-left transition ring-soft ${
                   selected.id === t.id
                     ? "border-cyan-500/40 bg-cyan-500/5"
@@ -73,19 +75,43 @@ export function CicdPanel() {
               </button>
             ))}
           </div>
+          <p className="mt-3 text-[11.5px] leading-relaxed text-zinc-500">
+            Templates are static starting points from DevLab's catalog. Review the steps, pinned action versions and
+            secrets they expect before committing one; DevLab does not push to <span className="font-mono">.github/workflows/</span>.
+          </p>
         </div>
 
         <div className="flex w-[48%] shrink-0 flex-col overflow-y-auto p-6">
-          <div className="mb-3 flex items-center justify-between">
-            <div>
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="min-w-0">
               <h3 className="text-sm font-semibold text-white">{selected.name}</h3>
-              <p className="font-mono text-[11px] text-zinc-500">{selected.filename}</p>
+              <p className="truncate font-mono text-[11px] text-zinc-500">{selected.filename}</p>
             </div>
-            <span className="rounded-md bg-white/5 px-2 py-1 text-[11px] text-zinc-400">
-              {selected.provider}
-            </span>
+            <div className="flex shrink-0 items-center gap-2">
+              <span className="rounded-md bg-white/5 px-2 py-1 text-[11px] text-zinc-400">
+                {selected.provider}
+              </span>
+              {onOpenFiles && (
+                <button
+                  onClick={() => { void stageTemplate(); }}
+                  disabled={staging}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/25 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/10 disabled:opacity-50"
+                >
+                  <FileDiff className="h-3.5 w-3.5" /> Stage for review
+                </button>
+              )}
+            </div>
           </div>
           <CodeBlock code={selected.yaml} lang="yaml" />
+          {notice && (
+            <div className={`mt-3 rounded-lg border px-3 py-2 text-[12px] ${notice.kind === "ok" ? "border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-200" : "border-amber-500/25 bg-amber-500/[0.06] text-amber-200"}`}>
+              {notice.text}
+            </div>
+          )}
+          <p className="mt-3 text-[11.5px] leading-relaxed text-zinc-500">
+            Staging goes through the same reviewed-draft gate as Project Builder: the path policy runs first, Rust validates
+            the draft metadata, and the file is written only when you click Apply in the Editor.
+          </p>
         </div>
       </div>
     </div>
