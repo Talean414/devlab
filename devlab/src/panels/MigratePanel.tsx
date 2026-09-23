@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { PanelHeader } from "./AgentPanel";
 import { CodeBlock } from "../components/CodeBlock";
-import { getApiKey, streamChat } from "../lib/gemini";
-import type { VFile } from "../types";
+import { getCurrentAiRoute, hasGenerationAccess, streamChat } from "../lib/gemini";
+import type { OpenGeneratedDrafts, VFile } from "../types";
 import { Database, Wand2, Loader2, ArrowRight, FileDiff, ScrollText, Plug, ListChecks } from "lucide-react";
 
 type Orm = "prisma" | "drizzle" | "sql";
@@ -21,7 +21,7 @@ const EXAMPLES = [
   "Add comments and reactions to the posts table",
 ];
 
-export function MigratePanel({ onOpenFiles }: { onOpenFiles: (f: VFile[]) => void }) {
+export function MigratePanel({ onOpenFiles }: { onOpenFiles: OpenGeneratedDrafts }) {
   const [orm, setOrm] = useState<Orm>("prisma");
   const [req, setReq] = useState("");
   const [schema, setSchema] = useState(DEFAULT_SCHEMA);
@@ -31,7 +31,10 @@ export function MigratePanel({ onOpenFiles }: { onOpenFiles: (f: VFile[]) => voi
   const [error, setError] = useState("");
 
   async function generate(text: string) {
-    if (!getApiKey() || !text.trim() || busy) return;
+    if (!text.trim() || busy) return;
+    const route = getCurrentAiRoute("migration");
+    if (route.status !== "active") { setError(route.reason); return; }
+    if (!hasGenerationAccess("migration")) { setError("Add your Gemini key in Settings first, or select the native Ollama provider."); return; }
     setBusy(true); setError(""); setResult(null);
     try {
       let acc = "";
@@ -52,7 +55,7 @@ Respond with ONLY valid JSON (no fences):
   "checklist": ["step 1 to deploy this safely", "..."]
 }
 Keep to the existing schema's conventions. Use snake_case columns in SQL. Escape newlines properly in JSON strings.`;
-      for await (const ch of streamChat([{ role: "user", text: prompt }])) acc += ch;
+      for await (const ch of streamChat([{ role: "user", text: prompt }], { task: "migration" })) acc += ch;
       const clean = acc.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
       setResult(JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1)));
     } catch (e) {
@@ -64,13 +67,14 @@ Keep to the existing schema's conventions. Use snake_case columns in SQL. Escape
     }
   }
 
-  function applyAll() {
+  async function applyAll() {
     if (!result) return;
     const files: VFile[] = [];
     if (orm === "prisma") files.push({ path: "prisma/schema.prisma", content: result.prisma, language: "prisma" });
     files.push({ path: `prisma/migrations/${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "").slice(0, 12)}_devlab/migration.sql`, content: result.sql, language: "sql" });
     files.push({ path: "src/routes/generated.ts", content: result.routes, language: "typescript" });
-    onOpenFiles(files);
+    const opened = await onOpenFiles(files, `Natural-language migration draft: ${result.summary}`);
+    if (!opened) setError("Migration drafts were not staged for editor review. Nothing was written.");
   }
 
   return (
@@ -99,15 +103,15 @@ Keep to the existing schema's conventions. Use snake_case columns in SQL. Escape
               placeholder='Describe the change… e.g. "Add a vendors table linked to users, with Stripe subscription IDs and a status enum"'
               className="w-full resize-none rounded-lg border border-white/10 bg-[#0d1017] p-3 text-[13px] text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-cyan-500/50" />
             <div className="mt-2 flex items-center gap-2">
-              <button onClick={() => generate(req)} disabled={busy || !req.trim() || !getApiKey()}
+              <button onClick={() => generate(req)} disabled={busy || !req.trim()}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 px-4 py-2 text-[12.5px] font-semibold text-white hover:from-cyan-400 hover:to-blue-500 disabled:opacity-40">
                 {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
                 Migrate
               </button>
               {result && (
-                <button onClick={applyAll}
+                <button onClick={() => { void applyAll(); }}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-[12.5px] font-semibold text-emerald-200 hover:bg-emerald-500/20">
-                  <ArrowRight className="h-3.5 w-3.5" /> Apply to editor
+                  <ArrowRight className="h-3.5 w-3.5" /> Review drafts
                 </button>
               )}
             </div>
@@ -127,8 +131,8 @@ Keep to the existing schema's conventions. Use snake_case columns in SQL. Escape
             <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-zinc-600">
               <FileDiff className="h-10 w-10" />
               <p className="max-w-xs text-[13px]">
-                Describe a schema change in plain English and DevLab writes the Prisma schema,
-                a production SQL migration and the API routes to go with it.
+                Describe a schema change in plain English and DevLab drafts a Prisma schema,
+                a production SQL migration and the API routes for you to review.
               </p>
             </div>
           )}

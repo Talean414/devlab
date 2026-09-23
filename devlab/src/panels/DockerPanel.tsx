@@ -1,118 +1,823 @@
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PanelHeader } from "./AgentPanel";
-import { CodeBlock } from "../components/CodeBlock";
-import { dockerfileTemplate, composeTemplate } from "../data/catalog";
-import { Play, Square, Container, FileCode2, Layers } from "lucide-react";
+import {
+  createDockerContainer,
+  getDockerLogs,
+  getDockerSnapshot,
+  pullDockerImage,
+  removeDockerContainer,
+  restartDockerContainer,
+  startDockerContainer,
+  stopDockerContainer,
+  DockerCommandError,
+  type DockerContainer,
+  type DockerCreateRequest,
+  type DockerLogs,
+  type DockerOperationResult,
+  type DockerPortProtocol,
+  type DockerSnapshot,
+} from "../lib/docker";
+import {
+  AlertCircle,
+  Box,
+  CheckCircle2,
+  Container,
+  Download,
+  FileText,
+  Gauge,
+  HardDrive,
+  Image as ImageIcon,
+  Loader2,
+  Network,
+  Play,
+  Plus,
+  RefreshCw,
+  RotateCw,
+  Server,
+  ShieldAlert,
+  Square,
+  Trash2,
+  X,
+} from "lucide-react";
 
-interface Container {
-  id: string;
-  name: string;
-  image: string;
-  status: "running" | "exited";
-  cpu: number;
-  mem: number;
-  ports: string;
+type Tab = "containers" | "images" | "engine";
+
+interface PortDraft {
+  id: number;
+  hostPort: string;
+  containerPort: string;
+  protocol: DockerPortProtocol;
 }
 
-const initial: Container[] = [
-  { id: "ab12cd34", name: "app", image: "devlab/app:latest", status: "running", cpu: 12, mem: 210, ports: "3000→3000" },
-  { id: "ef56gh78", name: "db", image: "postgres:16-alpine", status: "running", cpu: 4, mem: 96, ports: "5432→5432" },
-  { id: "ij90kl12", name: "cache", image: "redis:7-alpine", status: "running", cpu: 1, mem: 18, ports: "6379→6379" },
-  { id: "mn34op56", name: "worker", image: "devlab/worker", status: "exited", cpu: 0, mem: 0, ports: "—" },
-];
-
 export function DockerPanel() {
-  const [containers, setContainers] = useState(initial);
-  const [tab, setTab] = useState<"containers" | "dockerfile" | "compose">("containers");
+  const [snapshot, setSnapshot] = useState<DockerSnapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [tab, setTab] = useState<Tab>("containers");
+  const [logs, setLogs] = useState<DockerLogs | null>(null);
+  const [logsLoading, setLogsLoading] = useState("");
+  const [pullOpen, setPullOpen] = useState(false);
+  const [pullReference, setPullReference] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
+  const [containerName, setContainerName] = useState("");
+  const [containerImage, setContainerImage] = useState("");
+  const [portDrafts, setPortDrafts] = useState<PortDraft[]>([]);
+  const refreshInFlight = useRef(false);
+  const operationInFlight = useRef(false);
+  const nextPortId = useRef(1);
 
-  function toggle(id: string) {
-    setContainers((cs) =>
-      cs.map((c) =>
-        c.id === id
-          ? {
-              ...c,
-              status: c.status === "running" ? "exited" : "running",
-              cpu: c.status === "running" ? 0 : Math.floor(Math.random() * 15) + 1,
-              mem: c.status === "running" ? 0 : Math.floor(Math.random() * 200) + 20,
-            }
-          : c,
-      ),
+  const refresh = useCallback(async (quiet = false) => {
+    if (refreshInFlight.current || operationInFlight.current) return;
+    refreshInFlight.current = true;
+    if (!quiet) setLoading(true);
+    setError("");
+    try {
+      setSnapshot(await getDockerSnapshot());
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      refreshInFlight.current = false;
+      if (!quiet) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    const timer = setInterval(() => { void refresh(true); }, 15_000);
+    return () => clearInterval(timer);
+  }, [refresh]);
+
+  const running = useMemo(
+    () => snapshot?.containers.filter((container) => container.running).length ?? 0,
+    [snapshot],
+  );
+
+  const localImageOptions = useMemo(() => {
+    const values = new Set<string>();
+    for (const image of snapshot?.images ?? []) {
+      if (image.repository && image.repository !== "<none>") {
+        values.add(image.tag && image.tag !== "<none>" ? `${image.repository}:${image.tag}` : image.repository);
+      } else if (image.id) {
+        values.add(image.id);
+      }
+    }
+    return [...values].sort();
+  }, [snapshot]);
+
+  async function runOperation(
+    key: string,
+    operation: () => Promise<DockerOperationResult>,
+  ): Promise<boolean> {
+    if (operationInFlight.current) return false;
+    if (refreshInFlight.current) {
+      setError("Docker state is refreshing. Try the operation again in a moment.");
+      return false;
+    }
+    operationInFlight.current = true;
+    let refreshAfter = false;
+    setBusy(key);
+    setError("");
+    setNotice("");
+    try {
+      const result = await operation();
+      setSnapshot(result.snapshot);
+      setNotice([result.message, result.output].filter(Boolean).join(" "));
+      if (logs && !result.snapshot.containers.some((container) => container.id === logs.containerId)) {
+        setLogs(null);
+      }
+      return true;
+    } catch (caught) {
+      if (caught instanceof DockerCommandError && caught.code === "docker_refresh_failed_after_action") {
+        setNotice(caught.message);
+        refreshAfter = true;
+        return true;
+      }
+      setError(errorMessage(caught));
+      return false;
+    } finally {
+      operationInFlight.current = false;
+      setBusy("");
+      if (refreshAfter) void refresh();
+    }
+  }
+
+  async function openLogs(container: DockerContainer) {
+    setLogsLoading(container.id);
+    setError("");
+    try {
+      setLogs(await getDockerLogs(container.id));
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setLogsLoading("");
+    }
+  }
+
+  async function submitPull(event: React.FormEvent) {
+    event.preventDefault();
+    const reference = pullReference.trim();
+    if (!reference) {
+      setError("Enter an image reference to pull.");
+      return;
+    }
+    const succeeded = await runOperation("pull", () => pullDockerImage(reference));
+    if (succeeded) {
+      setPullReference("");
+      setPullOpen(false);
+      setTab("images");
+    }
+  }
+
+  async function submitCreate(event: React.FormEvent) {
+    event.preventDefault();
+    const name = containerName.trim();
+    const image = containerImage.trim();
+    if (!name || !image) {
+      setError("Enter a container name and select a local image.");
+      return;
+    }
+    const ports = portDrafts.map((mapping) => ({
+      hostPort: Number(mapping.hostPort),
+      containerPort: Number(mapping.containerPort),
+      protocol: mapping.protocol,
+    }));
+    if (ports.some((mapping) => (
+      !Number.isInteger(mapping.hostPort)
+      || !Number.isInteger(mapping.containerPort)
+      || mapping.hostPort < 1
+      || mapping.hostPort > 65_535
+      || mapping.containerPort < 1
+      || mapping.containerPort > 65_535
+    ))) {
+      setError("Every host and container port must be a whole number from 1 to 65535.");
+      return;
+    }
+    const request: DockerCreateRequest = { name, image, ports };
+    const succeeded = await runOperation("create", () => createDockerContainer(request));
+    if (succeeded) {
+      setContainerName("");
+      setContainerImage("");
+      setPortDrafts([]);
+      setCreateOpen(false);
+      setTab("containers");
+    }
+  }
+
+  function openCreate() {
+    setError("");
+    setContainerImage((current) => current || localImageOptions[0] || "");
+    setCreateOpen(true);
+  }
+
+  function addPortMapping() {
+    if (portDrafts.length >= 16) return;
+    const id = nextPortId.current;
+    nextPortId.current += 1;
+    setPortDrafts((current) => [
+      ...current,
+      { id, hostPort: "", containerPort: "", protocol: "tcp" },
+    ]);
+  }
+
+  function updatePortMapping(
+    id: number,
+    field: "hostPort" | "containerPort" | "protocol",
+    value: string,
+  ) {
+    setPortDrafts((current) => current.map((mapping) => (
+      mapping.id === id ? { ...mapping, [field]: value } as PortDraft : mapping
+    )));
+  }
+
+  function start(container: DockerContainer) {
+    void runOperation(`start-${container.id}`, () => startDockerContainer(container.id));
+  }
+
+  function stop(container: DockerContainer) {
+    if (!confirm(`Stop the real container “${container.name || container.shortId}”? Docker will wait up to 10 seconds before terminating it.`)) return;
+    void runOperation(`stop-${container.id}`, () => stopDockerContainer(container.id));
+  }
+
+  function restart(container: DockerContainer) {
+    if (!confirm(`Restart the real container “${container.name || container.shortId}”? Active connections may be interrupted.`)) return;
+    void runOperation(`restart-${container.id}`, () => restartDockerContainer(container.id));
+  }
+
+  function remove(container: DockerContainer) {
+    if (!confirm(`Permanently remove the stopped container “${container.name || container.shortId}”? Its writable container layer will be deleted.`)) return;
+    void runOperation(`remove-${container.id}`, () => removeDockerContainer(container.id));
+  }
+
+  const ready = snapshot?.state.code === "ready" && snapshot.daemonConnected;
+  const subtitle = ready
+    ? `Docker Engine ${snapshot.daemonVersion ?? "connected"} · ${running} running · ${snapshot.containers.length} total`
+    : snapshot?.state.message ?? "Detecting Docker CLI and engine";
+
+  return (
+    <div className="relative flex h-full flex-col">
+      <PanelHeader
+        title="Docker & Containers"
+        subtitle={subtitle}
+        badge={ready ? "Engine connected" : "Unavailable"}
+        badgeOk={ready}
+      />
+
+      <div className="flex items-center justify-between gap-4 overflow-x-auto border-b border-white/5 bg-[#0d1017]/40 px-6">
+        <div className="flex gap-5 text-xs">
+          {([
+            { id: "containers", Icon: Container, label: `Containers${ready ? ` (${snapshot.containers.length})` : ""}` },
+            { id: "images", Icon: ImageIcon, label: `Images${ready ? ` (${snapshot.images.length})` : ""}` },
+            { id: "engine", Icon: Server, label: "Engine" },
+          ] as const).map((item) => (
+            <button
+              key={item.id}
+              onClick={() => setTab(item.id)}
+              className={`-mb-px inline-flex items-center gap-1.5 border-b-2 px-1 py-3 font-medium ${
+                tab === item.id
+                  ? "border-cyan-400 text-white"
+                  : "border-transparent text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              <item.Icon className="h-3.5 w-3.5" /> {item.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => { setError(""); setPullOpen(true); }}
+            disabled={!ready || loading || !!busy}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-[11px] text-zinc-400 hover:bg-white/5 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Download className="h-3 w-3" /> Pull image
+          </button>
+          <button
+            onClick={openCreate}
+            disabled={!ready || loading || !!busy || localImageOptions.length === 0}
+            title={localImageOptions.length === 0 ? "Pull an image before creating a container" : "Create a stopped container"}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-500/15 px-2.5 py-1.5 text-[11px] font-medium text-cyan-200 hover:bg-cyan-500/25 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Plus className="h-3 w-3" /> Create container
+          </button>
+          <button
+            onClick={() => void refresh()}
+            disabled={loading || !!busy}
+            title="Refresh from Docker"
+            className="rounded-lg p-2 text-zinc-500 hover:bg-white/5 hover:text-zinc-200 disabled:opacity-40"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+          </button>
+        </div>
+      </div>
+
+      {error && <Banner tone="error" text={error} onClose={() => setError("")} />}
+      {notice && <Banner tone="success" text={notice} onClose={() => setNotice("")} />}
+
+      {loading && !snapshot ? (
+        <div className="flex flex-1 items-center justify-center gap-2 text-sm text-zinc-500">
+          <Loader2 className="h-4 w-4 animate-spin text-cyan-400" /> Reading the real Docker engine…
+        </div>
+      ) : !ready ? (
+        <UnavailableState snapshot={snapshot} onRefresh={() => void refresh()} />
+      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {tab === "containers" && (
+            <ContainersView
+              containers={snapshot.containers}
+              busy={busy}
+              logsLoading={logsLoading}
+              onStart={start}
+              onStop={stop}
+              onRestart={restart}
+              onRemove={remove}
+              onLogs={(container) => void openLogs(container)}
+            />
+          )}
+          {tab === "images" && <ImagesView snapshot={snapshot} />}
+          {tab === "engine" && <EngineView snapshot={snapshot} running={running} />}
+        </div>
+      )}
+
+      {logs && <LogsDrawer logs={logs} onClose={() => setLogs(null)} onRefresh={() => {
+        const container = snapshot?.containers.find((candidate) => candidate.id === logs.containerId);
+        if (container) void openLogs(container);
+      }} />}
+
+      {pullOpen && (
+        <PullImageDialog
+          reference={pullReference}
+          error={error}
+          busy={busy === "pull"}
+          onChange={setPullReference}
+          onClose={() => { if (!busy) { setPullOpen(false); setError(""); } }}
+          onSubmit={(event) => void submitPull(event)}
+        />
+      )}
+
+      {createOpen && (
+        <CreateContainerDialog
+          name={containerName}
+          image={containerImage}
+          imageOptions={localImageOptions}
+          ports={portDrafts}
+          error={error}
+          busy={busy === "create"}
+          onNameChange={setContainerName}
+          onImageChange={setContainerImage}
+          onAddPort={addPortMapping}
+          onUpdatePort={updatePortMapping}
+          onRemovePort={(id) => setPortDrafts((current) => current.filter((mapping) => mapping.id !== id))}
+          onClose={() => { if (!busy) { setCreateOpen(false); setError(""); } }}
+          onSubmit={(event) => void submitCreate(event)}
+        />
+      )}
+    </div>
+  );
+}
+
+function PullImageDialog({
+  reference,
+  error,
+  busy,
+  onChange,
+  onClose,
+  onSubmit,
+}: {
+  reference: string;
+  error: string;
+  busy: boolean;
+  onChange: (value: string) => void;
+  onClose: () => void;
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/70 p-5 backdrop-blur-sm">
+      <form onSubmit={onSubmit} className="w-full max-w-lg rounded-2xl border border-white/10 bg-[#10141c] p-5 shadow-2xl ring-soft">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="flex items-center gap-2 text-base font-semibold text-white"><Download className="h-4 w-4 text-cyan-300" /> Pull an image</h3>
+            <p className="mt-1 text-[12px] leading-relaxed text-zinc-500">Docker downloads this exact image reference using the current daemon and registry configuration.</p>
+          </div>
+          <button type="button" onClick={onClose} disabled={busy} className="rounded p-1.5 text-zinc-500 hover:bg-white/5 hover:text-white disabled:opacity-40"><X className="h-4 w-4" /></button>
+        </div>
+
+        <label className="mt-5 block text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+          Image reference
+          <input
+            autoFocus
+            value={reference}
+            onChange={(event) => onChange(event.target.value)}
+            disabled={busy}
+            maxLength={255}
+            placeholder="nginx:latest or ghcr.io/owner/image:tag"
+            className="mt-2 w-full rounded-lg border border-white/10 bg-black/25 px-3 py-2.5 font-mono text-[12px] normal-case tracking-normal text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-cyan-500/50 disabled:opacity-50"
+          />
+        </label>
+
+        <div className="mt-4 rounded-lg border border-amber-500/15 bg-amber-500/[0.05] p-3 text-[11.5px] leading-relaxed text-amber-100/70">
+          Pulling contacts the image registry and can download substantial data. DevLab accepts no extra Docker flags and stops the operation after 10 minutes.
+        </div>
+
+        {error && <div className="mt-3 rounded-lg border border-rose-500/20 bg-rose-500/[0.07] p-3 text-[11.5px] leading-relaxed text-rose-200">{error}</div>}
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} disabled={busy} className="rounded-lg border border-white/10 px-3.5 py-2 text-xs text-zinc-400 hover:bg-white/5 hover:text-white disabled:opacity-40">Cancel</button>
+          <button type="submit" disabled={busy || !reference.trim()} className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-500 px-4 py-2 text-xs font-semibold text-white hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-40">
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+            {busy ? "Pulling…" : "Pull image"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function CreateContainerDialog({
+  name,
+  image,
+  imageOptions,
+  ports,
+  error,
+  busy,
+  onNameChange,
+  onImageChange,
+  onAddPort,
+  onUpdatePort,
+  onRemovePort,
+  onClose,
+  onSubmit,
+}: {
+  name: string;
+  image: string;
+  imageOptions: string[];
+  ports: PortDraft[];
+  error: string;
+  busy: boolean;
+  onNameChange: (value: string) => void;
+  onImageChange: (value: string) => void;
+  onAddPort: () => void;
+  onUpdatePort: (id: number, field: "hostPort" | "containerPort" | "protocol", value: string) => void;
+  onRemovePort: (id: number) => void;
+  onClose: () => void;
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/70 p-5 backdrop-blur-sm">
+      <form onSubmit={onSubmit} className="max-h-[90%] w-full max-w-2xl overflow-y-auto rounded-2xl border border-white/10 bg-[#10141c] p-5 shadow-2xl ring-soft">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="flex items-center gap-2 text-base font-semibold text-white"><Plus className="h-4 w-4 text-cyan-300" /> Create a container</h3>
+            <p className="mt-1 text-[12px] leading-relaxed text-zinc-500">Create from a local image using its default entrypoint and command. The new container remains stopped.</p>
+          </div>
+          <button type="button" onClick={onClose} disabled={busy} className="rounded p-1.5 text-zinc-500 hover:bg-white/5 hover:text-white disabled:opacity-40"><X className="h-4 w-4" /></button>
+        </div>
+
+        <div className="mt-5 grid gap-4 sm:grid-cols-2">
+          <label className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+            Container name
+            <input
+              autoFocus
+              value={name}
+              onChange={(event) => onNameChange(event.target.value)}
+              disabled={busy}
+              maxLength={128}
+              placeholder="my-service"
+              className="mt-2 w-full rounded-lg border border-white/10 bg-black/25 px-3 py-2.5 font-mono text-[12px] normal-case tracking-normal text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-cyan-500/50 disabled:opacity-50"
+            />
+          </label>
+          <label className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+            Local image
+            <input
+              list="devlab-local-images"
+              value={image}
+              onChange={(event) => onImageChange(event.target.value)}
+              disabled={busy}
+              maxLength={255}
+              placeholder="Select a local image"
+              className="mt-2 w-full rounded-lg border border-white/10 bg-black/25 px-3 py-2.5 font-mono text-[12px] normal-case tracking-normal text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-cyan-500/50 disabled:opacity-50"
+            />
+            <datalist id="devlab-local-images">
+              {imageOptions.map((option) => <option key={option} value={option} />)}
+            </datalist>
+          </label>
+        </div>
+
+        <div className="mt-5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h4 className="text-[12px] font-semibold text-zinc-200">Port mappings</h4>
+              <p className="mt-0.5 text-[10.5px] text-zinc-600">Optional · host ports bind only to 127.0.0.1</p>
+            </div>
+            <button type="button" onClick={onAddPort} disabled={busy || ports.length >= 16} className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-[11px] text-zinc-400 hover:bg-white/5 hover:text-white disabled:opacity-40"><Plus className="h-3 w-3" /> Add mapping</button>
+          </div>
+
+          {ports.length === 0 ? (
+            <div className="mt-3 rounded-lg border border-dashed border-white/10 p-4 text-center text-[11px] text-zinc-600">No host ports will be published.</div>
+          ) : (
+            <div className="mt-3 space-y-2">
+              {ports.map((mapping) => (
+                <div key={mapping.id} className="grid grid-cols-[1fr_auto_1fr_86px_auto] items-center gap-2 rounded-lg bg-black/20 p-2">
+                  <input aria-label="Host port" inputMode="numeric" value={mapping.hostPort} onChange={(event) => onUpdatePort(mapping.id, "hostPort", event.target.value)} disabled={busy} placeholder="Host" className="min-w-0 rounded border border-white/10 bg-black/20 px-2.5 py-2 font-mono text-[11px] text-zinc-200 outline-none focus:border-cyan-500/50" />
+                  <span className="text-zinc-700">→</span>
+                  <input aria-label="Container port" inputMode="numeric" value={mapping.containerPort} onChange={(event) => onUpdatePort(mapping.id, "containerPort", event.target.value)} disabled={busy} placeholder="Container" className="min-w-0 rounded border border-white/10 bg-black/20 px-2.5 py-2 font-mono text-[11px] text-zinc-200 outline-none focus:border-cyan-500/50" />
+                  <select aria-label="Protocol" value={mapping.protocol} onChange={(event) => onUpdatePort(mapping.id, "protocol", event.target.value)} disabled={busy} className="rounded border border-white/10 bg-[#0c0f15] px-2 py-2 text-[11px] text-zinc-300 outline-none focus:border-cyan-500/50">
+                    <option value="tcp">TCP</option>
+                    <option value="udp">UDP</option>
+                  </select>
+                  <button type="button" onClick={() => onRemovePort(mapping.id)} disabled={busy} title="Remove mapping" className="rounded p-2 text-zinc-600 hover:bg-rose-500/10 hover:text-rose-300 disabled:opacity-40"><Trash2 className="h-3.5 w-3.5" /></button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-5 rounded-lg border border-cyan-500/15 bg-cyan-500/[0.04] p-3 text-[11.5px] leading-relaxed text-zinc-400">
+          DevLab does not pass a shell, custom command, environment values, host mounts, privileged mode, or arbitrary Docker flags. Start the stopped container explicitly after reviewing it in the list.
+        </div>
+
+        {error && <div className="mt-3 rounded-lg border border-rose-500/20 bg-rose-500/[0.07] p-3 text-[11.5px] leading-relaxed text-rose-200">{error}</div>}
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} disabled={busy} className="rounded-lg border border-white/10 px-3.5 py-2 text-xs text-zinc-400 hover:bg-white/5 hover:text-white disabled:opacity-40">Cancel</button>
+          <button type="submit" disabled={busy || !name.trim() || !image.trim()} className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-500 px-4 py-2 text-xs font-semibold text-white hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-40">
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+            {busy ? "Creating…" : "Create stopped container"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ContainersView({
+  containers,
+  busy,
+  logsLoading,
+  onStart,
+  onStop,
+  onRestart,
+  onRemove,
+  onLogs,
+}: {
+  containers: DockerContainer[];
+  busy: string;
+  logsLoading: string;
+  onStart: (container: DockerContainer) => void;
+  onStop: (container: DockerContainer) => void;
+  onRestart: (container: DockerContainer) => void;
+  onRemove: (container: DockerContainer) => void;
+  onLogs: (container: DockerContainer) => void;
+}) {
+  if (containers.length === 0) {
+    return (
+      <div className="flex min-h-[420px] items-center justify-center p-8">
+        <div className="max-w-md text-center">
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-cyan-500/10 ring-1 ring-cyan-500/20">
+            <Container className="h-6 w-6 text-cyan-300" />
+          </div>
+          <h3 className="mt-4 text-lg font-semibold text-white">No containers</h3>
+          <p className="mt-2 text-[13px] leading-relaxed text-zinc-500">
+            Docker returned an empty container list. DevLab does not seed examples or claim that a workload is running.
+          </p>
+        </div>
+      </div>
     );
   }
 
   return (
-    <div className="flex h-full flex-col">
-      <PanelHeader title="Docker & Containers" subtitle="Build · run · inspect — replaces Docker Desktop GUI" />
-
-      <div className="flex gap-5 border-b border-white/5 bg-[#0d1017]/40 px-6 text-xs">
-        {([
-          { id: "containers", Icon: Container, label: "Containers" },
-          { id: "dockerfile", Icon: FileCode2, label: "Dockerfile" },
-          { id: "compose",    Icon: Layers,    label: "docker-compose" },
-        ] as const).map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`inline-flex items-center gap-1.5 -mb-px border-b-2 px-1 py-3 font-medium ${
-              tab === t.id ? "border-cyan-400 text-white" : "border-transparent text-zinc-500"
-            }`}
-          >
-            <t.Icon className="h-3.5 w-3.5" />
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      <div className="flex-1 overflow-y-auto p-6">
-        {tab === "containers" && (
-          <div className="space-y-2">
-            {containers.map((c) => (
-              <div
-                key={c.id}
-                className="flex items-center gap-4 rounded-xl border border-white/10 bg-white/[0.02] px-5 py-3.5 ring-soft transition hover:bg-white/[0.04]"
-              >
-                <span
-                  className={`h-2.5 w-2.5 shrink-0 rounded-full ${
-                    c.status === "running" ? "animate-pulse bg-emerald-400 shadow shadow-emerald-400/50" : "bg-zinc-600"
-                  }`}
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-zinc-100">{c.name}</span>
-                    <span className="font-mono text-[11px] text-zinc-500">{c.id}</span>
-                  </div>
-                  <div className="text-[11.5px] text-zinc-500">
-                    {c.image} · {c.ports}
-                  </div>
+    <div className="mx-auto max-w-6xl space-y-3 p-6">
+      {containers.map((container) => {
+        return (
+          <section key={container.id} className="rounded-xl border border-white/10 bg-white/[0.02] p-4 ring-soft">
+            <div className="flex flex-wrap items-center gap-4">
+              <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${container.running ? "animate-pulse bg-emerald-400 shadow shadow-emerald-400/50" : "bg-zinc-600"}`} />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-semibold text-zinc-100">{container.name || "Unnamed container"}</span>
+                  <span className="font-mono text-[10.5px] text-zinc-600">{container.shortId}</span>
+                  <span className={`rounded-full px-2 py-0.5 text-[9.5px] font-semibold uppercase ${container.running ? "bg-emerald-500/15 text-emerald-300" : "bg-white/5 text-zinc-500"}`}>
+                    {container.state || "unknown"}
+                  </span>
                 </div>
-                <div className="hidden gap-6 text-right text-[11px] sm:flex">
-                  <div>
-                    <div className="text-zinc-500">CPU</div>
-                    <div className="font-mono text-cyan-300">{c.cpu}%</div>
-                  </div>
-                  <div>
-                    <div className="text-zinc-500">MEM</div>
-                    <div className="font-mono text-violet-300">{c.mem} MB</div>
-                  </div>
-                </div>
-                <button
-                  onClick={() => toggle(c.id)}
-                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition ${
-                    c.status === "running"
-                      ? "bg-rose-500/15 text-rose-300 hover:bg-rose-500/25"
-                      : "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
-                  }`}
-                >
-                  {c.status === "running" ? <Square className="h-3 w-3 fill-current" /> : <Play className="h-3 w-3 fill-current" />}
-                  {c.status === "running" ? "Stop" : "Start"}
-                </button>
+                <div className="mt-1 truncate text-[11.5px] text-zinc-500">{container.image}</div>
+                <div className="mt-0.5 truncate text-[10.5px] text-zinc-600">{container.status}{container.ports ? ` · ${container.ports}` : ""}</div>
               </div>
-            ))}
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <ActionButton
+                  title="View the latest 500 log lines"
+                  label="Logs"
+                  Icon={FileText}
+                  loading={logsLoading === container.id}
+                  disabled={!!busy || !!logsLoading}
+                  onClick={() => onLogs(container)}
+                />
+                {container.running ? (
+                  <>
+                    <ActionButton title="Restart container" label="Restart" Icon={RotateCw} loading={busy === `restart-${container.id}`} disabled={!!busy} onClick={() => onRestart(container)} />
+                    <ActionButton title="Stop container" label="Stop" Icon={Square} loading={busy === `stop-${container.id}`} disabled={!!busy} danger onClick={() => onStop(container)} />
+                  </>
+                ) : (
+                  <>
+                    <ActionButton title="Start container" label="Start" Icon={Play} loading={busy === `start-${container.id}`} disabled={!!busy} positive onClick={() => onStart(container)} />
+                    <ActionButton title="Remove stopped container" label="Remove" Icon={Trash2} loading={busy === `remove-${container.id}`} disabled={!!busy} danger onClick={() => onRemove(container)} />
+                  </>
+                )}
+              </div>
+            </div>
+
+            {container.stats && (
+              <div className="mt-4 grid gap-2 border-t border-white/5 pt-3 sm:grid-cols-3 lg:grid-cols-6">
+                <Metric Icon={Gauge} label="CPU" value={container.stats.cpuPercent || "—"} />
+                <Metric Icon={HardDrive} label="Memory" value={container.stats.memoryUsage || "—"} />
+                <Metric Icon={Gauge} label="Memory %" value={container.stats.memoryPercent || "—"} />
+                <Metric Icon={Network} label="Network I/O" value={container.stats.networkIo || "—"} />
+                <Metric Icon={HardDrive} label="Block I/O" value={container.stats.blockIo || "—"} />
+                <Metric Icon={Box} label="PIDs" value={container.stats.pids || "—"} />
+              </div>
+            )}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+function ImagesView({ snapshot }: { snapshot: DockerSnapshot }) {
+  return (
+    <div className="mx-auto max-w-6xl p-6">
+      <section className="overflow-hidden rounded-xl border border-white/10 bg-white/[0.02] ring-soft">
+        <div className="border-b border-white/5 px-5 py-4">
+          <h3 className="text-sm font-semibold text-white">Local images</h3>
+          <p className="mt-0.5 text-[11px] text-zinc-600">Read directly from Docker Engine · pull adds an exact registry reference; build and deletion remain unavailable</p>
+        </div>
+        {snapshot.images.length === 0 ? (
+          <div className="p-8 text-center text-sm text-zinc-600">Docker returned no local images.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-[12px]">
+              <thead className="bg-[#12161f]/90 text-[10px] uppercase tracking-wider text-zinc-500">
+                <tr>
+                  <th className="px-5 py-3 font-medium">Repository</th>
+                  <th className="px-5 py-3 font-medium">Tag</th>
+                  <th className="px-5 py-3 font-medium">Image ID</th>
+                  <th className="px-5 py-3 font-medium">Size</th>
+                  <th className="px-5 py-3 font-medium">Created</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {snapshot.images.map((image, index) => (
+                  <tr key={`${image.id}-${image.repository}-${image.tag}-${index}`} className="text-zinc-300 hover:bg-white/[0.03]">
+                    <td className="max-w-xs truncate px-5 py-3 font-medium text-zinc-200">{image.repository || "<none>"}</td>
+                    <td className="px-5 py-3 text-cyan-300">{image.tag || "<none>"}</td>
+                    <td className="px-5 py-3 font-mono text-[10.5px] text-zinc-500" title={image.id}>{image.shortId}</td>
+                    <td className="px-5 py-3">{image.size || "—"}</td>
+                    <td className="px-5 py-3 text-zinc-500">{image.createdSince || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
-        {tab === "dockerfile" && <CodeBlock code={dockerfileTemplate} lang="dockerfile" />}
-        {tab === "compose"    && <CodeBlock code={composeTemplate}    lang="yaml" />}
+      </section>
+    </div>
+  );
+}
+
+function EngineView({ snapshot, running }: { snapshot: DockerSnapshot; running: number }) {
+  return (
+    <div className="mx-auto max-w-3xl space-y-5 p-6">
+      <section className="rounded-xl border border-white/10 bg-white/[0.02] p-5 ring-soft">
+        <h3 className="text-sm font-semibold text-white">Native Docker connection</h3>
+        <dl className="mt-4 space-y-3 text-[12px]">
+          <Definition label="CLI" value={snapshot.cliVersion ?? "Not found"} mono />
+          <Definition label="Engine" value={snapshot.daemonVersion ?? "Unavailable"} mono />
+          <Definition label="Containers" value={`${snapshot.containers.length} total · ${running} running · ${snapshot.containers.length - running} stopped`} />
+          <Definition label="Images" value={`${snapshot.images.length} local image records`} />
+          <Definition label="Refresh" value="Manual and every 15 seconds while this panel is open" />
+        </dl>
+      </section>
+
+      <section className="flex gap-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] p-5 text-[12.5px] leading-relaxed text-amber-100/80">
+        <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-300" />
+        <div>
+          <strong className="text-amber-200">Docker access is privileged.</strong> Anyone who can control a Docker daemon can usually obtain the same authority as the account or service running that daemon. DevLab uses fixed CLI commands, validates identifiers and creation fields, binds new host ports to loopback, bounds output, and requires confirmation for stop, restart, and removal. It does not claim to sandbox Docker workloads.
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-white/10 bg-white/[0.02] p-5 text-[12px] leading-relaxed text-zinc-500 ring-soft">
+        Image pull and stopped-container creation are exposed through narrow typed forms. This step intentionally exposes no arbitrary Docker arguments, shell execution, custom container commands, environment values, host mounts, privileged mode, image or volume deletion, builds, or Compose deployment. Use the real terminal for operations not represented by a typed command.
+      </section>
+    </div>
+  );
+}
+
+function UnavailableState({ snapshot, onRefresh }: { snapshot: DockerSnapshot | null; onRefresh: () => void }) {
+  const installed = snapshot?.cliInstalled;
+  return (
+    <div className="flex flex-1 items-center justify-center p-8">
+      <div className="max-w-lg rounded-2xl border border-amber-500/20 bg-amber-500/[0.05] p-7 text-center ring-soft">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-amber-500/10 ring-1 ring-amber-500/20">
+          <AlertCircle className="h-6 w-6 text-amber-300" />
+        </div>
+        <h3 className="mt-4 text-lg font-semibold text-white">{installed ? "Docker Engine unavailable" : "Docker is not installed"}</h3>
+        <p className="mt-2 text-[13px] leading-relaxed text-zinc-400">
+          {snapshot?.state.message ?? "DevLab could not inspect Docker on this machine."}
+        </p>
+        {snapshot?.cliVersion && <p className="mt-3 font-mono text-[10.5px] text-zinc-600">{snapshot.cliVersion}</p>}
+        <div className="mt-4 rounded-lg bg-black/20 p-3 text-left text-[11.5px] leading-relaxed text-zinc-500">
+          {installed
+            ? "Start Docker Desktop or the Docker daemon, then ensure your user can access the selected Docker context. DevLab reports permission errors instead of showing sample containers."
+            : "Install Docker Engine or Docker Desktop and make the docker command available on PATH, then restart DevLab."}
+        </div>
+        <button onClick={onRefresh} className="mt-5 inline-flex items-center gap-1.5 rounded-lg bg-cyan-500 px-4 py-2 text-sm font-semibold text-white hover:bg-cyan-400">
+          <RefreshCw className="h-3.5 w-3.5" /> Retry detection
+        </button>
       </div>
     </div>
   );
+}
+
+function LogsDrawer({ logs, onClose, onRefresh }: { logs: DockerLogs; onClose: () => void; onRefresh: () => void }) {
+  return (
+    <div className="absolute inset-x-6 bottom-8 z-20 flex max-h-[55%] flex-col overflow-hidden rounded-xl border border-cyan-500/25 bg-[#090c11] shadow-2xl ring-soft">
+      <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-sm font-semibold text-white"><FileText className="h-4 w-4 text-cyan-300" /> Container logs</div>
+          <div className="truncate font-mono text-[10.5px] text-zinc-600">{logs.containerName} · {logs.containerId.slice(0, 12)} · latest 500 lines</div>
+        </div>
+        <div className="flex items-center gap-1">
+          <button onClick={onRefresh} title="Refresh logs" className="rounded p-2 text-zinc-500 hover:bg-white/5 hover:text-white"><RefreshCw className="h-3.5 w-3.5" /></button>
+          <button onClick={onClose} title="Close logs" className="rounded p-2 text-zinc-500 hover:bg-white/5 hover:text-white"><X className="h-3.5 w-3.5" /></button>
+        </div>
+      </div>
+      <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-[11px] leading-relaxed text-zinc-300">
+        {logs.content || "The container returned no log output."}
+      </pre>
+    </div>
+  );
+}
+
+function ActionButton({
+  title,
+  label,
+  Icon,
+  loading,
+  disabled,
+  danger = false,
+  positive = false,
+  onClick,
+}: {
+  title: string;
+  label: string;
+  Icon: typeof Play;
+  loading: boolean;
+  disabled: boolean;
+  danger?: boolean;
+  positive?: boolean;
+  onClick: () => void;
+}) {
+  const colors = danger
+    ? "border-rose-500/20 text-rose-300 hover:bg-rose-500/10"
+    : positive
+      ? "border-emerald-500/20 text-emerald-300 hover:bg-emerald-500/10"
+      : "border-white/10 text-zinc-400 hover:bg-white/5 hover:text-white";
+  return (
+    <button onClick={onClick} disabled={disabled} title={title} className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] transition disabled:cursor-not-allowed disabled:opacity-40 ${colors}`}>
+      {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Icon className="h-3 w-3" />} {label}
+    </button>
+  );
+}
+
+function Metric({ Icon, label, value }: { Icon: typeof Gauge; label: string; value: string }) {
+  return (
+    <div className="rounded-lg bg-black/20 px-3 py-2">
+      <div className="flex items-center gap-1 text-[9.5px] uppercase tracking-wider text-zinc-600"><Icon className="h-2.5 w-2.5" /> {label}</div>
+      <div className="mt-0.5 truncate font-mono text-[10.5px] text-zinc-300" title={value}>{value}</div>
+    </div>
+  );
+}
+
+function Definition({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="grid grid-cols-[100px_1fr] gap-3">
+      <dt className="text-zinc-600">{label}</dt>
+      <dd className={`min-w-0 break-words text-zinc-300 ${mono ? "font-mono text-[11px]" : ""}`}>{value}</dd>
+    </div>
+  );
+}
+
+function Banner({ tone, text, onClose }: { tone: "error" | "success"; text: string; onClose: () => void }) {
+  return (
+    <div className={`flex items-start gap-2 border-b px-6 py-2.5 text-[11.5px] ${tone === "error" ? "border-rose-500/20 bg-rose-500/[0.07] text-rose-200" : "border-emerald-500/20 bg-emerald-500/[0.07] text-emerald-200"}`}>
+      {tone === "error" ? <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+      <span className="min-w-0 flex-1 break-words">{text}</span>
+      <button onClick={onClose} className="text-current opacity-60 hover:opacity-100">Dismiss</button>
+    </div>
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "The native Docker operation failed.";
 }

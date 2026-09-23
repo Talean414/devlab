@@ -1,310 +1,825 @@
-import { useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { AgentAuditCard } from "../components/AgentAuditCard";
 import { PanelHeader } from "./AgentPanel";
-import { getApiKey, streamChat } from "../lib/gemini";
-import { computeDiff, diffStats } from "../lib/diff";
-import type { VFile } from "../types";
+import { getCurrentAiRoute, hasGenerationAccess, streamChat } from "../lib/gemini";
 import {
-  Stethoscope, Play, Loader2, CheckCircle2, XCircle, Wand2,
-  FileCode2, ArrowRight, Bug, ShieldCheck, RefreshCw, FlaskConical,
+  AGENT_AUDIT_METADATA_NOTE,
+  formatAgentAuditShortTime,
+  listAgentAudit,
+  type AgentAuditEvent,
+} from "../lib/agentAudit";
+import { readWorkspaceFile } from "../lib/workspace";
+import type { OpenGeneratedDrafts, VerificationHandoffRequest, VerificationRunOutcome } from "../types";
+import {
+  testRunnerRun,
+  testRunnerSnapshot,
+  type TestProfile,
+  type TestRunResult,
+  type TestRunnerSnapshot,
+} from "../lib/testRunner";
+import {
+  AlertTriangle, ArrowRight, CheckCircle2, Clock3, FileTerminal, Loader2,
+  Play, RefreshCw, ShieldCheck, Sparkles, Stethoscope, Wand2, XCircle,
 } from "lucide-react";
 
-interface Loop {
-  n: number;
-  phase: "diagnosing" | "patching" | "verifying" | "passed" | "failed";
-  diagnosis: string;
-  patched: string;
-  notes: string;
-  base: string;
+const MAX_REPAIR_SOURCE_CHARS = 64 * 1024;
+const MAX_REPAIR_OUTPUT_CHARS = 64 * 1024;
+const MAX_TEST_EVIDENCE_CHARS = 24 * 1024;
+
+interface RepairDraft {
+  path: string;
+  content: string;
+  rationale: string;
 }
 
-const SAMPLE_CODE = `export function computeInvoiceTotal(items) {
-  let total = 0;
-  for (let i = 0; i <= items.length; i++) {
-    total += items[i].price * items[i].qty;
-  }
-  const discount = total > 100 ? total * 0.1 : 0;
-  return total - discount;
-}
-
-export function formatCurrency(val) {
-  return "$" + val.toFixed(2);
-}`;
-
-const SAMPLE_ERROR = `FAIL  src/invoice.test.ts
-  ✕ adds line items · TypeError: Cannot read properties of undefined (reading 'price')
-    at computeInvoiceTotal (src/invoice.ts:4:7)
-  ✕ empty cart returns $0.00
-    Expected: "$0.00"  Received: "$NaN"
-Tests: 2 failed, 3 passed · Score: 60%`;
-
-export function HealerPanel({ onOpenFiles }: { onOpenFiles: (f: VFile[]) => void }) {
-  const [code, setCode] = useState(SAMPLE_CODE);
-  const [failLog, setFailLog] = useState(SAMPLE_ERROR);
-  const [path, setPath] = useState("src/invoice.ts");
-  const [loops, setLoops] = useState<Loop[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [running, setRunning] = useState<"idle" | "running" | "passed" | "failed">("idle");
-  const logRef = useRef<HTMLDivElement>(null);
-
-  function scrollLog() {
-    requestAnimationFrame(() => logRef.current?.scrollTo({ top: 99999, behavior: "smooth" }));
-  }
-
-  async function heal() {
-    if (!getApiKey()) return;
-    setBusy(true); setRunning("running"); setLoops([]);
-    let current = code;
-    let log = failLog;
-
-    for (let iter = 1; iter <= 3; iter++) {
-      const entry: Loop = { n: iter, phase: "diagnosing", diagnosis: "", patched: "", notes: "", base: current };
-      setLoops((ls) => [...ls, entry]);
-      scrollLog();
-
-      try {
-        // ── Pass 1: diagnose + patch ──
-        let acc = "";
-        const prompt = `You are DevLab's autonomous debugger. The following file is failing its test suite.
-
-FILE \`${path}\`:
-\`\`\`
-${current}
-\`\`\`
-
-TEST OUTPUT:
-\`\`\`
-${log}
-\`\`\`
-
-Respond with ONLY valid JSON (no fences):
-{
-  "diagnosis": "2-3 sentence root-cause analysis of every failing test",
-  "patched": "the ENTIRE fixed file contents, escaped as a JSON string",
-  "notes": "what changed, one line per fix, separated by newlines",
-  "resolved": true or false — your honest judgment of whether this patch fixes every reported failure
-}
-Never change public APIs unless a test demands it. Keep the same general structure.`;
-        for await (const ch of streamChat([{ role: "user", text: prompt }])) acc += ch;
-        const clean = acc.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
-        const parsed = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1)) as {
-          diagnosis: string; patched: string; notes: string; resolved: boolean;
-        };
-
-        entry.diagnosis = parsed.diagnosis;
-        entry.patched = parsed.patched;
-        entry.notes = parsed.notes;
-        entry.phase = "patching";
-        setLoops((ls) => ls.map((l) => (l.n === iter ? { ...entry } : l)));
-        scrollLog();
-        await new Promise((r) => setTimeout(r, 400));
-
-        // ── Pass 2: agent-verified "re-run" ──
-        entry.phase = "verifying";
-        setLoops((ls) => ls.map((l) => (l.n === iter ? { ...entry } : l)));
-        scrollLog();
-
-        let verify = "";
-        const verifyPrompt = `Act as a strict test runner. Re-execute the ORIGINAL failing tests mentally against this PATCHED file.
-
-PATCHED \`${path}\`:
-\`\`\`
-${parsed.patched}
-\`\`\`
-
-ORIGINAL FAILURES:
-\`\`\`
-${log}
-\`\`\`
-
-Respond with ONLY valid JSON:
-{
-  "passed": true or false,
-  "output": "mimic a realistic test-runner console output: per-test pass/fail lines and a summary like 'Tests: 5 passed · Score: 100%'. If any test would STILL fail, show the exact error."
-}`;
-        for await (const ch of streamChat([{ role: "user", text: verifyPrompt }])) verify += ch;
-        const vc = verify.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
-        const vres = JSON.parse(vc.slice(vc.indexOf("{"), vc.lastIndexOf("}") + 1)) as {
-          passed: boolean; output: string;
-        };
-
-        entry.phase = vres.passed ? "passed" : "failed";
-        entry.notes = parsed.notes + "\n\nTEST RUN:\n" + vres.output;
-        setLoops((ls) => ls.map((l) => (l.n === iter ? { ...entry } : l)));
-        scrollLog();
-
-        if (vres.passed) {
-          current = parsed.patched;
-          setCode(current);
-          setFailLog(vres.output);
-          setRunning("passed");
-          setBusy(false);
-          return;
-        }
-        current = parsed.patched;
-        log = vres.output;
-      } catch (e) {
-        entry.phase = "failed";
-        entry.notes += "\nerror: " + (e as Error).message;
-        setLoops((ls) => ls.map((l) => (l.n === iter ? { ...entry } : l)));
-        break;
-      }
+function formatError(error: unknown) {
+  if (error && typeof error === "object") {
+    const maybe = error as { code?: unknown; message?: unknown };
+    if (typeof maybe.message === "string" && typeof maybe.code === "string") {
+      return `${maybe.message}\n\n[${maybe.code}]`;
     }
-    setRunning("failed");
-    setBusy(false);
+    if (typeof maybe.message === "string") return maybe.message;
+  }
+  return String(error);
+}
+
+function errorTitle(error: string) {
+  return error.startsWith("Repair draft error:") ? "Repair draft error" : "Native test runner error";
+}
+
+function visibleError(error: string) {
+  return error.replace(/^Repair draft error:\s*/, "");
+}
+
+function excerpt(value: string, maxChars: number) {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n… truncated for prompt (${value.length.toLocaleString()} characters total).`;
+}
+
+function languageForPath(path: string): string {
+  const extension = path.toLowerCase().split(".").pop() ?? "";
+  const map: Record<string, string> = {
+    ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript",
+    py: "python", rs: "rust", go: "go", java: "java", cs: "csharp",
+    rb: "ruby", php: "php", json: "json", yml: "yaml", yaml: "yaml",
+    md: "markdown", html: "html", css: "css", sql: "sql", sh: "shell",
+    toml: "toml", xml: "xml", dockerfile: "dockerfile",
+  };
+  return map[extension] ?? "plaintext";
+}
+
+function stripJsonFence(value: string) {
+  return value.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+}
+
+function normalizeRepairPath(value: string) {
+  return value.trim().replace(/\\/g, "/").replace(/^\/+/, "");
+}
+
+function cargoManifestBase(evidence: string) {
+  const match = evidence.match(/--manifest-path\s+([^\s]+?)\/Cargo\.toml/);
+  return match?.[1]?.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+|\/+$/g, "") ?? "";
+}
+
+function cargoRelativePath(path: string) {
+  return /^(src|tests|test|benches|examples)\//.test(path) && path.endsWith(".rs");
+}
+
+function repairPathCandidates(input: string, result: TestRunResult) {
+  const clean = normalizeRepairPath(input);
+  const candidates = new Set<string>();
+  if (clean) candidates.add(clean);
+  const base = cargoManifestBase(`${result.profile.command}\n${result.stdout}\n${result.stderr}`);
+  if (base && cargoRelativePath(clean) && !clean.startsWith(`${base}/`)) {
+    candidates.add(`${base}/${clean}`);
+  }
+  return [...candidates];
+}
+
+function qualifyInferredRepairPath(path: string, evidence: string) {
+  const clean = normalizeRepairPath(path);
+  const base = cargoManifestBase(evidence);
+  if (base && cargoRelativePath(clean) && !clean.startsWith(`${base}/`)) return `${base}/${clean}`;
+  return clean;
+}
+
+function fileExtension(path: string) {
+  return path.toLowerCase().split(".").pop() ?? "";
+}
+
+function extractPublicSurface(path: string, source: string) {
+  const extension = fileExtension(path);
+  const symbols = new Set<string>();
+
+  if (extension === "rs") {
+    for (const match of source.matchAll(/\bpub(?:\s*\([^)]*\))?\s+(?:async\s+)?(struct|enum|trait|type|fn)\s+([A-Za-z_][A-Za-z0-9_]*)/g)) {
+      symbols.add(`${match[1]} ${match[2]}`);
+    }
+    for (const match of source.matchAll(/#\s*\[\s*tauri::command\s*\]\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)/g)) {
+      symbols.add(`tauri command ${match[1]}`);
+    }
+    return [...symbols].sort();
   }
 
-  const lastLoop = loops[loops.length - 1];
+  if (["ts", "tsx", "js", "jsx"].includes(extension)) {
+    for (const match of source.matchAll(/\bexport\s+(?:default\s+)?(?:async\s+)?(function|class|interface|type|enum|const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)/g)) {
+      symbols.add(`${match[1]} ${match[2]}`);
+    }
+    return [...symbols].sort();
+  }
+
+  return [];
+}
+
+function missingPublicSurface(path: string, original: string, patched: string) {
+  const originalSymbols = extractPublicSurface(path, original);
+  if (originalSymbols.length === 0) return [];
+  const patchedSymbols = new Set(extractPublicSurface(path, patched));
+  return originalSymbols.filter((symbol) => !patchedSymbols.has(symbol));
+}
+
+function validateRepairContent(content: string, originalContent: string, path: string) {
+  const clean = content.replace(/^```[\w-]*\s*/i, "").replace(/```\s*$/i, "").trim();
+  const original = originalContent.trim();
+  if (!clean) throw new Error("Model response did not include a non-empty patched file.");
+  if (clean.length > MAX_REPAIR_OUTPUT_CHARS) {
+    throw new Error(`Repair draft exceeded ${(MAX_REPAIR_OUTPUT_CHARS / 1024).toFixed(0)} KiB. Narrow the target file or failing test output.`);
+  }
+  if (/^diff --git\s/m.test(clean) || /^@@\s/m.test(clean) || (/^---\s/m.test(clean) && /^\+\+\+\s/m.test(clean))) {
+    throw new Error("Repair draft returned a diff. DevLab requires the complete patched file before it can open an applyable draft.");
+  }
+
+  if (original.length >= 2_048 && clean.length < original.length * 0.35) {
+    throw new Error(
+      `Repair draft looked partial: model returned ${clean.length.toLocaleString()} characters for a ${original.length.toLocaleString()} character source file. DevLab refused to open a snippet as a whole-file patch.`,
+    );
+  }
+
+  const missing = missingPublicSurface(path, original, clean);
+  if (missing.length > 0) {
+    const sample = missing.slice(0, 8).join(", ");
+    const suffix = missing.length > 8 ? `, and ${missing.length - 8} more` : "";
+    throw new Error(
+      `Repair draft looked partial or changed the public API: it omitted existing public symbols (${sample}${suffix}). DevLab refused to open it as a whole-file patch.`,
+    );
+  }
+
+  return clean;
+}
+
+function extractFencedFile(raw: string) {
+  const matches = [...raw.matchAll(/```[\w-]*\s*\n([\s\S]*?)```/g)].map((match) => match[1]);
+  if (matches.length === 0) return "";
+  return matches.sort((left, right) => right.length - left.length)[0] ?? "";
+}
+
+function extractTaggedRepair(raw: string) {
+  const rationale = raw.match(/<devlab-rationale>([\s\S]*?)<\/devlab-rationale>/i)?.[1]?.trim() ?? "";
+  const open = raw.match(/<devlab-patched-file>/i);
+  if (!open || open.index === undefined) return null;
+  const afterOpen = raw.slice(open.index + open[0].length);
+  const close = afterOpen.match(/<\/devlab-patched-file>/i);
+  const content = close?.index === undefined ? afterOpen : afterOpen.slice(0, close.index);
+  return content.trim() ? { rationale, content } : null;
+}
+
+function sourceStartPattern(path: string) {
+  const extension = fileExtension(path);
+  if (extension === "rs") return /(?:^|\n)(#!\[|\/\/|\/\*|use\s|mod\s|pub\s|fn\s|const\s|static\s|type\s|struct\s|enum\s|trait\s|impl\s)/;
+  if (["ts", "tsx", "js", "jsx"].includes(extension)) return /(?:^|\n)(import\s|export\s|const\s|let\s|var\s|async\s+function\s|function\s|class\s|interface\s|type\s|enum\s|\/\/|\/\*)/;
+  if (extension === "py") return /(?:^|\n)(from\s|import\s|def\s|class\s|#)/;
+  return null;
+}
+
+function extractRawFileCandidate(raw: string, path: string) {
+  const cleaned = stripJsonFence(raw)
+    .replace(/<\/?devlab-(?:rationale|patched-file)>/gi, "")
+    .trim();
+  if (!cleaned) return "";
+
+  const pattern = sourceStartPattern(path);
+  if (!pattern) return cleaned;
+  if (pattern.test(cleaned)) {
+    const firstLine = cleaned.split(/\r?\n/, 1)[0]?.trim() ?? "";
+    if (sourceStartPattern(path)?.test(firstLine)) return cleaned;
+  }
+
+  const match = pattern.exec(cleaned);
+  if (!match || match.index === undefined || match.index > 1_200) return "";
+  const start = cleaned[match.index] === "\n" ? match.index + 1 : match.index;
+  return cleaned.slice(start).trim();
+}
+
+function parseRepairDraft(raw: string, path: string, originalContent: string): RepairDraft {
+  const cleaned = stripJsonFence(raw);
+  const first = cleaned.indexOf("{");
+  const last = cleaned.lastIndexOf("}");
+  if (first >= 0 && last > first) {
+    try {
+      const parsed = JSON.parse(cleaned.slice(first, last + 1)) as { patched?: unknown; rationale?: unknown };
+      if (typeof parsed.patched === "string") {
+        return {
+          path,
+          content: validateRepairContent(parsed.patched, originalContent, path),
+          rationale: typeof parsed.rationale === "string" ? parsed.rationale : "No rationale returned.",
+        };
+      }
+    } catch {
+      // Whole-file JSON is brittle for source code. Fall through to tags/fences.
+    }
+  }
+
+  const tagged = extractTaggedRepair(raw);
+  if (tagged) {
+    return {
+      path,
+      content: validateRepairContent(tagged.content, originalContent, path),
+      rationale: tagged.rationale || "Repair draft generated from the failing native test output.",
+    };
+  }
+
+  const fenced = extractFencedFile(raw);
+  if (fenced) {
+    const rationale = raw.slice(0, raw.indexOf("```")).replace(/^(rationale|reasoning)\s*:\s*/i, "").trim();
+    return {
+      path,
+      content: validateRepairContent(fenced, originalContent, path),
+      rationale: rationale || "Repair draft generated from the failing native test output.",
+    };
+  }
+
+  const rawFile = extractRawFileCandidate(raw, path);
+  if (rawFile) {
+    return {
+      path,
+      content: validateRepairContent(rawFile, originalContent, path),
+      rationale: "Repair draft parsed from raw complete-file output.",
+    };
+  }
+
+  const preview = excerpt(raw.trim(), 600) || "(empty response)";
+  throw new Error(`Model response did not include valid JSON, DevLab repair tags, a fenced patched file, or raw complete-file source. Response preview:
+${preview}`);
+}
+
+function statusStyle(status?: TestRunResult["status"]) {
+  if (status === "passed") return "border-emerald-500/30 bg-emerald-500/[0.06] text-emerald-200";
+  if (status === "timeout") return "border-amber-500/30 bg-amber-500/[0.06] text-amber-200";
+  if (status === "failed") return "border-rose-500/30 bg-rose-500/[0.06] text-rose-200";
+  return "border-white/10 bg-white/[0.02] text-zinc-400";
+}
+
+function ResultIcon({ status }: { status?: TestRunResult["status"] }) {
+  if (status === "passed") return <CheckCircle2 className="h-4 w-4 text-emerald-400" />;
+  if (status === "timeout") return <Clock3 className="h-4 w-4 text-amber-400" />;
+  if (status === "failed") return <XCircle className="h-4 w-4 text-rose-400" />;
+  return <Stethoscope className="h-4 w-4 text-zinc-500" />;
+}
+
+export function HealerPanel({
+  onOpenFiles,
+  onNeedKey,
+  handoffRequest = null,
+  onDismissHandoff,
+  onRunRecorded,
+}: {
+  onOpenFiles: OpenGeneratedDrafts;
+  onNeedKey: () => void;
+  handoffRequest?: VerificationHandoffRequest | null;
+  onDismissHandoff?: () => void;
+  onRunRecorded?: (outcome: VerificationRunOutcome) => void;
+}) {
+  const [snapshot, setSnapshot] = useState<TestRunnerSnapshot | null>(null);
+  const [selectedId, setSelectedId] = useState("");
+  const [result, setResult] = useState<TestRunResult | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [runningId, setRunningId] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [repairPath, setRepairPath] = useState("");
+  const [repairBusy, setRepairBusy] = useState(false);
+  const [repairDraft, setRepairDraft] = useState<RepairDraft | null>(null);
+  const [repairNotice, setRepairNotice] = useState("");
+  const [auditEvents, setAuditEvents] = useState<AgentAuditEvent[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState("");
+  const [auditLastRefreshedMs, setAuditLastRefreshedMs] = useState<number | null>(null);
+  const [handoffAppliedAtMs, setHandoffAppliedAtMs] = useState<number | null>(null);
+
+  // Builder handoff pre-selection: pick the first recommended profile that still exists in the fresh
+  // native snapshot. This only changes the highlighted profile; Run remains an explicit click.
+  const handoffMatch = useMemo(() => {
+    if (!handoffRequest || !snapshot) return null;
+    for (const profileId of handoffRequest.recommendedProfileIds) {
+      const profile = snapshot.profiles.find((item) => item.id === profileId);
+      if (profile) return profile;
+    }
+    return null;
+  }, [handoffRequest, snapshot]);
+
+  useEffect(() => {
+    if (!handoffRequest || !snapshot || handoffAppliedAtMs === handoffRequest.requestedAtMs) return;
+    setHandoffAppliedAtMs(handoffRequest.requestedAtMs);
+    if (handoffMatch) setSelectedId(handoffMatch.id);
+  }, [handoffRequest, snapshot, handoffMatch, handoffAppliedAtMs]);
+
+  const selected = useMemo(
+    () => snapshot?.profiles.find((profile) => profile.id === selectedId) ?? snapshot?.profiles[0],
+    [snapshot, selectedId],
+  );
+
+  async function refreshAudit() {
+    setAuditLoading(true);
+    setAuditError("");
+    try {
+      setAuditEvents(await listAgentAudit(8));
+      setAuditLastRefreshedMs(Date.now());
+    } catch (err) {
+      setAuditError(formatError(err));
+    } finally {
+      setAuditLoading(false);
+    }
+  }
+
+  async function refresh() {
+    setLoading(true);
+    setError("");
+    try {
+      const next = await testRunnerSnapshot();
+      setSnapshot(next);
+      setSelectedId((current) => (
+        next.profiles.some((profile) => profile.id === current)
+          ? current
+          : next.profiles[0]?.id ?? ""
+      ));
+    } catch (err) {
+      setSnapshot(null);
+      setError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function run(profile: TestProfile) {
+    setRunningId(profile.id);
+    setResult(null);
+    setError("");
+    try {
+      const next = await testRunnerRun(profile.id);
+      setResult(next);
+      // Metadata-only outcome for the session ledger shared with Project Builder; stdout/stderr are never passed.
+      onRunRecorded?.({
+        taskId: handoffRequest?.taskId ?? null,
+        profileId: next.profile.id,
+        profileLabel: next.profile.label,
+        command: next.profile.command,
+        status: next.status,
+        exitCode: next.exitCode,
+        elapsedMs: next.elapsedMs,
+        timedOut: next.timedOut,
+        outputTruncated: next.outputTruncated,
+        ranAtMs: Date.now(),
+      });
+      void refreshAudit();
+      setRepairDraft(null);
+      setRepairNotice("");
+      const evidence = `${next.profile.command}\n${next.stdout}\n${next.stderr}`;
+      const inferred = inferRepairPath(evidence);
+      if (inferred) setRepairPath((current) => current || inferred);
+      // Repair handoff from Builder: when the output names no file, default to the batch's first applied target.
+      // The user can still change it, and a draft is generated only after the explicit Draft fix click.
+      else if (next.status !== "passed" && handoffRequest?.intent === "repair" && handoffRequest.appliedPaths[0]) {
+        const fallbackPath = handoffRequest.appliedPaths[0];
+        setRepairPath((current) => current || fallbackPath);
+      }
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setRunningId(null);
+    }
+  }
+
+  function inferRepairPath(output: string) {
+    const match = output.match(/(?:^|\s)((?:src|test|tests|benches|examples|app|lib|packages|crates)\/[\w./-]+\.(?:ts|tsx|js|jsx|py|rs|go|java|rb|php|json|yml|yaml|toml|md|css|html))/m);
+    return match ? qualifyInferredRepairPath(match[1], output) : "";
+  }
+
+  async function generateRepairDraft() {
+    if (!result || result.status === "passed") return;
+    if (!repairPath.trim()) {
+      setError("Enter the failing source-file path to draft a repair.");
+      return;
+    }
+    const route = getCurrentAiRoute("repair");
+    if (route.status !== "active") {
+      setError(route.reason);
+      return;
+    }
+    if (!hasGenerationAccess("repair")) {
+      onNeedKey();
+      return;
+    }
+    setRepairBusy(true);
+    setError("");
+    setRepairNotice("");
+    setRepairDraft(null);
+    try {
+      let targetPath = "";
+      let document: Awaited<ReturnType<typeof readWorkspaceFile>> | null = null;
+      let lastReadError: unknown = null;
+      const candidates = repairPathCandidates(repairPath, result);
+      for (const candidate of candidates) {
+        try {
+          document = await readWorkspaceFile(candidate);
+          targetPath = candidate;
+          break;
+        } catch (err) {
+          lastReadError = err;
+        }
+      }
+      if (!document) {
+        throw new Error(`Could not read the repair target. Tried: ${candidates.join(", ") || "(none)"}. ${formatError(lastReadError)}`);
+      }
+      if (targetPath !== repairPath.trim()) setRepairPath(targetPath);
+      if (document.content.length > MAX_REPAIR_SOURCE_CHARS) {
+        throw new Error(`Repair drafts accept source files up to ${(MAX_REPAIR_SOURCE_CHARS / 1024).toFixed(0)} KiB for this checkpoint.`);
+      }
+      const prompt = `You are DevLab's reviewed repair assistant. A real native test run failed.
+
+Rules:
+- Patch exactly this one file: ${targetPath}
+- Return the ENTIRE patched file, not a diff or snippet.
+- Do not invent test results.
+- Preserve public APIs unless the test output requires a change.
+- Do not return only the changed function; DevLab will reject drafts that omit existing imports, public structs, exported functions, or Tauri commands.
+- If the evidence is insufficient, make the smallest defensive fix and explain uncertainty in rationale.
+- Return exactly these XML-like tags. Do not wrap the patched file in Markdown fences inside the tags:
+<devlab-rationale>
+short explanation of the root cause and fix
+</devlab-rationale>
+<devlab-patched-file>
+complete patched file contents only
+</devlab-patched-file>
+
+TEST PROFILE: ${result.profile.label}
+COMMAND: ${result.profile.command}
+STATUS: ${result.status}
+EXIT CODE: ${result.exitCode ?? "none"}
+TIMED OUT: ${result.timedOut ? "yes" : "no"}
+OUTPUT TRUNCATED: ${result.outputTruncated ? "yes" : "no"}
+
+STDOUT:
+\`\`\`
+${excerpt(result.stdout, MAX_TEST_EVIDENCE_CHARS)}
+\`\`\`
+
+STDERR:
+\`\`\`
+${excerpt(result.stderr, MAX_TEST_EVIDENCE_CHARS)}
+\`\`\`
+
+CURRENT FILE ${targetPath}:
+\`\`\`
+${document.content}
+\`\`\``;
+
+      let raw = "";
+      for await (const chunk of streamChat([{ role: "user", text: prompt }], { task: "repair", maxOutputTokens: 16_384, temperature: 0.2 })) raw += chunk;
+      const draft = parseRepairDraft(raw, targetPath, document.content);
+      setRepairDraft(draft);
+      setRepairNotice("Repair draft generated in memory. Review it before sending it to the editor draft flow.");
+    } catch (err) {
+      setError(`Repair draft error: ${formatError(err)}`);
+    } finally {
+      setRepairBusy(false);
+    }
+  }
+
+  async function openRepairDraft() {
+    if (!repairDraft) return;
+    const opened = await onOpenFiles([{
+      path: repairDraft.path,
+      content: repairDraft.content,
+      language: languageForPath(repairDraft.path),
+    }], `Self-Healing Tests repair draft for ${repairDraft.path}`);
+    if (!opened) setRepairNotice("Repair draft was not staged for editor review. Nothing was written.");
+  }
+
+  useEffect(() => {
+    refresh();
+    void refreshAudit();
+  }, []);
+
+  const badge = runningId
+    ? "Running…"
+    : result?.status === "passed"
+      ? "Passed"
+      : result?.status === "failed"
+        ? "Failed"
+        : result?.status === "timeout"
+          ? "Timed out"
+          : loading
+            ? "Loading"
+            : "Ready";
 
   return (
     <div className="flex h-full flex-col">
       <PanelHeader
-        title="Self-Healing Test Loop"
-        subtitle="Diagnose → patch → re-run — autonomous until green"
-        badge={
-          running === "passed" ? "All tests passing"
-          : running === "failed" ? "Still failing"
-          : running === "running" ? "Healing…"
-          : "Idle"
-        }
-        badgeOk={running === "passed"}
+        title="Native Test Runner"
+        subtitle="Phase 6D · audited tests plus reviewed draft application"
+        badge={badge}
+        badgeOk={result?.status === "passed" || (!result && !error && !loading)}
       />
 
-      <div className="grid min-h-0 flex-1 grid-cols-2 gap-0">
-        {/* input */}
-        <div className="flex min-h-0 flex-col border-r border-white/5">
-          <div className="flex items-center gap-2 border-b border-white/5 px-4 py-2.5">
-            <Bug className="h-4 w-4 text-rose-400" />
-            <span className="text-[12.5px] font-medium text-zinc-200">Broken workspace</span>
-            <input value={path} onChange={(e) => setPath(e.target.value)}
-              className="ml-auto w-40 rounded border border-white/10 bg-[#0d1017] px-2 py-1 font-mono text-[11px] text-zinc-300 outline-none" />
-          </div>
-          <textarea value={code} onChange={(e) => setCode(e.target.value)} spellCheck={false}
-            className="min-h-0 flex-1 resize-none bg-[#0a0c11] p-4 font-mono text-[12px] leading-relaxed text-zinc-200 outline-none" />
-          <div className="border-t border-white/5">
-            <div className="border-b border-white/5 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-              Failing test output
+      <div className="grid min-h-0 flex-1 grid-cols-[22rem_minmax(0,1fr)]">
+        <aside className="flex min-h-0 flex-col border-r border-white/5 bg-[#0d1017]/40">
+          <div className="border-b border-white/5 p-4">
+            <div className="rounded-xl border border-cyan-500/15 bg-cyan-500/[0.04] p-3 text-[11.5px] leading-relaxed text-cyan-100/80">
+              <div className="flex gap-2">
+                <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-cyan-300" />
+                <div>
+                  DevLab does not accept arbitrary shell text here. Rust re-discovers test profiles from the selected workspace, runs the chosen backend-owned command without a shell, captures bounded output and kills it after {snapshot?.timeoutSecs ?? 60}s.
+                </div>
+              </div>
             </div>
-            <textarea value={failLog} onChange={(e) => setFailLog(e.target.value)} spellCheck={false} rows={5}
-              className="w-full resize-none bg-[#0a0c11] p-4 font-mono text-[11.5px] leading-relaxed text-rose-200/80 outline-none" />
-          </div>
-          <div className="flex items-center gap-2 border-t border-white/5 p-3">
-            <button onClick={heal} disabled={busy || !getApiKey()}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-br from-rose-500 to-orange-500 px-4 py-2 text-[12.5px] font-semibold text-white shadow-lg shadow-rose-900/30 transition hover:from-rose-400 hover:to-orange-400 disabled:opacity-40">
-              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-              {busy ? "Healing…" : "Run self-heal"}
+            <button
+              onClick={refresh}
+              disabled={loading || !!runningId}
+              className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-[12px] font-medium text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+            >
+              {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              Refresh profiles
             </button>
-            {lastLoop?.patched && (
-              <button
-                onClick={() => onOpenFiles([{ path, content: lastLoop.patched, language: path.split(".").pop() === "ts" ? "typescript" : "javascript" }])}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-[12.5px] font-semibold text-emerald-200 hover:bg-emerald-500/20">
-                <ArrowRight className="h-3.5 w-3.5" /> Apply fix to editor
-              </button>
-            )}
-            {!getApiKey() && <span className="text-[11.5px] text-amber-300">Add a Gemini key in Settings to enable.</span>}
           </div>
-        </div>
 
-        {/* loop log + diff */}
-        <div ref={logRef} className="min-h-0 flex-1 overflow-y-auto p-4">
-          {loops.length === 0 && (
-            <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-zinc-600">
-              <Stethoscope className="h-10 w-10" />
-              <p className="max-w-xs text-[13px]">
-                Paste broken code and its failing test output, then press
-                <strong className="text-zinc-300"> Run self-heal</strong>. DevLab iterates —
-                diagnose, patch, re-run — until the suite is green.
+          <div className="min-h-0 flex-1 overflow-y-auto p-3">
+            {loading && (
+              <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] p-4 text-[12px] text-zinc-500">
+                <Loader2 className="h-4 w-4 animate-spin text-cyan-400" /> Discovering test profiles…
+              </div>
+            )}
+
+            {!loading && snapshot && snapshot.profiles.length === 0 && (
+              <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.05] p-4 text-[12.5px] leading-relaxed text-amber-100/80">
+                <AlertTriangle className="mb-2 h-5 w-5 text-amber-300" />
+                No supported test profile was detected. Select a workspace with package.json test scripts, Cargo.toml, go.mod, pytest config or a tests/ directory.
+              </div>
+            )}
+
+            {snapshot?.profiles.map((profile) => {
+              const active = selected?.id === profile.id;
+              const isRunning = runningId === profile.id;
+              const profileResult = result?.profile.id === profile.id ? result.status : undefined;
+              return (
+                <button
+                  key={profile.id}
+                  onClick={() => setSelectedId(profile.id)}
+                  className={`mb-2 w-full rounded-xl border p-3 text-left transition ${
+                    active
+                      ? "border-cyan-500/35 bg-cyan-500/[0.07]"
+                      : "border-white/10 bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]"
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    {isRunning ? <Loader2 className="h-4 w-4 animate-spin text-cyan-400" /> : <ResultIcon status={profileResult} />}
+                    <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-zinc-100">{profile.label}</span>
+                  </div>
+                  <div className="mt-2 rounded-md bg-black/25 px-2 py-1 font-mono text-[10.5px] text-zinc-500">
+                    {profile.command}
+                  </div>
+                  <p className="mt-2 line-clamp-2 text-[11px] leading-relaxed text-zinc-500">{profile.reason}</p>
+                </button>
+              );
+            })}
+
+            <div className="mt-4 rounded-xl border border-white/10 bg-black/15 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Agent audit</div>
+                <button
+                  onClick={() => void refreshAudit()}
+                  disabled={auditLoading}
+                  className="rounded-md border border-white/10 p-1 text-zinc-500 hover:bg-white/5 hover:text-zinc-300 disabled:opacity-40"
+                  title="Refresh audit log"
+                >
+                  {auditLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                </button>
+              </div>
+              <p className="mt-1 text-[10.5px] leading-relaxed text-zinc-600">
+                Native memory log for test runs and reviewed-draft writes. {AGENT_AUDIT_METADATA_NOTE}
               </p>
+              {auditLastRefreshedMs && !auditError && (
+                <div className="mt-1 text-[10.5px] text-zinc-600">Last refreshed {formatAgentAuditShortTime(auditLastRefreshedMs)} · {auditEvents.length} metadata event{auditEvents.length === 1 ? "" : "s"}</div>
+              )}
+              {auditError && <div className="mt-2 text-[10.5px] text-rose-300">{auditError}</div>}
+              {!auditError && auditEvents.length === 0 && (
+                <div className="mt-3 text-[11px] text-zinc-600">No audited actions yet.</div>
+              )}
+              <div className="mt-2 space-y-2">
+                {auditEvents.map((event) => <AgentAuditCard key={event.id} event={event} compact />)}
+              </div>
+            </div>
+          </div>
+
+          {snapshot && (
+            <div className="border-t border-white/5 p-3 text-[10.5px] leading-relaxed text-zinc-600">
+              <div className="truncate">Workspace: <span className="text-zinc-400">{snapshot.workspaceName}</span></div>
+              <div>Output cap: {(snapshot.maxOutputBytes / 1024 / 1024).toFixed(0)} MiB per stream</div>
             </div>
           )}
+        </aside>
 
-          {loops.map((loop) => (
-            <div key={loop.n} className="mb-5 rounded-xl border border-white/10 bg-white/[0.02] ring-soft">
-              <div className="flex items-center gap-2.5 border-b border-white/5 px-4 py-2.5">
-                {loop.phase === "passed" ? <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                 : loop.phase === "failed" ? <XCircle className="h-4 w-4 text-rose-400" />
-                 : <Loader2 className="h-4 w-4 animate-spin text-amber-400" />}
-                <span className="text-[13px] font-semibold text-white">Iteration {loop.n}</span>
-                <span className="text-[11.5px] text-zinc-500 capitalize">{loop.phase}</span>
-              </div>
+        <section className="flex min-h-0 flex-col">
+          <div className="flex items-center justify-between gap-3 border-b border-white/5 px-5 py-3">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-white">{selected?.label ?? "No profile selected"}</div>
+              <div className="mt-0.5 truncate font-mono text-[11px] text-zinc-600">{selected?.command ?? "Select a detected test command."}</div>
+            </div>
+            <button
+              onClick={() => selected && run(selected)}
+              disabled={!selected || !!runningId || loading}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-br from-rose-500 to-orange-500 px-4 py-2 text-[12.5px] font-semibold text-white shadow-lg shadow-rose-900/30 transition hover:from-rose-400 hover:to-orange-400 disabled:opacity-40"
+            >
+              {runningId ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+              {runningId ? "Running…" : "Run tests"}
+            </button>
+          </div>
 
-              {loop.diagnosis && (
-                <div className="px-4 py-3">
-                  <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-rose-400">
-                    <Bug className="h-3 w-3" /> Diagnosis
+          <div className="min-h-0 flex-1 overflow-y-auto p-5">
+            {handoffRequest && (
+              <div className="mb-4 rounded-xl border border-violet-500/25 bg-violet-500/[0.06] p-3 text-[12px] leading-relaxed text-violet-100/85">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2 font-semibold text-violet-100">
+                      <ArrowRight className="h-4 w-4 text-violet-300" />
+                      Builder {handoffRequest.intent === "repair" ? "repair" : "verification"} handoff · <span className="font-mono text-[11px]">{handoffRequest.taskId}</span> {handoffRequest.taskTitle}
+                    </div>
+                    {handoffRequest.intent === "repair" && (
+                      <p className="mt-1 text-rose-100/80">
+                        Builder recorded a {handoffRequest.priorRun?.status ?? "failed"} run{handoffRequest.priorRun ? <> of <span className="font-mono">{handoffRequest.priorRun.command}</span> (exit {handoffRequest.priorRun.exitCode ?? "—"})</> : null} for this batch. That earlier output is not reused: rerun the profile here, and once a real failing run exists, this batch's applied targets appear below as one-click repair-target candidates for the reviewed repair draft.
+                      </p>
+                    )}
+                    <p className="mt-1 text-violet-100/70">
+                      {handoffMatch
+                        ? <>Pre-selected <span className="font-mono">{handoffMatch.command}</span> because it matches this batch's applied targets. Nothing has run; click <span className="font-semibold">Run tests</span> to execute it.</>
+                        : snapshot
+                          ? "None of the recommended profiles exist in the current native snapshot. Choose a discovered profile manually; nothing has run."
+                          : "Waiting for native profile discovery before pre-selecting a recommended profile."}
+                    </p>
+                    <p className="mt-1 font-mono text-[10.5px] text-violet-100/50">
+                      Applied targets: {handoffRequest.appliedPaths.join(", ") || "none"}
+                    </p>
+                    <p className="mt-1 text-[10.5px] text-violet-100/50">
+                      The run result's status, exit code and timing metadata will be reported back to the Builder task ledger for {handoffRequest.taskId}; captured output stays in this panel.
+                    </p>
                   </div>
-                  <p className="text-[12.5px] leading-relaxed text-zinc-300">{loop.diagnosis}</p>
+                  <button
+                    onClick={() => { onDismissHandoff?.(); }}
+                    className="shrink-0 rounded-lg border border-white/10 px-2.5 py-1 text-[11px] text-violet-100/80 hover:bg-white/5"
+                  >
+                    Dismiss handoff
+                  </button>
                 </div>
-              )}
+              </div>
+            )}
+            {error && (
+              <div className="mb-4 rounded-xl border border-rose-500/30 bg-rose-500/[0.06] p-4 text-[12.5px] leading-relaxed text-rose-100/90">
+                <div className="mb-2 flex items-center gap-2 font-semibold text-rose-200">
+                  <XCircle className="h-4 w-4" /> {errorTitle(error)}
+                </div>
+                <pre className="whitespace-pre-wrap font-mono text-[11.5px]">{visibleError(error)}</pre>
+              </div>
+            )}
 
-              {loop.patched && (
-                <div className="border-t border-white/5 px-4 py-3">
-                  <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-emerald-400">
-                    <Wand2 className="h-3 w-3" /> Patch
-                    {(() => {
-                      const s = diffStats(computeDiff(loop.base, loop.patched));
-                      return <span className="ml-auto font-mono text-[10px]"><span className="text-emerald-400">+{s.adds}</span> <span className="text-rose-400">−{s.dels}</span></span>;
-                    })()}
+            {snapshot?.warnings.map((warning) => (
+              <div key={warning} className="mb-3 rounded-xl border border-amber-500/25 bg-amber-500/[0.05] p-3 text-[12px] leading-relaxed text-amber-100/80">
+                <AlertTriangle className="mr-2 inline h-4 w-4 text-amber-300" /> {warning}
+              </div>
+            ))}
+
+            {repairNotice && (
+              <div className="mb-4 rounded-xl border border-violet-500/25 bg-violet-500/[0.06] p-3 text-[12px] leading-relaxed text-violet-100/80">
+                <Sparkles className="mr-2 inline h-4 w-4 text-violet-300" /> {repairNotice}
+              </div>
+            )}
+
+            {!result && !runningId && !error && (
+              <div className="flex min-h-[24rem] flex-col items-center justify-center gap-3 text-center text-zinc-600">
+                <FileTerminal className="h-12 w-12" />
+                <div>
+                  <div className="text-sm font-semibold text-zinc-300">Run a real test profile</div>
+                  <p className="mt-1 max-w-md text-[12.5px] leading-relaxed">
+                    Choose a discovered profile on the left. DevLab will execute only that backend-owned command from the selected workspace, never a renderer-supplied shell string.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {runningId && (
+              <div className="flex min-h-[24rem] flex-col items-center justify-center gap-3 text-center text-zinc-500">
+                <Loader2 className="h-10 w-10 animate-spin text-cyan-400" />
+                <div className="text-sm font-semibold text-zinc-300">Tests are running…</div>
+                <p className="text-[12px]">Native timeout: {snapshot?.timeoutSecs ?? 60}s. Output is captured with hard byte limits.</p>
+              </div>
+            )}
+
+            {result && !runningId && (
+              <div className="space-y-4">
+                <div className={`rounded-xl border p-4 ${statusStyle(result.status)}`}>
+                  <div className="flex items-center gap-2">
+                    <ResultIcon status={result.status} />
+                    <span className="text-sm font-semibold capitalize">{result.status}</span>
+                    <span className="ml-auto font-mono text-[11px] opacity-80">{result.elapsedMs} ms</span>
                   </div>
-                  <div className="max-h-72 overflow-y-auto rounded-lg border border-white/10 bg-[#0a0c11] p-2 font-mono text-[11px] leading-[1.55]">
-                    {computeDiff(loop.base, loop.patched).map((r, i) => (
-                      <div key={i}
-                        className={
-                          r.type === "add" ? "bg-emerald-500/10 text-emerald-200"
-                          : r.type === "del" ? "bg-rose-500/10 text-rose-300/80 line-through decoration-rose-500/40"
-                          : "text-zinc-600"
-                        }>
-                        <span className="mr-2 inline-block w-7 select-none text-right text-[9.5px] opacity-50">
-                          {r.type === "del" ? r.lineOld : r.lineNew}
-                        </span>
-                        {r.type === "add" ? "+ " : r.type === "del" ? "− " : "  "}
-                        {r.text || " "}
+                  <div className="mt-2 grid gap-2 text-[11.5px] sm:grid-cols-3">
+                    <div>Exit code: <span className="font-mono">{result.exitCode ?? "—"}</span></div>
+                    <div>Timed out: <span className="font-mono">{result.timedOut ? "yes" : "no"}</span></div>
+                    <div>Truncated: <span className="font-mono">{result.outputTruncated ? "yes" : "no"}</span></div>
+                  </div>
+                </div>
+
+                {result.status !== "passed" && (
+                  <div className="rounded-xl border border-violet-500/20 bg-violet-500/[0.04] p-4 ring-soft">
+                    <div className="flex items-start gap-3">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-violet-500/10 ring-1 ring-violet-500/20">
+                        <Wand2 className="h-4.5 w-4.5 text-violet-300" />
                       </div>
-                    ))}
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-semibold text-violet-100">Reviewed repair draft</div>
+                        <p className="mt-1 text-[12px] leading-relaxed text-zinc-500">
+                          Optional Phase 6B assistant: read one existing source file, use this real test output as evidence, and generate an in-memory draft. Nothing is written automatically.
+                        </p>
+                        {handoffRequest?.intent === "repair" && handoffRequest.appliedPaths.length > 0 && (
+                          <div className="mt-3">
+                            <div className="text-[10.5px] font-semibold uppercase tracking-wide text-violet-200/60">Applied targets from Builder {handoffRequest.taskId}</div>
+                            <div className="mt-1 flex flex-wrap gap-1.5">
+                              {handoffRequest.appliedPaths.map((path) => (
+                                <button
+                                  key={`repair-candidate-${path}`}
+                                  onClick={() => setRepairPath(path)}
+                                  disabled={repairBusy}
+                                  className={`rounded-md border px-2 py-0.5 font-mono text-[10.5px] ${repairPath.trim() === path ? "border-violet-400/50 bg-violet-400/20 text-violet-100" : "border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/10"} disabled:opacity-40`}
+                                  title="Use this applied target as the repair source file. Nothing is generated until you click Draft fix."
+                                >
+                                  {path}
+                                </button>
+                              ))}
+                            </div>
+                            <p className="mt-1 text-[10.5px] text-zinc-500">Candidates only set the path field; the draft is generated from the real output above only when you click Draft fix, and it is written only through Editor reviewed apply.</p>
+                          </div>
+                        )}
+                        <div className="mt-3 flex gap-2">
+                          <input
+                            value={repairPath}
+                            onChange={(event) => setRepairPath(event.target.value)}
+                            placeholder="src/path/to/failing-file.ts"
+                            className="min-w-0 flex-1 rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2 font-mono text-[12px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-violet-500/50"
+                          />
+                          <button
+                            onClick={generateRepairDraft}
+                            disabled={repairBusy || !repairPath.trim()}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-violet-500 px-3 py-2 text-[12px] font-semibold text-white hover:bg-violet-400 disabled:opacity-40"
+                          >
+                            {repairBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                            Draft fix
+                          </button>
+                        </div>
+                        {repairDraft && (
+                          <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3">
+                            <div className="text-[11px] font-semibold uppercase tracking-wider text-violet-300">Rationale</div>
+                            <p className="mt-1 text-[12.5px] leading-relaxed text-zinc-300">{repairDraft.rationale}</p>
+                            <button
+                              onClick={() => { void openRepairDraft(); }}
+                              className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-violet-500/40 bg-violet-500/10 px-3 py-2 text-[12px] font-semibold text-violet-100 hover:bg-violet-500/20"
+                            >
+                              <ArrowRight className="h-3.5 w-3.5" /> Open draft in editor review
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              {loop.notes && (
-                <div className="border-t border-white/5 px-4 py-3">
-                  <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-cyan-400">
-                    <FlaskConical className="h-3 w-3" /> Notes & re-run
-                  </div>
-                  <pre className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-zinc-400">{loop.notes}</pre>
-                </div>
-              )}
-            </div>
-          ))}
-
-          {running === "passed" && lastLoop && (
-            <div className="flex items-center gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/[0.06] p-4">
-              <ShieldCheck className="h-6 w-6 text-emerald-400" />
-              <div className="flex-1">
-                <div className="text-sm font-semibold text-emerald-200">Suite healed autonomously</div>
-                <p className="text-[12px] text-emerald-200/70">{loops.length} iteration(s). Accept the patch to push it into your workspace.</p>
+                <OutputBlock title="stdout" value={result.stdout} tone="emerald" />
+                <OutputBlock title="stderr" value={result.stderr} tone="rose" />
               </div>
-              <button onClick={() => onOpenFiles([{ path, content: lastLoop.patched, language: "typescript" }])}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-2 text-[12px] font-semibold text-white hover:bg-emerald-400">
-                <ArrowRight className="h-3.5 w-3.5" /> Apply fix
-              </button>
-            </div>
-          )}
-
-          {running === "failed" && (
-            <div className="flex items-center gap-3 rounded-xl border border-rose-500/30 bg-rose-500/[0.06] p-4">
-              <XCircle className="h-6 w-6 text-rose-400" />
-              <div className="flex-1">
-                <div className="text-sm font-semibold text-rose-200">Max iterations reached</div>
-                <p className="text-[12px] text-rose-200/70">The latest patch may be partially correct — review it above, or run again with clearer test output.</p>
-              </div>
-              <button onClick={heal} className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-[12px] text-zinc-200 hover:bg-white/5">
-                <RefreshCw className="h-3.5 w-3.5" /> Retry
-              </button>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        </section>
       </div>
     </div>
   );
 }
 
-void FileCode2;
+function OutputBlock({ title, value, tone }: { title: string; value: string; tone: "emerald" | "rose" }) {
+  const color = tone === "emerald" ? "text-emerald-300" : "text-rose-300";
+  return (
+    <div className="rounded-xl border border-white/10 bg-[#0a0c11] ring-soft">
+      <div className="flex items-center gap-2 border-b border-white/5 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+        <span className={color}>●</span> {title}
+      </div>
+      <pre className="max-h-[28rem] min-h-28 overflow-auto whitespace-pre-wrap p-4 font-mono text-[11.5px] leading-relaxed text-zinc-300">
+        {value || `(no ${title})`}
+      </pre>
+    </div>
+  );
+}

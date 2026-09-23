@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PanelHeader } from "./AgentPanel";
-import { getApiKey, streamVision, streamChat, fileToBase64 } from "../lib/gemini";
-import type { VFile } from "../types";
+import { getApiKey, getCurrentAiRoute, streamVision, streamChat, fileToBase64 } from "../lib/gemini";
+import type { OpenGeneratedDrafts, VFile } from "../types";
 import {
   ScanLine, Upload, Link2, Wand2, Loader2, ImageIcon, Trash2, Globe2,
 } from "lucide-react";
 
-export function VisionPanel({ onOpenFiles }: { onOpenFiles: (f: VFile[]) => void }) {
+export function VisionPanel({ onOpenFiles }: { onOpenFiles: OpenGeneratedDrafts }) {
   const [image, setImage] = useState<{ data: string; mime: string; preview: string } | null>(null);
   const [url, setUrl] = useState("https://vercel.com");
   const [mode, setMode] = useState<"image" | "url">("image");
@@ -33,6 +33,8 @@ export function VisionPanel({ onOpenFiles }: { onOpenFiles: (f: VFile[]) => void
   }, [loadImage]);
 
   async function reverseEngineer() {
+    const route = getCurrentAiRoute("vision");
+    if (route.status !== "active") { pushLog(route.reason); return; }
     if (!getApiKey()) { pushLog("No Gemini key — add one in Settings."); return; }
     if (mode === "image" && !image) { pushLog("Drop or paste a screenshot first."); return; }
     setBusy(true); setLog([]);
@@ -68,7 +70,7 @@ Rules: 3 to 6 files forming a working React + TypeScript + Tailwind clone. Repro
         } catch {
           pushLog("Direct fetch blocked — analyzing from URL + your description instead.");
         }
-        for await (const ch of streamChat([{ role: "user", text: `${prompt}\n\nTARGET URL: ${url}\n\nHTML excerpt (may be empty/none):\n${htmlSnippet}\n\nUser description: ${brief}` }])) acc += ch;
+        for await (const ch of streamChat([{ role: "user", text: `${prompt}\n\nTARGET URL: ${url}\n\nHTML excerpt (may be empty/none):\n${htmlSnippet}\n\nUser description: ${brief}` }], { task: "vision" })) acc += ch;
       }
 
       const clean = acc.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
@@ -86,10 +88,10 @@ Rules: 3 to 6 files forming a working React + TypeScript + Tailwind clone. Repro
       ];
 
       for (const f of plan.files) {
-        pushLog(`  writing ${f.path}…`);
+        pushLog(`  drafting ${f.path}…`);
         const filePrompt = `${mode === "image" ? "Using the analyzed screenshot" : "Using the target page analysis"}, write the COMPLETE file \`${f.path}\`.\n\nDesign: ${plan.summary}\nPalette: ${plan.palette.join(", ")}\nTypography: ${plan.typography}\nComponents: ${plan.components.join(", ")}\nThis file's role: ${f.description}\n\nOutput ONLY raw file contents, no fences, no commentary. React + TypeScript + Tailwind, production-quality, under 150 lines.`;
         let content = "";
-        for await (const ch of streamChat([{ role: "user", text: filePrompt }])) content += ch;
+        for await (const ch of streamChat([{ role: "user", text: filePrompt }], { task: "coding" })) content += ch;
         out.push({
           path: f.path,
           content: content.replace(/^```[\w]*\n?/, "").replace(/```\s*$/, "").trim(),
@@ -97,9 +99,10 @@ Rules: 3 to 6 files forming a working React + TypeScript + Tailwind clone. Repro
         });
       }
 
-      pushLog(`✓ Clone ready — ${out.length} files written.`);
+      pushLog(`✓ Clone ready — ${out.length} in-memory drafts. Nothing was written to disk.`);
       pushLog("OPENING_IN_EDITOR");
-      onOpenFiles(out);
+      const opened = await onOpenFiles(out, `Reverse-engineered app draft: ${plan.summary}`);
+      if (!opened) pushLog("error: draft staging failed; nothing was opened or written.");
     } catch (e) {
       pushLog("error: " + (e as Error).message);
     } finally {
@@ -169,7 +172,7 @@ Rules: 3 to 6 files forming a working React + TypeScript + Tailwind clone. Repro
             placeholder="Optional: extra context — e.g. 'this is a pricing page with 3 tiers and an FAQ'"
             className="mt-3 w-full resize-none rounded-lg border border-white/10 bg-[#0d1017] p-3 text-[13px] text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-cyan-500/50" />
 
-          <button onClick={reverseEngineer} disabled={busy || !getApiKey()}
+          <button onClick={reverseEngineer} disabled={busy}
             className="mt-3 inline-flex items-center justify-center gap-2 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 py-2.5 text-sm font-semibold text-white shadow-lg shadow-cyan-900/30 transition hover:from-cyan-400 hover:to-blue-500 disabled:opacity-40">
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
             {busy ? "Reverse-engineering…" : "Clone this app"}
@@ -187,7 +190,7 @@ Rules: 3 to 6 files forming a working React + TypeScript + Tailwind clone. Repro
                 <ScanLine className="h-10 w-10" />
                 <p className="max-w-xs text-[13px]">
                   Point DevLab at a screenshot or URL. It extracts the palette, typography and
-                  components, then scaffolds a working clone straight into the editor.
+                  components, then generates a reviewable in-memory clone without writing to disk.
                 </p>
               </div>
             ) : (
@@ -199,7 +202,7 @@ Rules: 3 to 6 files forming a working React + TypeScript + Tailwind clone. Repro
                     : l === "OPENING_IN_EDITOR" ? "text-cyan-300 underline"
                     : "text-zinc-400"
                   }>
-                  {l === "OPENING_IN_EDITOR" ? "→ Handing files to the Code Editor…" : l}
+                  {l === "OPENING_IN_EDITOR" ? "→ Opening generated-draft review…" : l}
                 </div>
               ))
             )}

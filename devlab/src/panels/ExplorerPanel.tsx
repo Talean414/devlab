@@ -21,7 +21,7 @@ export function ExplorerPanel({ onAgentMode }: { onAgentMode?: () => void }) {
     <div className="flex h-full flex-col">
       <PanelHeader
         title="Project Templates"
-        subtitle={`${projectTemplates.length} zero-config bootstraps — or let the agent design one for you`}
+        subtitle={`${projectTemplates.length} setup recipes to review and copy`}
       />
 
       {onAgentMode && (
@@ -35,7 +35,7 @@ export function ExplorerPanel({ onAgentMode }: { onAgentMode?: () => void }) {
           <span className="flex-1">
             <span className="block text-sm font-semibold text-white">Build with the agent instead</span>
             <span className="block text-[12.5px] text-zinc-400">
-              Describe your idea in plain English — the agent picks the stack, plans the steps and writes the files.
+              Describe your idea in plain English — the agent picks the stack and prepares a plan for review. Native file generation remains disabled.
             </span>
           </span>
           <ArrowRight className="h-4 w-4 text-cyan-300 transition group-hover:translate-x-0.5" />
@@ -126,11 +126,11 @@ export function ExplorerPanel({ onAgentMode }: { onAgentMode?: () => void }) {
           </div>
           <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">
             <Zap className="h-3 w-3" />
-            One-click setup commands
+            Setup command reference
           </div>
           <CodeBlock code={selected.commands.join("\n")} lang="bash" />
           <div className="mt-4 rounded-lg border border-cyan-500/20 bg-cyan-500/[0.04] p-3.5 text-[13px] text-cyan-200/90">
-            In the native DevLab build, these run automatically in the integrated terminal — no copy-paste needed.
+            Review commands before copying them. Automatic execution stays disabled until the scoped workspace and native process policy are implemented.
           </div>
         </div>
       </div>

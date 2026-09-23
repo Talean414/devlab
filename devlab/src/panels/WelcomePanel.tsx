@@ -3,49 +3,40 @@ import { CodeBlock } from "../components/CodeBlock";
 import {
   Bot, ArrowRight,
   Shield, KeyRound, Download, Package,
-  Wand2, Code2, GitBranch, PenTool, Stethoscope, ScanLine, Radio,
+  Wand2, Code2, Container, Database, GitBranch, PenTool, Stethoscope, ScanLine, Terminal as TerminalIcon, Plug,
 } from "lucide-react";
 
 const stats = [
-  { label: "Project templates", value: "38" },
-  { label: "Native runtimes", value: "28" },
-  { label: "Deploy targets", value: "8" },
-  { label: "Total cost", value: "$0" },
+  { label: "Migration phase", value: "6C / 7" },
+  { label: "Native capabilities", value: "9" },
+  { label: "Simulations enabled", value: "0" },
+  { label: "License", value: "MIT" },
 ];
 
 const quickCards: { view: ViewId; Icon: typeof Bot; title: string; desc: string; hot?: boolean }[] = [
-  { view: "canvas",   Icon: PenTool,      title: "Sketch → Monorepo",    desc: "Draw boxes and arrows, get a real working codebase", hot: true },
-  { view: "healer",   Icon: Stethoscope,  title: "Self-Healing Tests",   desc: "Agent diagnoses, patches and re-runs until green", hot: true },
-  { view: "builder",  Icon: Wand2,        title: "Build with the agent", desc: "Describe an idea — get a plan, commands and real files" },
-  { view: "vision",   Icon: ScanLine,     title: "Screenshot → App",     desc: "Reverse-engineer any UI into a working React clone" },
-  { view: "editor",   Icon: Code2,        title: "Code Editor",          desc: "Full Monaco IDE with file tree, tabs and 20+ languages" },
-  { view: "live",     Icon: Radio,        title: "Live Share",           desc: "Zero-server P2P collaboration with a short invite" },
+  { view: "canvas",   Icon: PenTool,      title: "Sketch → Source",      desc: "Draw an architecture and generate a reviewable code preview", hot: true },
+  { view: "healer",   Icon: Stethoscope,  title: "Reviewed Repair Loop", desc: "Run native tests, draft repairs and explicitly apply reviewed drafts" },
+  { view: "builder",  Icon: Wand2,        title: "Project Builder",      desc: "Reviewed multi-file workspace generation is a later milestone" },
+  { view: "vision",   Icon: ScanLine,     title: "Screenshot → Source",  desc: "Use Gemini vision to generate a reviewable React preview" },
+  { view: "editor",   Icon: Code2,        title: "Native Workspace",     desc: "Select a real folder and safely edit its files with Monaco" },
+  { view: "terminal", Icon: TerminalIcon, title: "Native Terminal",      desc: "Run your real shell through a cross-platform PTY" },
+  { view: "git",      Icon: GitBranch,    title: "Native Source Control", desc: "Inspect and operate on the selected real Git repository" },
+  { view: "docker",   Icon: Container,    title: "Native Containers",     desc: "Pull images, create stopped containers and control real Docker state" },
+  { view: "database", Icon: Database,     title: "Native Databases",      desc: "Run bounded SQLite and PostgreSQL reads plus separately confirmed writes" },
+  { view: "api",      Icon: Plug,         title: "Native HTTP",           desc: "Send bounded HTTP/HTTPS requests without browser CORS limits" },
 ];
 
 const features = [
-  { Icon: PenTool,    title: "Sketch-to-code architecture", desc: "Draw your system on an infinite canvas — frontend, API, DB, cache, workers — and DevLab generates the entire monorepo, docker-compose included." },
-  { Icon: Stethoscope,title: "Autonomous self-healing",     desc: "Feed it broken code and a failing stack trace. The agent diagnoses, patches, shows live diffs and re-runs the suite — iterating until everything passes." },
-  { Icon: ScanLine,   title: "Reverse-engineer anything",   desc: "Paste a screenshot or URL. Gemini's vision model extracts the palette, typography and components, then scaffolds a working clone in seconds." },
-  { Icon: Radio,      title: "Zero-server live sharing",    desc: "Multi-tab sync via BroadcastChannel plus real WebRTC P2P for remote pairing — share your exact workspace with a short copy-paste invite, no backend." },
-  { Icon: GitBranch,  title: "Git that knows your repo",    desc: "Connect a GitHub token once. DevLab verifies the repository, enforces Conventional Commits and can auto-commit and push agent changes." },
-  { Icon: KeyRound,   title: "Bring Your Own Key",          desc: "Your free Google AI Studio key powers every agent. Never hardcoded, never uploaded — stored only in your browser." },
+  { Icon: PenTool,    title: "Sketch-to-code architecture", desc: "Draw a system on an infinite canvas and ask Gemini to produce reviewable source. AI output is never written to your workspace without a separate reviewed action." },
+  { Icon: TerminalIcon,title: "Real PTY terminal",          desc: "Start your operating system’s default shell in the selected workspace with real streaming output, resize handling, termination and exit codes." },
+  { Icon: ScanLine,   title: "Reverse-engineer interfaces", desc: "Paste a screenshot or URL. Gemini vision extracts visual details and generates source for you to review without pretending it has been built or run." },
+  { Icon: Container,  title: "Real Docker engine operations", desc: "Read actual engine data, pull validated image references, create constrained stopped containers, and explicitly control validated container IDs." },
+  { Icon: Database,   title: "Native SQLite and PostgreSQL", desc: "Run bounded SQLite work, or inspect and query PostgreSQL through explicit TLS, with bounded reads and separately confirmed writes." },
+  { Icon: Plug,       title: "Native HTTP client",           desc: "Send real HTTP/HTTPS requests from Rust with verified TLS, fixed framing and bounded request, header and response sizes." },
+  { Icon: Stethoscope,title: "Reviewed test repair",        desc: "Run backend-discovered tests, draft a one-file repair from real output, then apply it only after explicit editor review." },
+  { Icon: GitBranch,  title: "Real native Git",             desc: "Read real status, diffs, commits, branches and remotes, then stage, commit or run a confirmed remote operation through fixed Rust commands." },
+  { Icon: KeyRound,   title: "Protected Git credentials",   desc: "Saved Git provider tokens live in the operating system credential store and are never returned to the renderer. Gemini retains its separate BYOK renderer flow." },
 ];
-
-const packageJsonSnippet = `{
-  "dependencies": {
-    "@theia/core": "latest",
-    "@theia/editor": "latest",
-    "@theia/terminal": "latest",
-    "@theia/preview": "latest",
-    "@theia/plugin-ext-vscode": "latest"
-  },
-  "theiaPlugins": {
-    "roo-code":        "https://open-vsx.org/api/RooVeterinaryInc/roo-cline/latest/file/RooVeterinaryInc.roo-cline-latest.vsix",
-    "docker":          "https://open-vsx.org/api/ms-azuretools/vscode-docker/latest/file/ms-azuretools.vscode-docker-latest.vsix",
-    "database-client": "https://open-vsx.org/api/cweijan/vscode-database-client2/latest/file/cweijan.vscode-database-client2-latest.vsix",
-    "rest-client":     "https://open-vsx.org/api/humao/rest-client/latest/file/humao.rest-client-latest.vsix"
-  }
-}`;
 
 export function WelcomePanel({
   onNavigate, hasKey,
@@ -64,25 +55,25 @@ export function WelcomePanel({
         <div className="relative mx-auto max-w-5xl px-8 py-16">
           <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-300">
             <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-pulse" />
-            Your all-in-one developer control plane
+            Phase 9P · Local model health check
           </div>
           <h1 className="mt-5 max-w-3xl text-5xl font-bold tracking-tight text-white sm:text-6xl text-balance">
-            One window.{" "}
-            <span className="grad-text">Every tool.</span>
-            <br />Zero context switching.
+            Native shell.{" "}
+            <span className="grad-text">Trusted tools.</span>
+            <br />No simulated success.
           </h1>
           <p className="mt-5 max-w-2xl text-lg text-zinc-400 text-pretty">
-            DevLab unifies your AI agent, terminal, database client, API tester,
-            Docker, Git and CI/CD into a single, free, open-source workspace.
-            Stop juggling Cursor, Postman, DBeaver and twenty browser tabs.
+            DevLab now connects Monaco to real files, xterm.js to your operating system shell,
+            Source Control to real Git, Containers to the local Docker engine, and Database to a
+            bounded SQLite plus verified PostgreSQL connectivity, fixed schema inspection, bounded reads, separately confirmed writes, a native HTTP client with no browser CORS path, a real bounded test runner, reviewed repair drafts from failed test evidence, and explicit native application of approved drafts. Unavailable operations stay disabled until their native backends are implemented.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <button
-              onClick={() => onNavigate("builder")}
+              onClick={() => onNavigate("editor")}
               className="group inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-cyan-900/30 transition hover:from-cyan-400 hover:to-blue-500"
             >
               <Wand2 className="h-4 w-4" />
-              Build a project with the agent
+              Open a native workspace
               <ArrowRight className="h-4 w-4 transition group-hover:translate-x-0.5" />
             </button>
             {!hasKey && (
@@ -99,7 +90,7 @@ export function WelcomePanel({
               className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-5 py-2.5 text-sm font-medium text-zinc-200 transition hover:bg-white/[0.06]"
             >
               <Download className="h-4 w-4" />
-              Install on my machine
+              Run DevLab locally
             </button>
           </div>
 
@@ -171,51 +162,47 @@ export function WelcomePanel({
               <Download className="h-5 w-5 text-cyan-200" />
             </div>
             <div>
-              <h2 className="text-2xl font-semibold text-white">Ship it as a real desktop app</h2>
-              <p className="mt-2 max-w-2xl text-sm text-zinc-400">
-                This dashboard is your control plane. To turn DevLab into a standalone
-                <span className="mx-1 rounded bg-white/5 px-1.5 py-0.5 font-mono text-[12px] text-zinc-200">
-                  DevLab.exe / .dmg / .AppImage
-                </span>
-                with the Monaco editor and real extensions, use the pre-baked Eclipse Theia config below.
+              <h2 className="text-2xl font-semibold text-white">Run the Tauri desktop application</h2>
+              <p className="mt-2 max-w-2xl text-sm leading-relaxed text-zinc-400">
+                DevLab now launches through a trusted Rust process instead of treating a web page as
+                a native application. Install the platform prerequisites, then use the desktop command.
+                The browser command remains an interface preview only.
               </p>
             </div>
           </div>
 
           <div className="mt-6 grid gap-3 sm:grid-cols-3">
             {[
-              { step: "01", title: "Bootstrap",   cmd: "npx yo theia-extension devlab-app" },
-              { step: "02", title: "Pre-bake tools", cmd: "Add theiaPlugins to package.json" },
-              { step: "03", title: "Package",     cmd: "npm run theia package --electron" },
+              { step: "01", title: "Prerequisites", cmd: "Install Rust + Tauri system libraries" },
+              { step: "02", title: "Develop", cmd: "npm run desktop:dev" },
+              { step: "03", title: "Package", cmd: "npm run desktop:build" },
             ].map((s) => (
               <div key={s.step} className="rounded-xl border border-white/10 bg-white/[0.02] p-4 ring-soft">
                 <div className="font-mono text-[10px] uppercase tracking-wider text-cyan-400">{s.step}</div>
                 <div className="mt-1.5 text-sm font-semibold text-white">{s.title}</div>
-                <div className="mt-2 truncate rounded-md bg-black/40 px-2.5 py-1.5 font-mono text-[11px] text-zinc-400">
+                <div className="mt-2 rounded-md bg-black/40 px-2.5 py-1.5 font-mono text-[11px] text-zinc-400">
                   {s.cmd}
                 </div>
               </div>
             ))}
           </div>
 
-          <div className="mt-6">
-            <CodeBlock code={packageJsonSnippet} lang="json" />
-          </div>
-
           <div className="mt-6 rounded-xl border border-white/10 bg-white/[0.02] p-5 ring-soft">
             <div className="flex items-center gap-3">
               <Package className="h-5 w-5 text-zinc-300" />
-              <h3 className="text-sm font-semibold text-white">Distribute for free · one-line install</h3>
+              <h3 className="text-sm font-semibold text-white">Start from the repository</h3>
             </div>
-            <p className="mt-2 text-sm text-zinc-400">
-              Upload binaries to GitHub Releases and ship this install script:
-            </p>
             <div className="mt-3">
               <CodeBlock
-                code="curl -fsSL https://raw.githubusercontent.com/your-org/devlab/main/install.sh | bash"
+                code={"git clone https://github.com/Talean414/devlab.git\ncd devlab/devlab\nnpm ci\nnpm run desktop:dev"}
                 lang="bash"
               />
             </div>
+            <p className="mt-3 text-[12.5px] leading-relaxed text-zinc-500">
+              Run <code className="font-mono text-zinc-300">npm run check</code> for the React build and
+              <code className="ml-1 font-mono text-zinc-300">npm run native:check</code> for Rust.
+              Native compilation requires Rust, WebKitGTK on Linux, and the other documented platform libraries.
+            </p>
           </div>
 
           <button
@@ -226,11 +213,9 @@ export function WelcomePanel({
               <Download className="h-5 w-5 text-cyan-200" />
             </span>
             <span className="flex-1">
-              <span className="block text-sm font-semibold text-white">
-                Open the Local Setup guide
-              </span>
+              <span className="block text-sm font-semibold text-white">Open the native setup guide</span>
               <span className="block text-[12.5px] text-zinc-400">
-                Every command to install 28 runtimes, build the native binary and publish it to your team.
+                Inspect runtime diagnostics, security boundaries, migration phases and packaging commands.
               </span>
             </span>
             <ArrowRight className="h-4 w-4 text-cyan-300 transition group-hover:translate-x-0.5" />
@@ -238,7 +223,7 @@ export function WelcomePanel({
 
           <div className="mt-8 flex items-center gap-2 text-[12px] text-zinc-500">
             <Shield className="h-3.5 w-3.5" />
-            MIT licensed · no telemetry · no vendor lock-in
+            MIT licensed · default-deny native permissions · no simulated native operations
           </div>
         </div>
       </section>

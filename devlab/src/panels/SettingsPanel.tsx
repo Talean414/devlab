@@ -7,11 +7,39 @@ import {
 import type { ModelInfo } from "../lib/gemini";
 import {
   loadSettings, saveSettings, DEFAULT_SETTINGS, THEMES, ALL_PANELS,
-  type DevLabSettings, type ThemeId, type Autonomy, type Density,
+  type DevLabSettings, type ThemeId, type Autonomy, type Density, type AiProviderId, type ModelRoutingMode,
 } from "../lib/settings";
+import { starterBlueprintInstruction } from "../lib/generationBlueprints";
+import { componentScaffoldInstruction, designSystemInstruction, qualityChecklistInstruction, summarizeGenerationGuidance } from "../lib/generationGuidance";
+import {
+  BUILTIN_SECRET_ALLOW_EXCEPTIONS, BUILTIN_SECRET_DENY_PATTERNS, MAX_POLICY_PATTERNS,
+  describeDraftPolicy, evaluateDraftPath, loadDraftPolicy, parsePatternList, saveDraftPolicy,
+} from "../lib/draftPolicy";
+import {
+  aiCredentialDelete, aiCredentialStatus, aiCredentialStore, cloudAdapterAvailable, credentialKnownConfigured, isCloudAiProvider,
+  rememberCredentialConfigured, type AiCredentialStatus, type CloudAiProvider,
+} from "../lib/aiProviders";
+import {
+  OLLAMA_DEFAULT_ENDPOINT, checkOllamaModelHealth, describeConfiguredModelHealth, describeContextWindow, describeOllamaEndpoint,
+  describeOllamaHealth, formatOllamaExpiry, formatOllamaSize, formatParameterCount, listOllamaModels, ollamaAdapterAvailable,
+  sameOllamaModel, type OllamaHealthResponse, type OllamaModelInfo,
+} from "../lib/ollama";
+import {
+  customAdapterAvailable, customCredentialDelete, customCredentialStatus, customCredentialStore, describeCustomEndpoint,
+  type CustomCredentialStatus,
+} from "../lib/customEndpoint";
+import {
+  AI_PROVIDER_PROFILES,
+  AI_TASK_PROFILES,
+  VISION_CAPABLE_PROVIDERS,
+  describeAiRoute,
+  generationGuardrailInstruction,
+  resolveAiRoute,
+  type AiTaskKind,
+} from "../lib/modelRouting";
 import {
   Eye, EyeOff, Save, RefreshCw, Trash2, Shield, KeyRound, CheckCircle2,
-  Sparkles, Palette, LayoutGrid, Bot, SlidersHorizontal, RotateCcw, Cpu,
+  Sparkles, Palette, LayoutGrid, Bot, SlidersHorizontal, RotateCcw, Cpu, ExternalLink, HeartPulse,
 } from "lucide-react";
 
 const TABS = [
@@ -34,6 +62,245 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
   const [status, setStatus] = useState<"idle" | "checking" | "ok" | "bad">("idle");
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [autoPicked, setAutoPicked] = useState<string | null>(getPicked());
+  const [draftPolicy, setDraftPolicy] = useState(loadDraftPolicy);
+  const [policyAllowText, setPolicyAllowText] = useState(() => loadDraftPolicy().allow.join("\n"));
+  const [policyDenyText, setPolicyDenyText] = useState(() => loadDraftPolicy().deny.join("\n"));
+  const [policyProbePath, setPolicyProbePath] = useState("src/config/.env");
+  const [policyNotice, setPolicyNotice] = useState("");
+  const [ollamaModels, setOllamaModels] = useState<OllamaModelInfo[]>([]);
+  const [ollamaBusy, setOllamaBusy] = useState(false);
+  const [ollamaNotice, setOllamaNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  // Phase 9P: read-only local model health (context windows, loaded state, capabilities); memory only.
+  const [ollamaHealth, setOllamaHealth] = useState<OllamaHealthResponse | null>(null);
+  const [ollamaHealthBusy, setOllamaHealthBusy] = useState(false);
+  const [ollamaHealthNotice, setOllamaHealthNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const ollamaEndpointCheck = describeOllamaEndpoint(s.customEndpoint);
+  const cloudProvider: CloudAiProvider | null = isCloudAiProvider(s.aiProvider) ? s.aiProvider : null;
+  const [cloudKeyInput, setCloudKeyInput] = useState("");
+  const [cloudKeyShow, setCloudKeyShow] = useState(false);
+  const [cloudStatus, setCloudStatus] = useState<AiCredentialStatus | null>(null);
+  const [cloudBusy, setCloudBusy] = useState(false);
+  const [cloudNotice, setCloudNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+
+  useEffect(() => {
+    setCloudKeyInput("");
+    setCloudNotice(null);
+    setCloudStatus(null);
+    if (!cloudProvider || !cloudAdapterAvailable()) return;
+    let cancelled = false;
+    aiCredentialStatus(cloudProvider)
+      .then((status) => { if (!cancelled) { setCloudStatus(status); rememberCredentialConfigured(cloudProvider, status.configured); } })
+      .catch((error) => { if (!cancelled) setCloudNotice({ kind: "error", text: nativeErrorText(error) }); });
+    return () => { cancelled = true; };
+  }, [cloudProvider]);
+
+  async function storeCloudKey() {
+    if (!cloudProvider) return;
+    setCloudNotice(null);
+    if (!cloudAdapterAvailable()) {
+      setCloudNotice({ kind: "error", text: "Provider keys can only be stored inside the DevLab desktop app, where the OS credential store is available." });
+      return;
+    }
+    setCloudBusy(true);
+    try {
+      const status = await aiCredentialStore(cloudProvider, cloudKeyInput);
+      setCloudStatus(status);
+      rememberCredentialConfigured(cloudProvider, status.configured);
+      setCloudKeyInput("");
+      setCloudKeyShow(false);
+      setCloudNotice({ kind: "ok", text: `Key stored in the ${status.backend}. DevLab never reads it back into the interface; Rust attaches it only to requests for ${status.host}.` });
+    } catch (error) {
+      setCloudNotice({ kind: "error", text: nativeErrorText(error) });
+    } finally {
+      setCloudBusy(false);
+    }
+  }
+
+  async function deleteCloudKey() {
+    if (!cloudProvider) return;
+    setCloudNotice(null);
+    setCloudBusy(true);
+    try {
+      const status = await aiCredentialDelete(cloudProvider);
+      setCloudStatus(status);
+      rememberCredentialConfigured(cloudProvider, status.configured);
+      setCloudNotice({ kind: "ok", text: `Removed the stored key from the ${status.backend}.` });
+    } catch (error) {
+      setCloudNotice({ kind: "error", text: nativeErrorText(error) });
+    } finally {
+      setCloudBusy(false);
+    }
+  }
+
+  // Phase 9E: custom OpenAI-compatible endpoint token, scoped to the normalized endpoint profile.
+  const customEndpointCheck = describeCustomEndpoint(s.customEndpoint);
+  const [customTokenInput, setCustomTokenInput] = useState("");
+  const [customStatus, setCustomStatus] = useState<CustomCredentialStatus | null>(null);
+  const [customBusy, setCustomBusy] = useState(false);
+  const [customNotice, setCustomNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+
+  useEffect(() => {
+    setCustomStatus(null);
+    setCustomNotice(null);
+    if (s.aiProvider !== "custom" || !customAdapterAvailable() || !customEndpointCheck.ok) return;
+    let cancelled = false;
+    const handle = window.setTimeout(() => {
+      customCredentialStatus(s.customEndpoint)
+        .then((status) => { if (!cancelled) setCustomStatus(status); })
+        .catch((error) => { if (!cancelled) setCustomNotice({ kind: "error", text: nativeErrorText(error) }); });
+    }, 350);
+    return () => { cancelled = true; window.clearTimeout(handle); };
+  }, [s.aiProvider, s.customEndpoint, customEndpointCheck.ok]);
+
+  async function storeCustomToken() {
+    setCustomNotice(null);
+    if (!customAdapterAvailable()) {
+      setCustomNotice({ kind: "error", text: "Endpoint tokens can only be stored inside the DevLab desktop app, where the OS credential store is available." });
+      return;
+    }
+    setCustomBusy(true);
+    try {
+      const status = await customCredentialStore(s.customEndpoint, customTokenInput);
+      setCustomStatus(status);
+      setCustomTokenInput("");
+      setCustomNotice({ kind: "ok", text: `Token stored in the ${status.backend} for ${status.profile.id} only. Rust attaches it solely to ${status.profile.chatUrl}.` });
+    } catch (error) {
+      setCustomNotice({ kind: "error", text: nativeErrorText(error) });
+    } finally {
+      setCustomBusy(false);
+    }
+  }
+
+  async function deleteCustomToken() {
+    setCustomNotice(null);
+    setCustomBusy(true);
+    try {
+      const status = await customCredentialDelete(s.customEndpoint);
+      setCustomStatus(status);
+      setCustomNotice({ kind: "ok", text: `Removed the stored token for ${status.profile.id}.` });
+    } catch (error) {
+      setCustomNotice({ kind: "error", text: nativeErrorText(error) });
+    } finally {
+      setCustomBusy(false);
+    }
+  }
+
+  async function checkOllamaHealth() {
+    setOllamaHealthNotice(null);
+    setOllamaHealth(null);
+    if (!ollamaAdapterAvailable()) {
+      setOllamaHealthNotice({ kind: "error", text: "The native Ollama adapter is only available inside the DevLab desktop app, not the web preview." });
+      return;
+    }
+    if (!ollamaEndpointCheck.ok) {
+      setOllamaHealthNotice({ kind: "error", text: `Endpoint refused before any request: ${ollamaEndpointCheck.reason}` });
+      return;
+    }
+    setOllamaHealthBusy(true);
+    try {
+      const result = await checkOllamaModelHealth(s.customEndpoint);
+      setOllamaHealth(result);
+      const failed = result.models.filter((model) => model.error).length;
+      setOllamaHealthNotice({
+        kind: failed > 0 || result.installed === 0 ? "error" : "ok",
+        text: result.installed === 0
+          ? `Reached Ollama at ${result.endpoint} in ${result.elapsedMs} ms, but no models are installed, so there is nothing to check.`
+          : failed > 0
+            ? `${describeOllamaHealth(result)} · ${failed} probe${failed === 1 ? "" : "s"} failed (details below).`
+            : describeOllamaHealth(result),
+      });
+    } catch (error) {
+      const detail = typeof error === "object" && error && "message" in error ? String((error as { message: unknown }).message) : String(error);
+      setOllamaHealthNotice({ kind: "error", text: detail });
+    } finally {
+      setOllamaHealthBusy(false);
+    }
+  }
+  const ollamaHealthWarnings = ollamaHealth ? describeConfiguredModelHealth(ollamaHealth, s.ollamaModel, s.ollamaEmbedModel) : [];
+
+  async function detectOllamaModels() {
+    setOllamaNotice(null);
+    setOllamaModels([]);
+    if (!ollamaAdapterAvailable()) {
+      setOllamaNotice({ kind: "error", text: "The native Ollama adapter is only available inside the DevLab desktop app, not the web preview." });
+      return;
+    }
+    if (!ollamaEndpointCheck.ok) {
+      setOllamaNotice({ kind: "error", text: `Endpoint refused before any request: ${ollamaEndpointCheck.reason}` });
+      return;
+    }
+    setOllamaBusy(true);
+    try {
+      const result = await listOllamaModels(s.customEndpoint);
+      setOllamaModels(result.models);
+      setOllamaNotice({
+        kind: "ok",
+        text: result.models.length === 0
+          ? `Reached Ollama at ${result.endpoint} in ${result.elapsedMs} ms, but no models are installed. Pull one with \`ollama pull llama3.1\`.`
+          : `Found ${result.models.length}${result.truncated ? "+" : ""} installed model${result.models.length === 1 ? "" : "s"} at ${result.endpoint} in ${result.elapsedMs} ms.`,
+      });
+    } catch (error) {
+      const detail = typeof error === "object" && error && "message" in error ? String((error as { message: unknown }).message) : String(error);
+      setOllamaNotice({ kind: "error", text: detail });
+    } finally {
+      setOllamaBusy(false);
+    }
+  }
+  const policyProbe = policyProbePath.trim() ? evaluateDraftPath(policyProbePath, draftPolicy) : null;
+
+  function savePolicy() {
+    const next = saveDraftPolicy({ allow: parsePatternList(policyAllowText), deny: parsePatternList(policyDenyText) });
+    setDraftPolicy(next);
+    setPolicyAllowText(next.allow.join("\n"));
+    setPolicyDenyText(next.deny.join("\n"));
+    setPolicyNotice(`Saved draft path policy: ${describeDraftPolicy(next)}. Applies at the next reviewed-draft staging; nothing was re-evaluated or written.`);
+  }
+
+  function resetPolicy() {
+    const next = saveDraftPolicy({ allow: [], deny: [] });
+    setDraftPolicy(next);
+    setPolicyAllowText("");
+    setPolicyDenyText("");
+    setPolicyNotice("Cleared user allow/deny patterns. The built-in secret-safe deny list remains enforced.");
+  }
+  const providerProfile = AI_PROVIDER_PROFILES.find((profile) => profile.id === s.aiProvider) ?? AI_PROVIDER_PROFILES[0];
+  // Phase 9G: per-task provider overrides are non-secret metadata; "global" removes the override.
+  function setTaskProvider(task: AiTaskKind, provider: AiProviderId | "global") {
+    const next = { ...(s.taskProviders ?? {}) };
+    if (provider === "global") delete next[task];
+    else next[task] = { provider, model: next[task]?.provider === provider ? next[task]?.model : "" };
+    update({ taskProviders: next });
+  }
+  function setTaskModel(task: AiTaskKind, model: string) {
+    const current = s.taskProviders?.[task];
+    if (!current) return;
+    update({ taskProviders: { ...s.taskProviders, [task]: { ...current, model } } });
+  }
+  const taskOverrideCount = Object.keys(s.taskProviders ?? {}).length;
+  function taskOverrideHint(provider: AiProviderId): string {
+    if (provider === "ollama") return s.aiProvider === "custom" ? "Uses the default loopback Ollama endpoint (the custom URL is not shared)." : "Uses the Ollama endpoint configured above.";
+    if (provider === "custom") return s.aiProvider === "custom" ? "Uses the custom endpoint configured above." : "Select Custom as the global provider once to set its endpoint and token; the override reuses them.";
+    if (isCloudAiProvider(provider)) {
+      const known = credentialKnownConfigured(provider);
+      if (known === false) return `No ${provider} key in the OS credential store yet — select it as the global provider once to store one.`;
+      if (known === true) return "Key present in the OS credential store.";
+      return "Key status unknown until the desktop app probes the credential store.";
+    }
+    return getApiKey() ? "Gemini key present." : "Add a Gemini key first.";
+  }
+  const routePreview = AI_TASK_PROFILES.map((task) => resolveAiRoute(task.id, {
+    selectedModel: model,
+    pickedModel: autoPicked,
+  }, s));
+  const guidancePreview = routePreview.map((route) => ({
+    route,
+    guardrail: generationGuardrailInstruction(route.task),
+    blueprint: starterBlueprintInstruction(route.task),
+    component: componentScaffoldInstruction(route.task),
+    designSystem: designSystemInstruction(route.task),
+    quality: qualityChecklistInstruction(route.task),
+    summary: summarizeGenerationGuidance(route.task),
+  }));
 
   function update(patch: Partial<DevLabSettings>) {
     const next = { ...s, ...patch };
@@ -204,6 +471,48 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                   on={s.allowDeploy} onChange={(v) => update({ allowDeploy: v })} />
               </Card>
 
+              <Card title="Reviewed-draft path policy" desc="Path-only allow/deny patterns enforced at the shared reviewed-draft staging gate for every generator, before Rust validation and before Editor review. Patterns never read file contents, never write, and cannot relax native path checks.">
+                <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/[0.05] px-3 py-2 text-[11.5px] leading-relaxed text-emerald-100/75">
+                  <div className="flex items-center gap-2 font-semibold text-emerald-100"><Shield className="h-3.5 w-3.5 text-emerald-300" /> Built-in secret-safe deny list (always on)</div>
+                  <div className="mt-1 font-mono text-[10.5px] text-emerald-100/60">{BUILTIN_SECRET_DENY_PATTERNS.filter((pattern) => !pattern.startsWith("**/")).join("  ")}</div>
+                  <div className="mt-1 text-[10.5px] text-emerald-100/55">Exceptions kept allowed: {BUILTIN_SECRET_ALLOW_EXCEPTIONS.filter((pattern) => !pattern.startsWith("**/")).join(", ")}. Generated drafts matching the deny list are refused at staging with a visible reason.</div>
+                </div>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <div className="text-[12px] font-medium text-zinc-100">Deny patterns</div>
+                    <div className="text-[11px] text-zinc-500">One glob per line. Matching draft paths are refused.</div>
+                    <textarea value={policyDenyText} onChange={(e) => setPolicyDenyText(e.target.value)} rows={5} placeholder={"infra/**\n*.lock\ndocs/generated/**"}
+                      className="mt-1.5 w-full resize-none rounded-lg border border-white/10 bg-[#0d1017] p-3 font-mono text-[12px] text-zinc-100 outline-none focus:border-cyan-500/50" />
+                  </div>
+                  <div>
+                    <div className="text-[12px] font-medium text-zinc-100">Allow patterns (optional allow-list mode)</div>
+                    <div className="text-[11px] text-zinc-500">When non-empty, a draft path must match at least one pattern.</div>
+                    <textarea value={policyAllowText} onChange={(e) => setPolicyAllowText(e.target.value)} rows={5} placeholder={"src/**\ntests/**\npackage.json"}
+                      className="mt-1.5 w-full resize-none rounded-lg border border-white/10 bg-[#0d1017] p-3 font-mono text-[12px] text-zinc-100 outline-none focus:border-cyan-500/50" />
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button onClick={savePolicy} className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-cyan-400">
+                    <Save className="h-3.5 w-3.5" /> Save policy
+                  </button>
+                  <button onClick={resetPolicy} className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-white/5">
+                    <RotateCcw className="h-3.5 w-3.5" /> Clear user patterns
+                  </button>
+                  <span className="text-[10.5px] text-zinc-500">Up to {MAX_POLICY_PATTERNS} patterns per list · {describeDraftPolicy(draftPolicy)}</span>
+                </div>
+                <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.02] p-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Test a path against the saved policy</div>
+                  <input value={policyProbePath} onChange={(e) => setPolicyProbePath(e.target.value)} placeholder="src/lib/example.ts"
+                    className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2 font-mono text-[12px] text-zinc-100 outline-none focus:border-cyan-500/50" />
+                  {policyProbe && (
+                    <div className={`mt-2 text-[11.5px] ${policyProbe.kind === "allowed" ? "text-emerald-300" : "text-amber-300"}`}>
+                      {policyProbe.kind === "allowed" ? "Allowed" : "Refused"} · {policyProbe.reason}
+                    </div>
+                  )}
+                </div>
+                {policyNotice && <div className="mt-2 text-[12px] text-emerald-300">{policyNotice}</div>}
+              </Card>
+
               <Card title="Custom system prompt" desc="Prepended to every agent conversation. Leave blank for the default.">
                 <textarea value={s.systemPrompt} onChange={(e) => update({ systemPrompt: e.target.value })}
                   rows={4} placeholder="e.g. Always use pnpm, prefer functional patterns, target Node 22…"
@@ -218,38 +527,407 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
               <div className="flex gap-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] p-4 text-[13px] text-amber-200/90">
                 <Shield className="mt-0.5 h-4 w-4 shrink-0" />
                 <div>
-                  <strong>Security:</strong> keys are stored in this browser's localStorage and sent
-                  only to the provider's official endpoint. Rotate any key you have pasted publicly.
+                  <strong>Security:</strong> the Gemini key is currently held in WebView localStorage and sent
+                  only to Google's official endpoint. DeepSeek, OpenAI and Anthropic keys are written through Rust into the
+                  operating system's protected credential store and never returned to this interface; Ollama needs no key; custom
+                  OpenAI-compatible endpoints may store an optional bearer token there, scoped to that endpoint.
+                  Git tokens likewise live only in the OS credential store.
                 </div>
               </div>
 
-              <Card title="AI provider" desc="Gemini works out of the box. Others require the native build or a local proxy.">
+              <Card title="AI provider routing" desc="Gemini, Ollama (local), DeepSeek, OpenAI and Anthropic route through native adapters inside the desktop app; the custom endpoint profile stores non-secret metadata only until its adapter exists.">
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                  {([
-                    ["gemini", "Google Gemini"], ["openai", "OpenAI"], ["anthropic", "Anthropic"],
-                    ["ollama", "Ollama (local)"], ["custom", "Custom endpoint"],
-                  ] as const).map(([id, label]) => (
-                    <button key={id} onClick={() => update({ aiProvider: id })}
-                      className={`rounded-lg border px-3 py-2.5 text-[12.5px] transition ${
-                        s.aiProvider === id ? "border-cyan-500/50 bg-cyan-500/10 text-white" : "border-white/10 text-zinc-400 hover:bg-white/5"
-                      }`}>{label}</button>
+                  {AI_PROVIDER_PROFILES.map((profile) => (
+                    <button key={profile.id} onClick={() => update({ aiProvider: profile.id as AiProviderId })}
+                      className={`rounded-lg border px-3 py-2.5 text-left transition ${
+                        s.aiProvider === profile.id ? "border-cyan-500/50 bg-cyan-500/10 text-white" : "border-white/10 text-zinc-400 hover:bg-white/5"
+                      }`}>
+                      <span className="block text-[12.5px] font-semibold">{profile.shortName}</span>
+                      <span className={`mt-0.5 block text-[10.5px] ${profile.availableNow ? "text-emerald-300" : "text-amber-300/80"}`}>
+                        {profile.statusLabel}
+                      </span>
+                    </button>
                   ))}
                 </div>
-                {s.aiProvider !== "gemini" && (
-                  <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.02] p-3 text-[12.5px] text-zinc-400">
-                    {s.aiProvider === "ollama"
-                      ? "Run `ollama serve` locally, then set the endpoint to http://localhost:11434/v1."
-                      : "Browser CORS blocks direct calls to this provider. Use it in the native DevLab build or via a local proxy."}
+
+                <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.02] p-3 text-[12.5px] leading-relaxed text-zinc-400">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="font-semibold text-zinc-200">{providerProfile.name}</div>
+                      <div className="mt-1">{providerProfile.note}</div>
+                    </div>
+                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${providerProfile.availableNow ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/15 text-amber-300"}`}>
+                      {providerProfile.statusLabel}
+                    </span>
+                  </div>
+                  <dl className="mt-3 grid gap-2 text-[11.5px] sm:grid-cols-2">
+                    <div>
+                      <dt className="text-zinc-600">Credential storage</dt>
+                      <dd className="text-zinc-300">{providerProfile.credentialStorage}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-zinc-600">Transport</dt>
+                      <dd className="text-zinc-300">{providerProfile.transport}</dd>
+                    </div>
+                  </dl>
+                </div>
+
+                {cloudProvider && (
+                  <div className="mt-3 space-y-3">
+                    <label className="block text-[12px] text-zinc-400">
+                      {providerProfile.shortName} model id
+                      <input
+                        value={cloudProvider === "deepseek" ? s.deepseekModel : cloudProvider === "openai" ? s.openaiModel : s.anthropicModel}
+                        onChange={(e) => update(cloudProvider === "deepseek" ? { deepseekModel: e.target.value } : cloudProvider === "openai" ? { openaiModel: e.target.value } : { anthropicModel: e.target.value })}
+                        placeholder={providerProfile.modelExamples.join(", ")}
+                        className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                      <span className="mt-1 block text-[11px] text-zinc-500">Non-secret preference. Requests go only to {providerProfile.transport.match(/fixed host ([^ ]+)/)?.[1] ?? "the provider's fixed host"}; the model id is validated by Rust before sending.</span>
+                    </label>
+                    <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3">
+                      <div className="flex items-center justify-between gap-2 text-[12px]">
+                        <span className="inline-flex items-center gap-1.5 font-semibold text-zinc-200"><KeyRound className="h-3.5 w-3.5 text-cyan-300" /> {providerProfile.shortName} API key</span>
+                        <span className={`text-[11px] ${cloudStatus?.configured ? "text-emerald-300" : "text-zinc-500"}`}>
+                          {!cloudAdapterAvailable() ? "desktop app only" : cloudStatus ? (cloudStatus.configured ? `stored in ${cloudStatus.backend}` : "not stored") : "checking…"}
+                        </span>
+                      </div>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <div className="relative min-w-[220px] flex-1">
+                          <input
+                            type={cloudKeyShow ? "text" : "password"}
+                            value={cloudKeyInput}
+                            onChange={(e) => setCloudKeyInput(e.target.value)}
+                            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void storeCloudKey(); } }}
+                            autoComplete="off"
+                            spellCheck={false}
+                            placeholder={cloudStatus?.configured ? "Enter a new key to replace the stored one" : "Paste the API key"}
+                            className="w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2 pr-9 font-mono text-[12.5px] text-zinc-100 outline-none focus:border-cyan-500/50"
+                          />
+                          <button type="button" onClick={() => setCloudKeyShow((v) => !v)} className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-200" aria-label={cloudKeyShow ? "Hide key" : "Show key"}>
+                            {cloudKeyShow ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                          </button>
+                        </div>
+                        <button type="button" onClick={() => { void storeCloudKey(); }} disabled={cloudBusy || !cloudKeyInput.trim()}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/20 disabled:opacity-40">
+                          <Save className="h-3.5 w-3.5" /> Store in OS credential store
+                        </button>
+                        <button type="button" onClick={() => { void deleteCloudKey(); }} disabled={cloudBusy || !cloudStatus?.configured}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-white/5 disabled:opacity-40">
+                          <Trash2 className="h-3.5 w-3.5" /> Remove
+                        </button>
+                      </div>
+                      <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+                        The key is written once through Rust into the operating-system credential store and is never returned to this interface, logged, or persisted in localStorage or recovery snapshots. Rust attaches it only to HTTPS requests for {cloudStatus?.host ?? "the provider's fixed host"}.
+                      </p>
+                      {cloudNotice && <div className={`mt-2 text-[11.5px] ${cloudNotice.kind === "ok" ? "text-emerald-300" : "text-rose-300"}`}>{cloudNotice.text}</div>}
+                    </div>
+                    <p className="text-[11px] text-zinc-500">
+                      Chat, planning, coding, architecture, migration and repair run through the native adapter with a 120 s non-streamed bound per reply and no fallback to Gemini. Vision stays on Gemini.
+                    </p>
                   </div>
                 )}
-                {(s.aiProvider === "custom" || s.aiProvider === "ollama") && (
-                  <input value={s.customEndpoint} onChange={(e) => update({ customEndpoint: e.target.value })}
-                    placeholder="http://localhost:11434/v1"
-                    className="mt-3 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                {s.aiProvider === "ollama" && (
+                  <div className="mt-3 space-y-2">
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <label className="block text-[12px] text-zinc-400">
+                        Ollama loopback endpoint
+                        <input value={s.customEndpoint} onChange={(e) => update({ customEndpoint: e.target.value })}
+                          placeholder={OLLAMA_DEFAULT_ENDPOINT}
+                          className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                        <span className={`mt-1 block text-[11px] ${ollamaEndpointCheck.ok ? "text-emerald-300/80" : "text-amber-300/90"}`}>
+                          {ollamaEndpointCheck.ok ? `Will call ${ollamaEndpointCheck.origin}` : ollamaEndpointCheck.reason} · empty means {OLLAMA_DEFAULT_ENDPOINT}
+                        </span>
+                      </label>
+                      <label className="block text-[12px] text-zinc-400">
+                        Local model id
+                        <input value={s.ollamaModel} onChange={(e) => update({ ollamaModel: e.target.value })}
+                          placeholder="llama3.1, qwen2.5-coder, deepseek-r1"
+                          list="devlab-ollama-models"
+                          className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                        <datalist id="devlab-ollama-models">
+                          {ollamaModels.map((m) => <option key={m.name} value={m.name} />)}
+                        </datalist>
+                      </label>
+                      <label className="block text-[12px] text-zinc-400 sm:col-span-2">
+                        Embedding model for semantic workspace search (Phase 9D)
+                        <input value={s.ollamaEmbedModel} onChange={(e) => update({ ollamaEmbedModel: e.target.value })}
+                          placeholder="nomic-embed-text, mxbai-embed-large, bge-m3"
+                          list="devlab-ollama-models"
+                          className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                        <span className="mt-1 block text-[11px] text-zinc-500">
+                          Used only by the Agent context picker's Search → Embed step. Vectors are computed through the same loopback-only adapter, kept in Rust memory and dropped with the index. Pull it with <code>ollama pull nomic-embed-text</code>.
+                        </span>
+                      </label>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => { void detectOllamaModels(); }}
+                        disabled={ollamaBusy}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/20 disabled:opacity-40"
+                      >
+                        <RefreshCw className={`h-3.5 w-3.5 ${ollamaBusy ? "animate-spin" : ""}`} /> Detect installed models
+                      </button>
+                      <span className="text-[11px] text-zinc-500">Rust calls GET /api/tags on the loopback endpoint; the WebView never contacts localhost. Nothing is installed or pulled.</span>
+                    </div>
+                    {ollamaNotice && (
+                      <div className={`text-[11.5px] ${ollamaNotice.kind === "ok" ? "text-emerald-300" : "text-rose-300"}`}>{ollamaNotice.text}</div>
+                    )}
+                    {ollamaModels.length > 0 && (
+                      <ul className="grid gap-1 sm:grid-cols-2">
+                        {ollamaModels.map((m) => (
+                          <li key={m.name}>
+                            <button
+                              type="button"
+                              onClick={() => update({ ollamaModel: m.name })}
+                              className={`w-full rounded-lg border px-2.5 py-1.5 text-left text-[11.5px] ${s.ollamaModel === m.name ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-100" : "border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/5"}`}
+                            >
+                              <span className="font-mono font-semibold">{m.name}</span>
+                              <span className="ml-2 text-[10.5px] text-zinc-500">{[m.parameterSize, m.quantization, m.family, formatOllamaSize(m.sizeBytes)].filter(Boolean).join(" · ")}</span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => { void checkOllamaHealth(); }}
+                        disabled={ollamaHealthBusy}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-400/20 disabled:opacity-40"
+                      >
+                        <HeartPulse className={`h-3.5 w-3.5 ${ollamaHealthBusy ? "animate-pulse" : ""}`} /> Check model health
+                      </button>
+                      <span className="text-[11px] text-zinc-500">Rust reads /api/version, /api/tags, /api/ps and /api/show on the loopback endpoint: context windows, loaded state and capabilities for up to 12 installed models. No model is loaded, pulled or prompted.</span>
+                    </div>
+                    {ollamaHealthNotice && (
+                      <div className={`text-[11.5px] ${ollamaHealthNotice.kind === "ok" ? "text-emerald-300" : "text-rose-300"}`}>{ollamaHealthNotice.text}</div>
+                    )}
+                    {ollamaHealthWarnings.length > 0 && (
+                      <ul className="space-y-0.5 text-[11px] text-amber-300">
+                        {ollamaHealthWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+                      </ul>
+                    )}
+                    {ollamaHealth && ollamaHealth.models.length > 0 && (
+                      <ul className="grid gap-1 sm:grid-cols-2">
+                        {ollamaHealth.models.map((m) => {
+                          const roles = [
+                            sameOllamaModel(m.name, s.ollamaModel) ? "chat model" : "",
+                            sameOllamaModel(m.name, s.ollamaEmbedModel) ? "embedding model" : "",
+                          ].filter(Boolean);
+                          return (
+                            <li key={m.name} className={`rounded-lg border px-2.5 py-1.5 text-[11.5px] ${m.error ? "border-rose-400/30 bg-rose-400/5" : m.loaded ? "border-emerald-400/30 bg-emerald-400/5" : "border-white/10 bg-white/[0.02]"}`}>
+                              <div className="flex flex-wrap items-center justify-between gap-x-2">
+                                <span className="font-mono font-semibold text-zinc-200">{m.name}</span>
+                                <span className="text-[10.5px] text-zinc-500">
+                                  {m.loaded
+                                    ? `loaded · ${formatOllamaSize(m.sizeVram)} in VRAM${m.expiresAt ? ` · until ${formatOllamaExpiry(m.expiresAt)}` : ""}`
+                                    : !m.installed ? "not installed" : ollamaHealth.loadedKnown ? "not loaded" : "loaded state unknown"}
+                                </span>
+                              </div>
+                              {describeContextWindow(m) && <div className="text-[10.5px] text-zinc-300">{describeContextWindow(m)}</div>}
+                              <div className="text-[10.5px] text-zinc-500">
+                                {[
+                                  m.architecture,
+                                  m.parameterSize || formatParameterCount(m.parameterCount),
+                                  m.quantization,
+                                  m.format,
+                                  m.sizeBytes > 0 ? formatOllamaSize(m.sizeBytes) : "",
+                                  m.embeddingLength !== null ? `${m.embeddingLength}-d embeddings` : "",
+                                  m.capabilities.length > 0 ? `capabilities: ${m.capabilities.join(", ")}` : "",
+                                  m.installed ? `${m.probeMs} ms` : "",
+                                ].filter(Boolean).join(" · ")}
+                              </div>
+                              {roles.length > 0 && <div className="text-[10.5px] text-cyan-300">Configured as the {roles.join(" and ")}.</div>}
+                              {m.error && <div className="text-[10.5px] text-rose-300">{m.error}</div>}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                    {ollamaHealth?.truncated && (
+                      <div className="text-[10.5px] text-amber-300">
+                        Only the first {ollamaHealth.probed} model{ollamaHealth.probed === 1 ? "" : "s"} were probed ({ollamaHealth.truncationReason ?? "budget"}); {ollamaHealth.skipped} more installed model{ollamaHealth.skipped === 1 ? "" : "s"} were not checked.
+                      </div>
+                    )}
+                    <p className="text-[11px] text-zinc-500">
+                      Generation for chat, planning, coding, architecture, migration and repair runs on this machine through the native adapter with a 120 s non-streamed bound per reply. Vision stays on Gemini. There is no fallback from Ollama to Gemini.
+                    </p>
+                  </div>
+                )}
+                {s.aiProvider === "custom" && (
+                  <div className="mt-3 space-y-2">
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <label className="block text-[12px] text-zinc-400">
+                        OpenAI-compatible base URL
+                        <input value={s.customEndpoint} onChange={(e) => update({ customEndpoint: e.target.value })}
+                          placeholder="https://llm.example.com/v1 or http://localhost:1234/v1"
+                          className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                        <span className={`mt-1 block text-[11px] ${customEndpointCheck.ok ? "text-emerald-300/80" : "text-amber-300/90"}`}>
+                          {customEndpointCheck.reason}{customStatus ? ` · Rust will call ${customStatus.profile.chatUrl}` : ""}
+                        </span>
+                      </label>
+                      <label className="block text-[12px] text-zinc-400">
+                        Model id
+                        <input value={s.customModel} onChange={(e) => update({ customModel: e.target.value })}
+                          placeholder="e.g. meta-llama/Llama-3.1-8B-Instruct"
+                          className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                      </label>
+                    </div>
+                    {customEndpointCheck.ok && customEndpointCheck.tls && (
+                      <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3">
+                        <div className="text-[12px] text-zinc-400">
+                          Bearer token for this endpoint {customStatus ? (customStatus.configured ? <span className="text-emerald-300">· stored</span> : <span className="text-zinc-500">· none stored</span>) : null}
+                        </div>
+                        <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                          <input type="password" value={customTokenInput} onChange={(e) => setCustomTokenInput(e.target.value)}
+                            placeholder="optional; leave empty for anonymous servers" autoComplete="off" spellCheck={false}
+                            className="min-w-[220px] flex-1 rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-cyan-500/50" />
+                          <button type="button" onClick={() => { void storeCustomToken(); }} disabled={customBusy || !customTokenInput.trim()}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/20 disabled:opacity-40">
+                            <Save className="h-3.5 w-3.5" /> Store in OS credential store
+                          </button>
+                          <button type="button" onClick={() => { void deleteCustomToken(); }} disabled={customBusy || !customStatus?.configured}
+                            className="rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-white/5 disabled:opacity-40">
+                            Remove
+                          </button>
+                        </div>
+                        <p className="mt-2 text-[11px] text-zinc-500">
+                          The token is written once through Rust into the OS credential store under an account derived from the normalized endpoint, so it is never sent to a different host or path. It is never returned to this interface, logged, or persisted in localStorage or recovery snapshots.
+                        </p>
+                      </div>
+                    )}
+                    {customEndpointCheck.ok && !customEndpointCheck.tls && (
+                      <p className="text-[11px] text-zinc-500">Loopback http:// servers run without a token: Rust refuses to attach bearer tokens in clear text.</p>
+                    )}
+                    {customNotice && <div className={`text-[11px] ${customNotice.kind === "ok" ? "text-emerald-300/80" : "text-rose-300"}`}>{customNotice.text}</div>}
+                    <p className="text-[11px] text-zinc-500">
+                      Chat, planning, coding, architecture, migration and repair go through Rust to <code>{"<base>"}/chat/completions</code> with a 120 s non-streamed bound and the OpenAI response shape. Self-signed certificates are not trusted; vision stays on Gemini; there is no fallback to Gemini.
+                    </p>
+                  </div>
                 )}
               </Card>
 
-              <Card title="Google AI Studio API key" desc="Free tier is plenty for development.">
+              <Card title="Streaming replies (native adapters)" desc="Phase 9F. Ollama, DeepSeek, OpenAI, Anthropic and custom endpoints can stream text deltas through a Rust-owned channel; the WebView never opens the upstream connection. Gemini streams as before.">
+                <Row label="Stream native replies incrementally" desc="Off = one bounded, non-streamed reply per request. Either way the same host policy, credential handling, 120 s bound and reply-size cap apply, and a Stop button cancels at the next line."
+                  on={s.streamReplies} onChange={(v) => update({ streamReplies: v })} />
+              </Card>
+
+              <Card title="Task-aware model router" desc="Routes are explicit metadata today. Auto mode can bias Gemini fallback candidates by task; every native adapter (Ollama, DeepSeek, OpenAI, Anthropic, custom endpoint) is desktop-only and never falls back to Gemini.">
+                <div className="mb-3 grid gap-2 sm:grid-cols-2">
+                  {([
+                    ["auto", "Auto route by task", "Planning, coding, repair and vision prompts get task-specific route instructions and fallback order."],
+                    ["fixed", "Fixed selected model", "Always try the selected Gemini model first before fallback handling."],
+                  ] as const).map(([id, label, desc]) => (
+                    <button key={id} onClick={() => update({ modelRouting: id as ModelRoutingMode })}
+                      className={`rounded-lg border p-3 text-left transition ${
+                        s.modelRouting === id ? "border-cyan-500/50 bg-cyan-500/10" : "border-white/10 hover:bg-white/5"
+                      }`}>
+                      <span className="block text-[12.5px] font-semibold text-zinc-100">{label}</span>
+                      <span className="mt-1 block text-[11px] leading-relaxed text-zinc-500">{desc}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="mb-2 flex items-center justify-between text-[11.5px] text-zinc-500">
+                  <span>Per-task provider (Phase 9G) · {taskOverrideCount === 0 ? "all tasks follow the global provider" : `${taskOverrideCount} override${taskOverrideCount === 1 ? "" : "s"}`}</span>
+                  {taskOverrideCount > 0 && (
+                    <button onClick={() => update({ taskProviders: {} })} className="rounded-md border border-white/10 px-2 py-0.5 text-[10.5px] hover:bg-white/5">Reset all to global</button>
+                  )}
+                </div>
+                <div className="space-y-1.5">
+                  {routePreview.map((route) => {
+                    const override = s.taskProviders?.[route.task];
+                    const choices = route.task === "vision"
+                      ? AI_PROVIDER_PROFILES.filter((profile) => VISION_CAPABLE_PROVIDERS.includes(profile.id))
+                      : AI_PROVIDER_PROFILES;
+                    return (
+                      <div key={route.task} className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-[11.5px]">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-semibold text-zinc-200">{route.taskLabel}</span>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <select
+                              value={override?.provider ?? "global"}
+                              onChange={(e) => setTaskProvider(route.task, e.target.value as AiProviderId | "global")}
+                              className="rounded-md border border-white/10 bg-[#0d1017] px-2 py-1 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/50"
+                              aria-label={`Provider for ${route.taskLabel}`}
+                            >
+                              <option value="global">Global ({providerProfile.shortName})</option>
+                              {choices.map((profile) => (
+                                <option key={profile.id} value={profile.id}>{profile.shortName}{profile.availableNow ? "" : " · desktop only"}</option>
+                              ))}
+                            </select>
+                            {override && (
+                              <input
+                                value={override.model ?? ""}
+                                onChange={(e) => setTaskModel(route.task, e.target.value)}
+                                placeholder={`model (default: ${AI_PROVIDER_PROFILES.find((p) => p.id === override.provider)?.defaultModel || "configured"})`}
+                                maxLength={128}
+                                className="w-44 rounded-md border border-white/10 bg-[#0d1017] px-2 py-1 font-mono text-[11px] text-zinc-200 outline-none focus:border-cyan-500/50"
+                                aria-label={`Model override for ${route.taskLabel}`}
+                              />
+                            )}
+                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${route.status === "active" ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/15 text-amber-300"}`}>
+                              {route.status === "active" ? "Active" : "Desktop only"}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="mt-1 text-zinc-500">{describeAiRoute(route)}</div>
+                        {override && <div className="mt-0.5 text-[10.5px] text-zinc-600">{taskOverrideHint(override.provider)}</div>}
+                        {!override && route.reason.includes("ignored") && <div className="mt-0.5 text-[10.5px] text-amber-300/80">{route.reason}</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+                <p className="mt-3 text-[11px] leading-relaxed text-zinc-500">
+                  Overrides are non-secret metadata stored with your preferences. Each provider keeps its own credential rules (Gemini key in the WebView, cloud/custom tokens in the OS credential store, Ollama none), host policy and bounds; a task routed to a native adapter is desktop-only and never falls back to Gemini. Vision can only be routed to Gemini because image input is wired there alone.
+                </p>
+              </Card>
+
+              <Card title="Generation guidance preview" desc="Read-only metadata showing the guidance DevLab injects into generation prompts. It does not run tools, install dependencies, write files or bypass reviewed apply.">
+                <div className="space-y-2">
+                  {guidancePreview.map(({ route, guardrail, blueprint, component, designSystem, quality, summary }) => (
+                    <details key={route.task} className="rounded-lg border border-white/10 bg-black/15 p-3 text-[11.5px] text-zinc-400">
+                      <summary className="cursor-pointer select-none font-semibold text-zinc-200">
+                        {route.taskLabel} · {summary.join(" · ")}
+                      </summary>
+                      <div className="mt-2 grid gap-2">
+                        <div>
+                          <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Prompt guardrails</div>
+                          <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap rounded-md bg-black/25 p-2 font-mono text-[10.5px] leading-relaxed text-zinc-500">{guardrail}</pre>
+                        </div>
+                        {blueprint && (
+                          <div>
+                            <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Starter blueprint guidance</div>
+                            <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap rounded-md bg-black/25 p-2 font-mono text-[10.5px] leading-relaxed text-zinc-500">{blueprint}</pre>
+                          </div>
+                        )}
+                        {component && (
+                          <div>
+                            <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Component/style guidance</div>
+                            <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap rounded-md bg-black/25 p-2 font-mono text-[10.5px] leading-relaxed text-zinc-500">{component}</pre>
+                          </div>
+                        )}
+                        {designSystem && (
+                          <div>
+                            <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Design-system guidance</div>
+                            <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap rounded-md bg-black/25 p-2 font-mono text-[10.5px] leading-relaxed text-zinc-500">{designSystem}</pre>
+                          </div>
+                        )}
+                        {quality && (
+                          <div>
+                            <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Quality checklist guidance</div>
+                            <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap rounded-md bg-black/25 p-2 font-mono text-[10.5px] leading-relaxed text-zinc-500">{quality}</pre>
+                          </div>
+                        )}
+                      </div>
+                    </details>
+                  ))}
+                </div>
+                <p className="mt-3 text-[11px] leading-relaxed text-zinc-500">
+                  This preview is metadata only. It does not include your Gemini key, custom prompt text, file contents or attached workspace context.
+                </p>
+              </Card>
+
+              <Card title="Google AI Studio API key" desc="Bring your own key; Google's per-project free-tier limits still apply.">
                 <div className="flex gap-2">
                   <input type={show ? "text" : "password"} value={key} onChange={(e) => setKey(e.target.value)}
                     placeholder="AIza… (from aistudio.google.com/app/apikey)"
@@ -270,9 +948,30 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                 </div>
                 <select value={model} onChange={(e) => { setModelState(e.target.value); setModel(e.target.value); onKeyChange(); }}
                   className="w-full rounded-lg border border-white/10 bg-[#0d1017] px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-cyan-500/50">
-                  {(availableModels.length > 0 ? availableModels.map((m) => m.name.replace("models/", "")) : [model])
+                  {(availableModels.length > 0
+                    ? availableModels.filter((m) => m.supported).map((m) => m.name.replace("models/", ""))
+                    : [model])
                     .map((m) => <option key={m} value={m} className="text-zinc-900">{m}</option>)}
                 </select>
+
+                <div className="mt-3 rounded-lg border border-cyan-500/20 bg-cyan-500/[0.05] p-3 text-[12px] leading-relaxed text-zinc-400">
+                  <p>
+                    DevLab automatically retries short throttles and falls back across up to three
+                    available models. For the highest free-tier throughput, choose a stable
+                    <strong className="text-cyan-200"> Flash-Lite</strong> model. Daily quota cannot
+                    be bypassed in code and resets at midnight Pacific time.
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-3">
+                    <a href="https://ai.dev/rate-limit" target="_blank" rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-cyan-400 hover:underline">
+                      View my usage <ExternalLink className="h-3 w-3" />
+                    </a>
+                    <a href="https://ai.google.dev/gemini-api/docs/rate-limits" target="_blank" rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-cyan-400 hover:underline">
+                      Rate-limit guide <ExternalLink className="h-3 w-3" />
+                    </a>
+                  </div>
+                </div>
 
                 <div className="mt-4 flex flex-wrap items-center gap-2">
                   <button onClick={() => { setApiKey(key); setModel(model); onKeyChange(); }}
@@ -287,8 +986,12 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                     <Trash2 className="h-3.5 w-3.5" /> Clear
                   </button>
                   {status === "checking" && <span className="text-sm text-zinc-400">Checking…</span>}
-                  {status === "ok" && <span className="inline-flex items-center gap-1 text-sm text-emerald-400"><CheckCircle2 className="h-3.5 w-3.5" /> Valid</span>}
-                  {status === "bad" && <span className="text-sm text-rose-400">Invalid key</span>}
+                  {status === "ok" && (
+                    <span className="inline-flex items-center gap-1 text-sm text-emerald-400" title="Generation quota is checked only when you send a prompt.">
+                      <CheckCircle2 className="h-3.5 w-3.5" /> Key valid
+                    </span>
+                  )}
+                  {status === "bad" && <span className="text-sm text-rose-400">Key rejected or network unavailable</span>}
                 </div>
               </Card>
 
@@ -336,18 +1039,18 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                 </button>
               </Card>
 
-              <Card title="Local data" desc="Everything DevLab stores lives in this browser.">
+              <Card title="Local data" desc="Non-secret preferences remain WebView-local; Git credentials are separate.">
                 <ul className="space-y-1.5 text-[12.5px] text-zinc-400">
-                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.settings.v1</code> — preferences</li>
-                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.gemini.key</code> — AI key</li>
-                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.git.v1</code> — repo config + token</li>
-                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.deploy.v1</code> — deploy tokens</li>
-                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.files.v1</code> — editor workspace</li>
+                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.settings.v1</code> — preferences and non-secret provider/router metadata</li>
+                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.gemini.key</code> — Gemini key used by the renderer</li>
+                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.git.v1</code> — commit-message preference only; no token</li>
+                  <li><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px]">devlab.deploy.v1</code> — disabled deployment preference only; legacy tokens are purged</li>
+                  <li><span className="font-medium text-emerald-300">OS credential store</span> — GitHub, GitLab and Bitbucket token presence; values are not readable by the renderer</li>
                 </ul>
                 <button
-                  onClick={() => { if (confirm("Erase ALL DevLab data from this browser?")) { localStorage.clear(); location.reload(); } }}
+                  onClick={() => { if (confirm("Erase DevLab WebView preferences and the Gemini key? Git credentials must be deleted separately in Source Control → Credentials.")) { localStorage.clear(); location.reload(); } }}
                   className="mt-4 inline-flex items-center gap-1.5 rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm text-rose-300 hover:bg-rose-500/20">
-                  <Trash2 className="h-3.5 w-3.5" /> Erase all local data
+                  <Trash2 className="h-3.5 w-3.5" /> Erase WebView data
                 </button>
               </Card>
             </>
@@ -356,6 +1059,13 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
       </div>
     </div>
   );
+}
+
+function nativeErrorText(error: unknown): string {
+  if (error && typeof error === "object" && "message" in error && typeof (error as { message: unknown }).message === "string") {
+    return (error as { message: string }).message;
+  }
+  return String(error);
 }
 
 function Card({ title, desc, children }: { title: string; desc: string; children: React.ReactNode }) {
