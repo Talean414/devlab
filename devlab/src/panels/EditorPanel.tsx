@@ -4,6 +4,8 @@ import { PanelHeader } from "./AgentPanel";
 import { loadSettings, getTheme } from "../lib/settings";
 import { testRunnerSnapshot, type TestProfile, type TestRunnerSnapshot } from "../lib/testRunner";
 import { recommendVerificationProfiles, type VerificationProfileRecommendation } from "../lib/verificationGuidance";
+import { isMigrationPath } from "../lib/migrationSafety";
+import { MigrationSafetyCard, type MigrationSafetySource } from "../components/MigrationSafetyCard";
 import type { DraftPolicyGateSummary, ReviewedDraftApplyOutcome, VFile } from "../types";
 import {
   appendSavedReviewView, buildSavedReviewViewsExport, createSavedReviewView, previewReviewViewRestore,
@@ -823,6 +825,15 @@ export function EditorPanel({
 
   const reviewQueueKeys = useMemo(() => incomingDrafts.map((draft, index) => draftKey(draft, index)), [incomingDrafts]);
 
+  // SQL migration drafts get a lexical safety review before apply (pure, nothing executed).
+  const migrationSafetySources = useMemo<MigrationSafetySource[]>(() => {
+    const dialectHint = incomingDrafts.find((draft) => /(^|\/)schema\.prisma$/.test(draft.path))?.content;
+    return incomingDrafts
+      .filter((draft) => draft.language === "sql" || isMigrationPath(draft.path))
+      .filter((draft) => /\.sql$/i.test(draft.path) || draft.language === "sql")
+      .map((draft) => ({ label: draft.path, sql: draft.content, dialectHint }));
+  }, [incomingDrafts]);
+
   function saveCurrentReviewView() {
     if (incomingDrafts.length === 0) return;
     if (savedReviewViews.length >= MAX_SAVED_REVIEW_VIEWS) {
@@ -1495,6 +1506,11 @@ export function EditorPanel({
                     </div>
                   )}
                 </div>
+                {migrationSafetySources.length > 0 && (
+                  <div className="mt-3">
+                    <MigrationSafetyCard sources={migrationSafetySources} compact />
+                  </div>
+                )}
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto p-2">
                 {filteredDraftEntries.map((file) => {
