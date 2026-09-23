@@ -20,6 +20,7 @@ export type NativeCapability =
   | "code-map"
   | "code-graph"
   | "dependency-inventory"
+  | "local-ai-health"
   | "agent-tools"
   | "test-runner"
   | "agent-audit"
@@ -40,7 +41,7 @@ export const WEB_RUNTIME: RuntimeInfo = {
   runtime: "web",
   os: "browser",
   arch: "unknown",
-  appVersion: "1.76.0",
+  appVersion: "1.77.0",
   debug: import.meta.env.DEV,
   capabilities: [],
 };

@@ -66,6 +66,7 @@
     "allow-database-postgres-forget-password",
     "allow-http-request",
     "allow-ollama-list-models",
+    "allow-ollama-model-health",
     "allow-ollama-chat",
     "allow-ai-credential-status",
     "allow-ai-credential-store",

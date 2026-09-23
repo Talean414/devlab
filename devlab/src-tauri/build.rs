@@ -59,6 +59,7 @@ const APP_COMMANDS: &[&str] = &[
     "database_postgres_forget_password",
     "http_request",
     "ollama_list_models",
+    "ollama_model_health",
     "ollama_chat",
     "ai_credential_status",
     "ai_credential_store",

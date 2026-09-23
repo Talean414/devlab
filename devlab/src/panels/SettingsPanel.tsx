@@ -20,8 +20,9 @@ import {
   rememberCredentialConfigured, type AiCredentialStatus, type CloudAiProvider,
 } from "../lib/aiProviders";
 import {
-  OLLAMA_DEFAULT_ENDPOINT, describeOllamaEndpoint, formatOllamaSize, listOllamaModels, ollamaAdapterAvailable,
-  type OllamaModelInfo,
+  OLLAMA_DEFAULT_ENDPOINT, checkOllamaModelHealth, describeConfiguredModelHealth, describeContextWindow, describeOllamaEndpoint,
+  describeOllamaHealth, formatOllamaExpiry, formatOllamaSize, formatParameterCount, listOllamaModels, ollamaAdapterAvailable,
+  sameOllamaModel, type OllamaHealthResponse, type OllamaModelInfo,
 } from "../lib/ollama";
 import {
   customAdapterAvailable, customCredentialDelete, customCredentialStatus, customCredentialStore, describeCustomEndpoint,
@@ -38,7 +39,7 @@ import {
 } from "../lib/modelRouting";
 import {
   Eye, EyeOff, Save, RefreshCw, Trash2, Shield, KeyRound, CheckCircle2,
-  Sparkles, Palette, LayoutGrid, Bot, SlidersHorizontal, RotateCcw, Cpu, ExternalLink,
+  Sparkles, Palette, LayoutGrid, Bot, SlidersHorizontal, RotateCcw, Cpu, ExternalLink, HeartPulse,
 } from "lucide-react";
 
 const TABS = [
@@ -69,6 +70,10 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
   const [ollamaModels, setOllamaModels] = useState<OllamaModelInfo[]>([]);
   const [ollamaBusy, setOllamaBusy] = useState(false);
   const [ollamaNotice, setOllamaNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  // Phase 9P: read-only local model health (context windows, loaded state, capabilities); memory only.
+  const [ollamaHealth, setOllamaHealth] = useState<OllamaHealthResponse | null>(null);
+  const [ollamaHealthBusy, setOllamaHealthBusy] = useState(false);
+  const [ollamaHealthNotice, setOllamaHealthNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const ollamaEndpointCheck = describeOllamaEndpoint(s.customEndpoint);
   const cloudProvider: CloudAiProvider | null = isCloudAiProvider(s.aiProvider) ? s.aiProvider : null;
   const [cloudKeyInput, setCloudKeyInput] = useState("");
@@ -179,6 +184,39 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
       setCustomBusy(false);
     }
   }
+
+  async function checkOllamaHealth() {
+    setOllamaHealthNotice(null);
+    setOllamaHealth(null);
+    if (!ollamaAdapterAvailable()) {
+      setOllamaHealthNotice({ kind: "error", text: "The native Ollama adapter is only available inside the DevLab desktop app, not the web preview." });
+      return;
+    }
+    if (!ollamaEndpointCheck.ok) {
+      setOllamaHealthNotice({ kind: "error", text: `Endpoint refused before any request: ${ollamaEndpointCheck.reason}` });
+      return;
+    }
+    setOllamaHealthBusy(true);
+    try {
+      const result = await checkOllamaModelHealth(s.customEndpoint);
+      setOllamaHealth(result);
+      const failed = result.models.filter((model) => model.error).length;
+      setOllamaHealthNotice({
+        kind: failed > 0 || result.installed === 0 ? "error" : "ok",
+        text: result.installed === 0
+          ? `Reached Ollama at ${result.endpoint} in ${result.elapsedMs} ms, but no models are installed, so there is nothing to check.`
+          : failed > 0
+            ? `${describeOllamaHealth(result)} · ${failed} probe${failed === 1 ? "" : "s"} failed (details below).`
+            : describeOllamaHealth(result),
+      });
+    } catch (error) {
+      const detail = typeof error === "object" && error && "message" in error ? String((error as { message: unknown }).message) : String(error);
+      setOllamaHealthNotice({ kind: "error", text: detail });
+    } finally {
+      setOllamaHealthBusy(false);
+    }
+  }
+  const ollamaHealthWarnings = ollamaHealth ? describeConfiguredModelHealth(ollamaHealth, s.ollamaModel, s.ollamaEmbedModel) : [];
 
   async function detectOllamaModels() {
     setOllamaNotice(null);
@@ -649,6 +687,67 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                           </li>
                         ))}
                       </ul>
+                    )}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => { void checkOllamaHealth(); }}
+                        disabled={ollamaHealthBusy}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-400/20 disabled:opacity-40"
+                      >
+                        <HeartPulse className={`h-3.5 w-3.5 ${ollamaHealthBusy ? "animate-pulse" : ""}`} /> Check model health
+                      </button>
+                      <span className="text-[11px] text-zinc-500">Rust reads /api/version, /api/tags, /api/ps and /api/show on the loopback endpoint: context windows, loaded state and capabilities for up to 12 installed models. No model is loaded, pulled or prompted.</span>
+                    </div>
+                    {ollamaHealthNotice && (
+                      <div className={`text-[11.5px] ${ollamaHealthNotice.kind === "ok" ? "text-emerald-300" : "text-rose-300"}`}>{ollamaHealthNotice.text}</div>
+                    )}
+                    {ollamaHealthWarnings.length > 0 && (
+                      <ul className="space-y-0.5 text-[11px] text-amber-300">
+                        {ollamaHealthWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+                      </ul>
+                    )}
+                    {ollamaHealth && ollamaHealth.models.length > 0 && (
+                      <ul className="grid gap-1 sm:grid-cols-2">
+                        {ollamaHealth.models.map((m) => {
+                          const roles = [
+                            sameOllamaModel(m.name, s.ollamaModel) ? "chat model" : "",
+                            sameOllamaModel(m.name, s.ollamaEmbedModel) ? "embedding model" : "",
+                          ].filter(Boolean);
+                          return (
+                            <li key={m.name} className={`rounded-lg border px-2.5 py-1.5 text-[11.5px] ${m.error ? "border-rose-400/30 bg-rose-400/5" : m.loaded ? "border-emerald-400/30 bg-emerald-400/5" : "border-white/10 bg-white/[0.02]"}`}>
+                              <div className="flex flex-wrap items-center justify-between gap-x-2">
+                                <span className="font-mono font-semibold text-zinc-200">{m.name}</span>
+                                <span className="text-[10.5px] text-zinc-500">
+                                  {m.loaded
+                                    ? `loaded · ${formatOllamaSize(m.sizeVram)} in VRAM${m.expiresAt ? ` · until ${formatOllamaExpiry(m.expiresAt)}` : ""}`
+                                    : !m.installed ? "not installed" : ollamaHealth.loadedKnown ? "not loaded" : "loaded state unknown"}
+                                </span>
+                              </div>
+                              {describeContextWindow(m) && <div className="text-[10.5px] text-zinc-300">{describeContextWindow(m)}</div>}
+                              <div className="text-[10.5px] text-zinc-500">
+                                {[
+                                  m.architecture,
+                                  m.parameterSize || formatParameterCount(m.parameterCount),
+                                  m.quantization,
+                                  m.format,
+                                  m.sizeBytes > 0 ? formatOllamaSize(m.sizeBytes) : "",
+                                  m.embeddingLength !== null ? `${m.embeddingLength}-d embeddings` : "",
+                                  m.capabilities.length > 0 ? `capabilities: ${m.capabilities.join(", ")}` : "",
+                                  m.installed ? `${m.probeMs} ms` : "",
+                                ].filter(Boolean).join(" · ")}
+                              </div>
+                              {roles.length > 0 && <div className="text-[10.5px] text-cyan-300">Configured as the {roles.join(" and ")}.</div>}
+                              {m.error && <div className="text-[10.5px] text-rose-300">{m.error}</div>}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                    {ollamaHealth?.truncated && (
+                      <div className="text-[10.5px] text-amber-300">
+                        Only the first {ollamaHealth.probed} model{ollamaHealth.probed === 1 ? "" : "s"} were probed ({ollamaHealth.truncationReason ?? "budget"}); {ollamaHealth.skipped} more installed model{ollamaHealth.skipped === 1 ? "" : "s"} were not checked.
+                      </div>
                     )}
                     <p className="text-[11px] text-zinc-500">
                       Generation for chat, planning, coding, architecture, migration and repair runs on this machine through the native adapter with a 120 s non-streamed bound per reply. Vision stays on Gemini. There is no fallback from Ollama to Gemini.

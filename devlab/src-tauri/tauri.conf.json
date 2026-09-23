@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "DevLab",
-  "version": "1.76.0",
+  "version": "1.77.0",
   "identifier": "io.github.talean414.devlab",
   "build": {
     "frontendDist": "../dist",

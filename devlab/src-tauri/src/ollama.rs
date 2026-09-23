@@ -7,8 +7,10 @@
 //! * The endpoint must be `http://` with a host that is literally loopback (`localhost`,
 //!   `127.0.0.0/8`, `::1`). Anything else is refused before a socket is opened, and hostnames
 //!   are never resolved to decide this.
-//! * Only two fixed API paths are used: `GET /api/tags` (installed models) and
-//!   `POST /api/chat` (one non-streamed completion). Callers cannot choose the path.
+//! * Only fixed API paths are used: `GET /api/tags` (installed models), `POST /api/chat`
+//!   (completions), `POST /api/embed` (Phase 9D embeddings) and, for the Phase 9P health check,
+//!   `GET /api/version`, `GET /api/ps` (loaded models) and `POST /api/show` (per-model metadata
+//!   such as the context window). Callers cannot choose the path.
 //! * Prompts, message counts, response bodies and timeouts are bounded here in addition to the
 //!   general HTTP limits. Generation runs with a longer timeout than the API client allows,
 //!   because local models on CPUs are slow, but it is still finite.
@@ -47,6 +49,13 @@ pub(crate) const MAX_EMBED_BATCH: usize = 16;
 pub(crate) const MAX_EMBED_INPUT_CHARS: usize = 4 * 1024;
 const MIN_EMBED_DIMS: usize = 16;
 const MAX_EMBED_DIMS: usize = 8192;
+// Phase 9P health check: metadata reads only (`/api/version`, `/api/ps`, `/api/show`); no model
+// is loaded, pulled or prompted. Each probe and the whole check are bounded separately.
+const HEALTH_PROBE_TIMEOUT_SECS: u64 = 15;
+const HEALTH_DEADLINE_SECS: u64 = 45;
+const MAX_HEALTH_MODELS: usize = 12;
+const MAX_HEALTH_CAPABILITIES: usize = 8;
+const MAX_HEALTH_TEXT_CHARS: usize = 96;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -72,6 +81,61 @@ pub struct OllamaListResponse {
     endpoint: String,
     models: Vec<OllamaModelInfo>,
     truncated: bool,
+    elapsed_ms: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OllamaHealthRequest {
+    #[serde(default)]
+    endpoint: String,
+    /// Optional model ids to probe; empty means every installed model (up to the cap).
+    #[serde(default)]
+    models: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OllamaModelHealth {
+    name: String,
+    installed: bool,
+    family: String,
+    parameter_size: String,
+    quantization: String,
+    format: String,
+    architecture: String,
+    parameter_count: u64,
+    /// Maximum context window the model was trained for (`<arch>.context_length`), when reported.
+    context_length: Option<u64>,
+    /// `num_ctx` from the model's Modelfile parameters, when the model sets one.
+    configured_context: Option<u64>,
+    embedding_length: Option<u64>,
+    capabilities: Vec<String>,
+    size_bytes: u64,
+    loaded: bool,
+    size_vram: u64,
+    expires_at: String,
+    /// Context length the running instance was loaded with (`/api/ps`), when reported.
+    loaded_context: Option<u64>,
+    probe_ms: u64,
+    /// Per-model probe failure; the rest of the check still completes.
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OllamaHealthResponse {
+    endpoint: String,
+    server_version: String,
+    installed: usize,
+    loaded: usize,
+    /// False when `/api/ps` could not be read, so `loaded` fields are unknown rather than false.
+    loaded_known: bool,
+    models: Vec<OllamaModelHealth>,
+    probed: usize,
+    skipped: usize,
+    truncated: bool,
+    truncation_reason: Option<&'static str>,
     elapsed_ms: u64,
 }
 
@@ -375,6 +439,239 @@ fn list_models(request: OllamaListRequest) -> Result<OllamaListResponse, Command
     })
 }
 
+/// Ollama treats an untagged model id as the `latest` tag.
+fn canonical_model(name: &str) -> String {
+    if name.contains(':') {
+        name.to_string()
+    } else {
+        format!("{name}:latest")
+    }
+}
+
+fn bounded_text(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .chars()
+        .take(MAX_HEALTH_TEXT_CHARS)
+        .collect()
+}
+
+fn as_count(value: Option<&Value>) -> Option<u64> {
+    let value = value?;
+    value
+        .as_u64()
+        .or_else(|| value.as_f64().filter(|number| number.is_finite() && *number >= 0.0).map(|number| number as u64))
+}
+
+/// Indexes `/api/ps` entries by both their `name` and `model` fields (with and without a tag).
+fn index_running(body: &Value) -> std::collections::HashMap<String, Value> {
+    let mut running = std::collections::HashMap::new();
+    for entry in body.get("models").and_then(Value::as_array).into_iter().flatten() {
+        for key in ["name", "model"] {
+            if let Some(name) = entry.get(key).and_then(Value::as_str) {
+                running.insert(canonical_model(name), entry.clone());
+            }
+        }
+    }
+    running
+}
+
+/// Copies the metadata DevLab cares about from a `/api/show` body onto a health entry.
+fn apply_show_details(entry: &mut OllamaModelHealth, body: &Value) {
+    let details = body.get("details").cloned().unwrap_or(Value::Null);
+    for (field, key) in [
+        (&mut entry.family, "family"),
+        (&mut entry.parameter_size, "parameter_size"),
+        (&mut entry.quantization, "quantization_level"),
+        (&mut entry.format, "format"),
+    ] {
+        let value = bounded_text(&details, key);
+        if !value.is_empty() {
+            *field = value;
+        }
+    }
+    let info = body.get("model_info").cloned().unwrap_or(Value::Null);
+    entry.architecture = bounded_text(&info, "general.architecture");
+    entry.parameter_count = as_count(info.get("general.parameter_count")).unwrap_or(0);
+    let architecture = entry.architecture.clone();
+    let lookup = |suffix: &str| -> Option<u64> {
+        if !architecture.is_empty() {
+            let exact = format!("{architecture}.{suffix}");
+            if let Some(found) = as_count(info.get(exact.as_str())) {
+                return Some(found);
+            }
+        }
+        let dotted = format!(".{suffix}");
+        info.as_object()?
+            .iter()
+            .filter(|(key, _)| key.ends_with(dotted.as_str()))
+            .find_map(|(_, value)| as_count(Some(value)))
+    };
+    entry.context_length = lookup("context_length");
+    entry.embedding_length = lookup("embedding_length");
+    entry.capabilities = body
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|item| item.chars().take(32).collect::<String>())
+                .take(MAX_HEALTH_CAPABILITIES)
+                .collect()
+        })
+        .unwrap_or_default();
+    entry.configured_context = body
+        .get("parameters")
+        .and_then(Value::as_str)
+        .and_then(|parameters| {
+            parameters.lines().find_map(|line| {
+                let mut parts = line.split_whitespace();
+                match (parts.next(), parts.next()) {
+                    (Some("num_ctx"), Some(value)) => value.parse::<u64>().ok(),
+                    _ => None,
+                }
+            })
+        });
+}
+
+fn apply_running_details(entry: &mut OllamaModelHealth, running: &Value) {
+    entry.loaded = true;
+    entry.size_vram = as_count(running.get("size_vram")).unwrap_or(0);
+    entry.expires_at = bounded_text(running, "expires_at");
+    entry.loaded_context = as_count(running.get("context_length"));
+}
+
+fn show_model(origin: &str, name: &str) -> Result<Value, CommandError> {
+    let response = send_request(HttpRequest {
+        method: "POST".to_string(),
+        url: api_url(origin, "/api/show"),
+        headers: vec![json_header()],
+        body: json!({ "model": name }).to_string(),
+        timeout_secs: Some(HEALTH_PROBE_TIMEOUT_SECS),
+    })
+    .map_err(|error| transport_error(origin, HEALTH_PROBE_TIMEOUT_SECS, error))?;
+    let body = parse_json_body(&response.body, response.body_truncated, "model details")?;
+    if !(200..300).contains(&response.status) {
+        return Err(http_status_error(response.status, &response.status_text, &body));
+    }
+    Ok(body)
+}
+
+fn get_json(origin: &str, path: &str, what: &str) -> Result<Value, CommandError> {
+    let response = send_request(HttpRequest {
+        method: "GET".to_string(),
+        url: api_url(origin, path),
+        headers: Vec::new(),
+        body: String::new(),
+        timeout_secs: Some(LIST_TIMEOUT_SECS),
+    })
+    .map_err(|error| transport_error(origin, LIST_TIMEOUT_SECS, error))?;
+    let body = parse_json_body(&response.body, response.body_truncated, what)?;
+    if !(200..300).contains(&response.status) {
+        return Err(http_status_error(response.status, &response.status_text, &body));
+    }
+    Ok(body)
+}
+
+/// Read-only health check: server version, installed models, which of them are loaded (and with
+/// what VRAM/context) and each model's context window and capabilities. No model is loaded,
+/// pulled or prompted, and every request is bounded.
+fn model_health(request: OllamaHealthRequest) -> Result<OllamaHealthResponse, CommandError> {
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(HEALTH_DEADLINE_SECS);
+    let (_, origin) = validate_loopback_endpoint(&request.endpoint)?;
+    let requested = request
+        .models
+        .iter()
+        .map(|model| validate_model(model).map(|valid| canonical_model(&valid)))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Best effort: older servers may lack `/api/version`; the tag listing below is the real
+    // reachability check and its failure is the whole check's failure.
+    let server_version = get_json(&origin, "/api/version", "version")
+        .ok()
+        .map(|body| bounded_text(&body, "version"))
+        .unwrap_or_default();
+    let installed = list_models(OllamaListRequest { endpoint: request.endpoint.clone() })?;
+    let (running, loaded_known) = match get_json(&origin, "/api/ps", "running models") {
+        Ok(body) => (index_running(&body), true),
+        Err(_) => (std::collections::HashMap::new(), false),
+    };
+
+    let mut targets: Vec<OllamaModelHealth> = installed
+        .models
+        .iter()
+        .filter(|model| requested.is_empty() || requested.iter().any(|name| *name == canonical_model(&model.name)))
+        .map(|model| OllamaModelHealth {
+            name: model.name.clone(),
+            installed: true,
+            family: model.family.clone(),
+            parameter_size: model.parameter_size.clone(),
+            quantization: model.quantization.clone(),
+            size_bytes: model.size_bytes,
+            ..OllamaModelHealth::default()
+        })
+        .collect();
+    for name in &requested {
+        if !targets.iter().any(|entry| canonical_model(&entry.name) == *name) {
+            targets.push(OllamaModelHealth {
+                name: name.clone(),
+                installed: false,
+                error: Some("Not installed on this Ollama server; pull it first or pick a detected model.".to_string()),
+                ..OllamaModelHealth::default()
+            });
+        }
+    }
+
+    let mut models = Vec::with_capacity(targets.len().min(MAX_HEALTH_MODELS));
+    let mut probed = 0usize;
+    let mut truncated = false;
+    let mut truncation_reason = None;
+    let total_targets = targets.len();
+    for (index, mut entry) in targets.into_iter().enumerate() {
+        if index >= MAX_HEALTH_MODELS {
+            truncated = true;
+            truncation_reason = Some("max_models");
+            break;
+        }
+        if Instant::now() >= deadline {
+            truncated = true;
+            truncation_reason = Some("deadline");
+            break;
+        }
+        let probe_started = Instant::now();
+        if let Some(running_entry) = running.get(&canonical_model(&entry.name)) {
+            apply_running_details(&mut entry, running_entry);
+        }
+        if entry.installed {
+            match show_model(&origin, &entry.name) {
+                Ok(body) => apply_show_details(&mut entry, &body),
+                Err(error) => entry.error = Some(error.message.chars().take(400).collect()),
+            }
+            probed += 1;
+        }
+        entry.probe_ms = elapsed_ms(probe_started);
+        models.push(entry);
+    }
+    let loaded = models.iter().filter(|entry| entry.loaded).count();
+    Ok(OllamaHealthResponse {
+        endpoint: origin,
+        server_version,
+        installed: installed.models.len(),
+        loaded,
+        loaded_known,
+        skipped: total_targets.saturating_sub(models.len()),
+        models,
+        probed,
+        truncated: truncated || installed.truncated,
+        truncation_reason: truncation_reason.or(if installed.truncated { Some("max_models") } else { None }),
+        elapsed_ms: elapsed_ms(started),
+    })
+}
+
 /// Validates a chat request and builds the `/api/chat` HTTP request (streamed or not).
 fn prepare_chat(request: &OllamaChatRequest, stream: bool) -> Result<(String, String, HttpRequest), CommandError> {
     let (_, origin) = validate_loopback_endpoint(&request.endpoint)?;
@@ -568,6 +865,12 @@ fn elapsed_ms(started: Instant) -> u64 {
 #[tauri::command]
 pub async fn ollama_list_models(request: OllamaListRequest) -> Result<OllamaListResponse, CommandError> {
     blocking(move || list_models(request)).await
+}
+
+/// Phase 9P: read-only local model health check (version, installed, loaded, context windows).
+#[tauri::command]
+pub async fn ollama_model_health(request: OllamaHealthRequest) -> Result<OllamaHealthResponse, CommandError> {
+    blocking(move || model_health(request)).await
 }
 
 #[tauri::command]
@@ -820,5 +1123,60 @@ mod tests {
         let (text, truncated) = bound_text(&"z".repeat(MAX_REPLY_CHARS + 5), MAX_REPLY_CHARS);
         assert_eq!(text.chars().count(), MAX_REPLY_CHARS);
         assert!(truncated);
+    }
+
+    #[test]
+    fn health_show_parser_extracts_context_window_and_capabilities() {
+        let body = json!({
+            "details": { "format": "gguf", "family": "llama", "parameter_size": "8.0B", "quantization_level": "Q4_K_M" },
+            "model_info": {
+                "general.architecture": "llama",
+                "general.parameter_count": 8030261248u64,
+                "llama.context_length": 131072,
+                "llama.embedding_length": 4096
+            },
+            "capabilities": ["completion", "tools"],
+            "parameters": "num_ctx 8192\nstop \"<|eot_id|>\""
+        });
+        let mut entry = OllamaModelHealth { name: "llama3.1:latest".to_string(), installed: true, ..OllamaModelHealth::default() };
+        apply_show_details(&mut entry, &body);
+        assert_eq!(entry.architecture, "llama");
+        assert_eq!(entry.parameter_count, 8030261248);
+        assert_eq!(entry.context_length, Some(131072));
+        assert_eq!(entry.embedding_length, Some(4096));
+        assert_eq!(entry.configured_context, Some(8192));
+        assert_eq!(entry.capabilities, vec!["completion".to_string(), "tools".to_string()]);
+        assert_eq!(entry.format, "gguf");
+        assert_eq!(entry.quantization, "Q4_K_M");
+    }
+
+    #[test]
+    fn health_show_parser_falls_back_to_any_context_key() {
+        let body = json!({
+            "model_info": { "nomic-bert.context_length": 2048, "nomic-bert.embedding_length": 768 },
+            "capabilities": ["embedding"]
+        });
+        let mut entry = OllamaModelHealth::default();
+        apply_show_details(&mut entry, &body);
+        assert_eq!(entry.architecture, "");
+        assert_eq!(entry.context_length, Some(2048));
+        assert_eq!(entry.embedding_length, Some(768));
+        assert_eq!(entry.configured_context, None);
+        assert_eq!(entry.capabilities, vec!["embedding".to_string()]);
+    }
+
+    #[test]
+    fn health_running_index_matches_tagged_and_untagged_names() {
+        let body = json!({ "models": [{ "name": "llama3.1:latest", "model": "llama3.1:latest", "size_vram": 6654289920u64, "expires_at": "2026-09-23T10:00:00Z", "context_length": 4096 }] });
+        let running = index_running(&body);
+        assert!(running.contains_key("llama3.1:latest"));
+        assert!(running.contains_key(&canonical_model("llama3.1")));
+        let mut entry = OllamaModelHealth::default();
+        apply_running_details(&mut entry, running.get("llama3.1:latest").unwrap());
+        assert!(entry.loaded);
+        assert_eq!(entry.size_vram, 6654289920);
+        assert_eq!(entry.loaded_context, Some(4096));
+        assert_eq!(entry.expires_at, "2026-09-23T10:00:00Z");
+        assert_eq!(canonical_model("qwen2.5-coder:7b"), "qwen2.5-coder:7b");
     }
 }

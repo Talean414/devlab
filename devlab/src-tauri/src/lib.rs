@@ -44,7 +44,7 @@ use git::{
     git_stage_all, git_stage_paths, git_unstage_all, git_unstage_paths,
 };
 use http::http_request;
-use ollama::{ollama_chat, ollama_chat_stream, ollama_list_models};
+use ollama::{ollama_chat, ollama_chat_stream, ollama_list_models, ollama_model_health};
 use postgres::{
     database_postgres_connect, database_postgres_connections, database_postgres_disconnect,
     database_postgres_execute, database_postgres_forget_password, database_postgres_query,
@@ -115,6 +115,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
             "code-map",
             "code-graph",
             "dependency-inventory",
+            "local-ai-health",
         ],
     }
 }
@@ -201,6 +202,7 @@ pub fn run() {
             database_postgres_forget_password,
             http_request,
             ollama_list_models,
+            ollama_model_health,
             ollama_chat,
             ai_credential_status,
             ai_credential_store,
