@@ -38,6 +38,11 @@ import {
   type AiTaskKind,
 } from "../lib/modelRouting";
 import {
+  recommendTaskClasses,
+  summarizeTaskRecommendations,
+  type TaskClassRecommendation,
+} from "../lib/taskRecommendations";
+import {
   Eye, EyeOff, Save, RefreshCw, Trash2, Shield, KeyRound, CheckCircle2,
   Sparkles, Palette, LayoutGrid, Bot, SlidersHorizontal, RotateCcw, Cpu, ExternalLink, HeartPulse,
 } from "lucide-react";
@@ -292,6 +297,16 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
     selectedModel: model,
     pickedModel: autoPicked,
   }, s));
+  // Phase 9U — metadata-only suggestions per task class, derived from the Phase 9P
+  // Ollama health response plus the current routing. Display only: nothing here
+  // switches a provider or model; applying is always the explicit per-task control above.
+  const currentOllamaModelByTask = routePreview.reduce<Partial<Record<AiTaskKind, string>>>((current, route) => {
+    if (route.provider === "ollama") current[route.task] = route.model;
+    return current;
+  }, {});
+  const taskRecommendations: TaskClassRecommendation[] | null = ollamaHealth
+    ? recommendTaskClasses(ollamaHealth, AI_TASK_PROFILES, currentOllamaModelByTask)
+    : null;
   const guidancePreview = routePreview.map((route) => ({
     route,
     guardrail: generationGuardrailInstruction(route.task),
@@ -876,6 +891,47 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                       </div>
                     );
                   })}
+                </div>
+                <div className="mt-3 rounded-xl border border-violet-500/20 bg-violet-500/[0.04] p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-violet-200">
+                      <Sparkles className="h-3.5 w-3.5 text-violet-300" /> Local model suggestions
+                    </span>
+                    <span className="font-mono text-[10.5px] text-zinc-600">
+                      {taskRecommendations ? summarizeTaskRecommendations(taskRecommendations) : "needs a model health check"}
+                    </span>
+                  </div>
+                  {taskRecommendations ? (
+                    <>
+                      <div className="mt-2 space-y-1">
+                        {taskRecommendations.map((rec) => (
+                          <div key={rec.task} className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 rounded-lg bg-black/20 px-2.5 py-1.5 text-[11px]">
+                            <span className="w-40 shrink-0 font-semibold text-zinc-300">{rec.taskLabel}</span>
+                            <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9.5px] font-semibold ${rec.provider === "ollama" ? "bg-violet-400/15 text-violet-200" : "bg-cyan-400/15 text-cyan-200"}`}>
+                              {rec.provider === "ollama" ? "Ollama (local)" : "Gemini"}
+                            </span>
+                            <span
+                              className="min-w-0 flex-1 text-zinc-400"
+                              title={rec.models.map((m, index) => `${index + 1}. ${m.model} · ${m.reasons.join(" · ")}${m.matchesCurrent ? " · current" : ""}`).join("\n") || rec.headline}
+                            >
+                              {rec.headline}
+                              {rec.models.length > 1 && <span className="text-zinc-600"> +{rec.models.length - 1} more (hover)</span>}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                      {taskRecommendations.some((rec) => rec.note) && (
+                        <div className="mt-1.5 text-[10.5px] text-amber-300/80">{taskRecommendations.find((rec) => rec.note)?.note}</div>
+                      )}
+                    </>
+                  ) : (
+                    <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+                      Run <span className="font-semibold text-zinc-300">Check model health</span> in the Ollama section above and the best-fit local model for each task class appears here, derived from reported capabilities, context windows and loaded state.
+                    </p>
+                  )}
+                  <p className="mt-2 text-[10.5px] leading-relaxed text-zinc-600">
+                    Suggestions are metadata only, derived from the last health check and your current routing. Nothing is switched automatically — to apply one, set the provider and model in the per-task controls above.
+                  </p>
                 </div>
                 <p className="mt-3 text-[11px] leading-relaxed text-zinc-500">
                   Overrides are non-secret metadata stored with your preferences. Each provider keeps its own credential rules (Gemini key in the WebView, cloud/custom tokens in the OS credential store, Ollama none), host policy and bounds; a task routed to a native adapter is desktop-only and never falls back to Gemini. Vision can only be routed to Gemini because image input is wired there alone.
