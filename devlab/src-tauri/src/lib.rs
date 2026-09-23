@@ -218,6 +218,7 @@ pub fn run() {
             custom_credential_store,
             custom_credential_delete,
             custom_endpoint_chat,
+            custom_endpoint_health,
             ollama_chat_stream,
             ai_provider_chat_stream,
             custom_endpoint_chat_stream,

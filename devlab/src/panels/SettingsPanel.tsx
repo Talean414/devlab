@@ -25,8 +25,8 @@ import {
   sameOllamaModel, type OllamaHealthResponse, type OllamaModelInfo,
 } from "../lib/ollama";
 import {
-  customAdapterAvailable, customCredentialDelete, customCredentialStatus, customCredentialStore, describeCustomEndpoint,
-  type CustomCredentialStatus,
+  customAdapterAvailable, customCredentialDelete, customCredentialStatus, customCredentialStore, customEndpointHealth,
+  describeCustomEndpoint, describeCustomHealth, type CustomCredentialStatus, type CustomEndpointHealth,
 } from "../lib/customEndpoint";
 import {
   AI_PROVIDER_PROFILES,
@@ -143,10 +143,16 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
   const [customStatus, setCustomStatus] = useState<CustomCredentialStatus | null>(null);
   const [customBusy, setCustomBusy] = useState(false);
   const [customNotice, setCustomNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  // Phase 9V: read-only health check for the custom server (model list); memory only.
+  const [customHealth, setCustomHealth] = useState<CustomEndpointHealth | null>(null);
+  const [customHealthBusy, setCustomHealthBusy] = useState(false);
+  const [customHealthNotice, setCustomHealthNotice] = useState<{ kind: "ok" | "warn" | "error"; text: string } | null>(null);
 
   useEffect(() => {
     setCustomStatus(null);
     setCustomNotice(null);
+    setCustomHealth(null);
+    setCustomHealthNotice(null);
     if (s.aiProvider !== "custom" || !customAdapterAvailable() || !customEndpointCheck.ok) return;
     let cancelled = false;
     const handle = window.setTimeout(() => {
@@ -187,6 +193,31 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
       setCustomNotice({ kind: "error", text: nativeErrorText(error) });
     } finally {
       setCustomBusy(false);
+    }
+  }
+
+  // Phase 9V: read-only GET <base>/models through the native adapter; metadata only,
+  // nothing is loaded, pulled, prompted or written.
+  async function checkCustomHealth() {
+    setCustomHealthNotice(null);
+    setCustomHealth(null);
+    if (!customAdapterAvailable()) {
+      setCustomHealthNotice({ kind: "error", text: "The native custom-endpoint adapter is only available inside the DevLab desktop app, not the web preview." });
+      return;
+    }
+    if (!customEndpointCheck.ok) {
+      setCustomHealthNotice({ kind: "error", text: `Endpoint refused before any request: ${customEndpointCheck.reason}` });
+      return;
+    }
+    setCustomHealthBusy(true);
+    try {
+      const result = await customEndpointHealth(s.customEndpoint);
+      setCustomHealth(result);
+      setCustomHealthNotice(describeCustomHealth(result, s.customModel));
+    } catch (error) {
+      setCustomHealthNotice({ kind: "error", text: nativeErrorText(error) });
+    } finally {
+      setCustomHealthBusy(false);
     }
   }
 
@@ -813,6 +844,42 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                     )}
                     {customEndpointCheck.ok && !customEndpointCheck.tls && (
                       <p className="text-[11px] text-zinc-500">Loopback http:// servers run without a token: Rust refuses to attach bearer tokens in clear text.</p>
+                    )}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => { void checkCustomHealth(); }}
+                        disabled={customHealthBusy}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-400/20 disabled:opacity-40"
+                      >
+                        <HeartPulse className={`h-3.5 w-3.5 ${customHealthBusy ? "animate-pulse" : ""}`} /> Check server health
+                      </button>
+                      <span className="text-[11px] text-zinc-500">Rust calls GET {"<base>/models"} through the same host policy and stored token; the WebView never opens the connection. Nothing is loaded, pulled or prompted.</span>
+                    </div>
+                    {customHealthNotice && (
+                      <div className={`text-[11.5px] ${customHealthNotice.kind === "ok" ? "text-emerald-300" : customHealthNotice.kind === "warn" ? "text-amber-300" : "text-rose-300"}`}>{customHealthNotice.text}</div>
+                    )}
+                    {customHealth?.modelsListed && customHealth.models.length > 0 && (
+                      <ul className="grid gap-1 sm:grid-cols-2">
+                        {customHealth.models.map((m) => (
+                          <li key={m.id}>
+                            <button
+                              type="button"
+                              onClick={() => update({ customModel: m.id })}
+                              title={s.customModel === m.id ? "Current custom endpoint model id" : `Set ${m.id} as the custom endpoint model id`}
+                              className={`w-full rounded-lg border px-2.5 py-1.5 text-left text-[11.5px] ${s.customModel === m.id ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-100" : "border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/5"}`}
+                            >
+                              <span className="font-mono font-semibold">{m.id}</span>
+                              <span className="ml-2 text-[10.5px] text-zinc-500">
+                                {[m.ownedBy, m.created > 0 ? `since ${new Date(m.created * 1000).toLocaleDateString()}` : ""].filter(Boolean).join(" · ")}
+                              </span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {customHealth?.modelsListed && customHealth.modelsTruncated && (
+                      <div className="text-[10.5px] text-amber-300">Only the first {customHealth.models.length} models are shown; the server lists more.</div>
                     )}
                     {customNotice && <div className={`text-[11px] ${customNotice.kind === "ok" ? "text-emerald-300/80" : "text-rose-300"}`}>{customNotice.text}</div>}
                     <p className="text-[11px] text-zinc-500">

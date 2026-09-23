@@ -40,6 +40,12 @@ const MAX_BASE_PATH_SEGMENTS: usize = 8;
 const CHAT_SUFFIX: &str = "/chat/completions";
 const ACCOUNT_PREFIX: &str = "custom-endpoint/";
 const MAX_TEMPERATURE: f64 = 2.0;
+/// Phase 9V — read-only health check bounds.
+const MODELS_SUFFIX: &str = "/models";
+const HEALTH_TIMEOUT_SECS: u64 = 20;
+const MAX_HEALTH_MODELS: usize = 200;
+const MAX_MODEL_ID_BYTES: usize = 256;
+const MAX_OWNED_BY_CHARS: usize = 64;
 
 /// A validated endpoint profile. `origin` is `scheme://host[:port]`, `base_path` has no trailing
 /// slash (may be empty), and `id` is the string used both for display and as the credential key.
@@ -85,6 +91,33 @@ pub struct CustomChatResponse {
     finish_reason: String,
     input_tokens: u64,
     output_tokens: u64,
+    authenticated: bool,
+    elapsed_ms: u64,
+}
+
+/// One entry from the server's OpenAI-style `GET /models` list (Phase 9V).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomEndpointModel {
+    id: String,
+    owned_by: String,
+    created: u64,
+}
+
+/// Outcome of the read-only custom-endpoint health check (Phase 9V).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomEndpointHealth {
+    profile: EndpointProfile,
+    /// HTTP status the server returned for `GET {id}/models`.
+    http_status: u16,
+    /// False when the server is reachable but does not expose `GET /models`
+    /// (HTTP 404/405); the chat completions path may still work in that case.
+    models_listed: bool,
+    models: Vec<CustomEndpointModel>,
+    /// True when the list exceeded the cap and later entries were dropped.
+    models_truncated: bool,
+    /// True when the profile-scoped bearer token was attached to the request.
     authenticated: bool,
     elapsed_ms: u64,
 }
@@ -285,7 +318,7 @@ pub(crate) fn http_status_error(profile: &EndpointProfile, status: u16, status_t
     )
 }
 
-fn transport_error(profile: &EndpointProfile, error: CommandError) -> CommandError {
+fn transport_error(profile: &EndpointProfile, timeout_secs: u64, error: CommandError) -> CommandError {
     match error.code {
         "http_connection_failed" | "http_dns_failed" => CommandError::new(
             "ai_provider_unreachable",
@@ -293,7 +326,7 @@ fn transport_error(profile: &EndpointProfile, error: CommandError) -> CommandErr
         ),
         "http_timeout" => CommandError::new(
             "ai_provider_timeout",
-            format!("{} did not answer within DevLab's {GENERATE_TIMEOUT_SECS} s bound: {}", profile.id, error.message),
+            format!("{} did not answer within DevLab's {timeout_secs} s bound: {}", profile.id, error.message),
         ),
         "http_tls_failed" => CommandError::new(
             "custom_endpoint_tls",
@@ -367,7 +400,7 @@ fn chat(request: CustomChatRequest) -> Result<CustomChatResponse, CommandError> 
     let started = Instant::now();
     let PreparedChat { profile, model, authenticated, http } = prepare_chat(&request, false)?;
     let response = send_request_with_timeout(http, Duration::from_secs(GENERATE_TIMEOUT_SECS))
-        .map_err(|error| transport_error(&profile, error))?;
+        .map_err(|error| transport_error(&profile, GENERATE_TIMEOUT_SECS, error))?;
 
     let parsed = parse_json_body(&profile, &response.body, response.body_truncated)?;
     if !(200..300).contains(&response.status) {
@@ -461,7 +494,7 @@ pub async fn custom_endpoint_chat_stream(
             handle.flag(),
             &channel,
         )
-        .map_err(|error| transport_error(&profile, error))?;
+        .map_err(|error| transport_error(&profile, GENERATE_TIMEOUT_SECS, error))?;
         match result {
             StreamResult::Completed(summary) => Ok(StreamedReply { target: profile.id, model, summary }),
             StreamResult::HttpError(error) => {
@@ -471,6 +504,119 @@ pub async fn custom_endpoint_chat_stream(
         }
     })
     .await
+}
+
+/// Whether a non-2xx status means "reachable, but this server does not expose
+/// `GET /models`" (chat completions may still work) rather than an outright failure.
+fn models_not_listed_status(status: u16) -> bool {
+    matches!(status, 404 | 405)
+}
+
+fn health_headers(token: Option<&str>) -> Vec<HttpHeader> {
+    let mut headers = vec![HttpHeader { name: "Accept".to_string(), value: "application/json".to_string() }];
+    if let Some(token) = token {
+        headers.push(HttpHeader { name: "Authorization".to_string(), value: format!("Bearer {token}") });
+    }
+    headers
+}
+
+/// Parses the OpenAI-style model list. Entries without a usable `id` are skipped,
+/// oversized ids are dropped, `owned_by` is capped and a list over the cap is
+/// truncated rather than failed. A payload without a `data` array lists nothing.
+fn parse_models_list(profile: &EndpointProfile, body: &str, truncated: bool) -> Result<(Vec<CustomEndpointModel>, bool), CommandError> {
+    if truncated {
+        return Err(CommandError::new(
+            "ai_response_too_large",
+            format!("The model list from {} exceeded DevLab's response bound and was not parsed.", profile.id),
+        ));
+    }
+    let parsed: Value = serde_json::from_str(body).map_err(|error| {
+        CommandError::new(
+            "ai_protocol_error",
+            format!("{} returned a model list that is not valid JSON: {error}", profile.id),
+        )
+    })?;
+    let data = parsed.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut models = Vec::new();
+    let mut list_truncated = false;
+    for entry in &data {
+        if models.len() >= MAX_HEALTH_MODELS {
+            list_truncated = true;
+            break;
+        }
+        let id = match entry.get("id").and_then(Value::as_str) {
+            Some(id) if !id.is_empty() && id.len() <= MAX_MODEL_ID_BYTES => id.to_string(),
+            _ => continue,
+        };
+        let owned_by = entry
+            .get("owned_by")
+            .and_then(Value::as_str)
+            .map(|value| value.chars().take(MAX_OWNED_BY_CHARS).collect())
+            .unwrap_or_default();
+        let created = entry.get("created").and_then(Value::as_u64).unwrap_or(0);
+        models.push(CustomEndpointModel { id, owned_by, created });
+    }
+    Ok((models, list_truncated))
+}
+
+/// Read-only health check (Phase 9V): `GET {id}/models` through the same bounded
+/// client, host policy and profile-scoped token as the chat path. No model is
+/// loaded, pulled, prompted or written to; the result is metadata only.
+fn health(endpoint: String) -> Result<CustomEndpointHealth, CommandError> {
+    let started = Instant::now();
+    let profile = validate_endpoint(&endpoint)?;
+    let token = {
+        let _guard = lock_keyring()?;
+        load_token_unlocked(&profile)?
+    };
+    let authenticated = token.is_some();
+    if authenticated && !profile.tls {
+        // Defensive: tokens are never sent in clear text, even to loopback.
+        return Err(CommandError::new(
+            "custom_endpoint_policy",
+            "A bearer token is stored for this loopback endpoint, but tokens are only sent over https://. Remove the token or use an https:// endpoint.",
+        ));
+    }
+    let http = HttpRequest {
+        method: "GET".to_string(),
+        url: format!("{}{MODELS_SUFFIX}", profile.id),
+        headers: health_headers(token.as_deref()),
+        body: String::new(),
+        timeout_secs: Some(HEALTH_TIMEOUT_SECS),
+    };
+    drop(token);
+    let response = send_request_with_timeout(http, Duration::from_secs(HEALTH_TIMEOUT_SECS))
+        .map_err(|error| transport_error(&profile, HEALTH_TIMEOUT_SECS, error))?;
+    if models_not_listed_status(response.status) {
+        return Ok(CustomEndpointHealth {
+            profile,
+            http_status: response.status,
+            models_listed: false,
+            models: Vec::new(),
+            models_truncated: false,
+            authenticated,
+            elapsed_ms: elapsed_ms(started),
+        });
+    }
+    let parsed = parse_json_body(&profile, &response.body, response.body_truncated)?;
+    if !(200..300).contains(&response.status) {
+        return Err(http_status_error(&profile, response.status, &response.status_text, &parsed));
+    }
+    let (models, models_truncated) = parse_models_list(&profile, &response.body, response.body_truncated)?;
+    Ok(CustomEndpointHealth {
+        profile,
+        http_status: response.status,
+        models_listed: true,
+        models,
+        models_truncated,
+        authenticated,
+        elapsed_ms: elapsed_ms(started),
+    })
+}
+
+#[tauri::command]
+pub async fn custom_endpoint_health(endpoint: String) -> Result<CustomEndpointHealth, CommandError> {
+    blocking(move || health(endpoint)).await
 }
 
 #[cfg(test)]
@@ -584,9 +730,67 @@ mod tests {
         assert!(unauthorized.message.contains("llm.example.com"));
         assert_eq!(http_status_error(&profile, 404, "Not Found", &Value::Null).code, "ai_model_not_found");
         assert_eq!(http_status_error(&profile, 503, "Unavailable", &Value::Null).code, "ai_provider_unavailable");
-        assert_eq!(transport_error(&profile, CommandError::new("http_dns_failed", "x")).code, "ai_provider_unreachable");
-        assert_eq!(transport_error(&profile, CommandError::new("http_timeout", "x")).code, "ai_provider_timeout");
+        assert_eq!(transport_error(&profile, GENERATE_TIMEOUT_SECS, CommandError::new("http_dns_failed", "x")).code, "ai_provider_unreachable");
+        assert_eq!(transport_error(&profile, HEALTH_TIMEOUT_SECS, CommandError::new("http_timeout", "x")).code, "ai_provider_timeout");
         assert_eq!(parse_json_body(&profile, "nope", false).unwrap_err().code, "ai_protocol_error");
         assert_eq!(parse_json_body(&profile, "{}", true).unwrap_err().code, "ai_response_too_large");
+    }
+
+    #[test]
+    fn health_check_parses_openai_model_lists() {
+        let profile = validate_endpoint("https://llm.example.com/v1").unwrap();
+        let body = r#"{"object":"list","data":[{"id":"meta-llama/Llama-3.1-8B","object":"model","created":1700000000,"owned_by":"llama"},{"id":"qwen2.5:7b","owned_by":"qwen"},{"object":"model"}]}"#;
+        let (models, truncated) = parse_models_list(&profile, body, false).unwrap();
+        assert_eq!(models.len(), 2, "entries without an id are skipped");
+        assert_eq!(models[0].id, "meta-llama/Llama-3.1-8B");
+        assert_eq!(models[0].owned_by, "llama");
+        assert_eq!(models[0].created, 1_700_000_000);
+        assert_eq!(models[1].owned_by, "qwen");
+        assert_eq!(models[1].created, 0, "missing created defaults to 0");
+        assert!(!truncated);
+
+        // A payload without a `data` array lists nothing rather than failing.
+        let (none, none_truncated) = parse_models_list(&profile, r#"{"object":"list"}"#, false).unwrap();
+        assert!(none.is_empty() && !none_truncated);
+
+        // Oversized ids are dropped.
+        let oversized = format!(r#"{{"data":[{{"id":"{}"}}]}}"#, "m".repeat(MAX_MODEL_ID_BYTES + 1));
+        let (skip, _) = parse_models_list(&profile, &oversized, false).unwrap();
+        assert!(skip.is_empty());
+
+        // A list over the cap is truncated, not an error.
+        let big = serde_json::json!({
+            "data": (0..(MAX_HEALTH_MODELS + 5)).map(|i| json!({ "id": format!("model-{i}") })).collect::<Vec<_>>()
+        })
+        .to_string();
+        let (capped, capped_truncated) = parse_models_list(&profile, &big, false).unwrap();
+        assert_eq!(capped.len(), MAX_HEALTH_MODELS);
+        assert!(capped_truncated);
+
+        // An over-bound response is an honest error, not a partial list.
+        assert_eq!(parse_models_list(&profile, "{}", true).unwrap_err().code, "ai_response_too_large");
+        assert_eq!(parse_models_list(&profile, "nope", false).unwrap_err().code, "ai_protocol_error");
+    }
+
+    #[test]
+    fn health_check_classifies_unlisted_model_endpoints() {
+        assert!(models_not_listed_status(404));
+        assert!(models_not_listed_status(405));
+        assert!(!models_not_listed_status(200));
+        assert!(!models_not_listed_status(401));
+        assert!(!models_not_listed_status(429));
+        assert!(!models_not_listed_status(500));
+    }
+
+    #[test]
+    fn health_check_headers_carry_the_token_only_when_stored() {
+        let anonymous = health_headers(None);
+        assert_eq!(anonymous.len(), 1);
+        assert_eq!(anonymous[0].name, "Accept");
+        assert_eq!(anonymous[0].value, "application/json");
+        let authed = health_headers(Some("tok-abc"));
+        assert_eq!(authed.len(), 2);
+        assert_eq!(authed[1].name, "Authorization");
+        assert_eq!(authed[1].value, "Bearer tok-abc");
     }
 }
