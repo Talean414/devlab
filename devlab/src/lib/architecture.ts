@@ -6,7 +6,7 @@
 // dependency.
 
 import { buildCodeMap, type CodeMap } from "./codeMap";
-import { buildCodeGraph, type CodeGraph } from "./codeGraph";
+import { buildCodeGraph, type CodeGraph, type CodeGraphModule } from "./codeGraph";
 
 export const ARCHITECTURE_CONTEXT_PATH = "devlab-architecture.md";
 
@@ -203,46 +203,80 @@ function architectureCounts(snapshot: ArchitectureSnapshot): string {
   return parts.join(" · ");
 }
 
-function renderDiagram(graph: CodeGraph): { lines: string[]; nodes: number; edges: number } {
+export interface DiagramSelectionEdge {
+  from: string;
+  to: string;
+  weight: number;
+}
+
+export interface DiagramSelection {
+  /** Diagrammed modules in importance order; modules without a kept edge are excluded. */
+  modules: CodeGraphModule[];
+  /** Module-name edges (importing module → imported module), heaviest first, capped. */
+  edges: DiagramSelectionEdge[];
+  /** Mermaid ids (`m<rank>`) for every module eligible for the diagram. */
+  ids: Map<string, string>;
+}
+
+/**
+ * Chooses which modules and edges the architecture diagram shows: the top modules by importance,
+ * the heaviest edges among them, and only modules that keep at least one edge. Shared by the
+ * Mermaid text (Phase 9M) and the in-UI drawing (Phase 9O) so both show the same picture.
+ */
+export function selectDiagram(graph: CodeGraph): DiagramSelection {
   const ranked = graph.modules.slice(0, MAX_DIAGRAM_NODES);
   const ids = new Map<string, string>();
   ranked.forEach((module, index) => {
     ids.set(module.module, `m${index}`);
   });
-  const edges: Array<{ from: string; to: string; weight: number }> = [];
+  const edges: DiagramSelectionEdge[] = [];
   for (const module of graph.modules) {
-    const from = ids.get(module.module);
-    if (!from) continue;
+    if (!ids.has(module.module)) continue;
     for (const edge of module.dependsOn) {
-      const to = ids.get(edge.module);
-      if (!to) continue;
-      edges.push({ from, to, weight: edge.weight });
+      if (!ids.has(edge.module) || edge.module === module.module) continue;
+      edges.push({ from: module.module, to: edge.module, weight: edge.weight });
     }
   }
-  edges.sort((left, right) => right.weight - left.weight || left.from.localeCompare(right.from) || left.to.localeCompare(right.to));
+  const idOf = (name: string) => ids.get(name) ?? "";
+  edges.sort((left, right) => right.weight - left.weight || idOf(left.from).localeCompare(idOf(right.from)) || idOf(left.to).localeCompare(idOf(right.to)));
   const kept = edges.slice(0, MAX_DIAGRAM_EDGES);
   const connected = new Set<string>();
   for (const edge of kept) {
     connected.add(edge.from);
     connected.add(edge.to);
   }
-  const nodes = ranked.filter((module) => connected.has(ids.get(module.module) ?? ""));
-  if (nodes.length === 0 || kept.length === 0) {
+  const modules = ranked.filter((module) => connected.has(module.module));
+  return { modules, edges: modules.length > 0 ? kept : [], ids };
+}
+
+/** Mermaid `flowchart LR` source for the diagrammed modules, or an empty string when there is nothing to draw. */
+export function renderMermaid(graph: CodeGraph): string {
+  const selection = selectDiagram(graph);
+  if (selection.modules.length === 0 || selection.edges.length === 0) return "";
+  const lines = ["flowchart LR"];
+  for (const module of selection.modules) {
+    lines.push(`  ${selection.ids.get(module.module)}["${escapeLabel(module.module)}"]`);
+  }
+  for (const edge of selection.edges) {
+    const from = selection.ids.get(edge.from);
+    const to = selection.ids.get(edge.to);
+    lines.push(edge.weight > 1 ? `  ${from} -->|${edge.weight}| ${to}` : `  ${from} --> ${to}`);
+  }
+  return lines.join("\n");
+}
+
+function renderDiagram(graph: CodeGraph): { lines: string[]; nodes: number; edges: number } {
+  const selection = selectDiagram(graph);
+  const mermaid = renderMermaid(graph);
+  if (!mermaid) {
     return { lines: [], nodes: 0, edges: 0 };
   }
-  const lines = ["## Module dependency diagram", "", "```mermaid", "flowchart LR"];
-  for (const module of nodes) {
-    lines.push(`  ${ids.get(module.module)}["${escapeLabel(module.module)}"]`);
-  }
-  for (const edge of kept) {
-    lines.push(edge.weight > 1 ? `  ${edge.from} -->|${edge.weight}| ${edge.to}` : `  ${edge.from} --> ${edge.to}`);
-  }
-  lines.push("```", "");
-  const hidden = graph.moduleCount - nodes.length;
+  const lines = ["## Module dependency diagram", "", "```mermaid", ...mermaid.split("\n"), "```", ""];
+  const hidden = graph.moduleCount - selection.modules.length;
   if (hidden > 0) {
-    lines.push(`Diagram covers ${nodes.length} of ${graph.moduleCount} modules (most important first; ${hidden} omitted).`);
+    lines.push(`Diagram covers ${selection.modules.length} of ${graph.moduleCount} modules (most important first; ${hidden} omitted).`);
   }
-  return { lines, nodes: nodes.length, edges: kept.length };
+  return { lines, nodes: selection.modules.length, edges: selection.edges.length };
 }
 
 function renderModules(graph: CodeGraph): string[] {

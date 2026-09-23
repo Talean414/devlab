@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import type { AgentContextFile, ChatMessage, OpenGeneratedDrafts, VFile } from "../types";
 import { AgentAuditCard } from "../components/AgentAuditCard";
 import { Markdown } from "../components/CodeBlock";
@@ -19,7 +19,9 @@ import { buildRepoMap, renderRepoMap, REPO_MAP_CONTEXT_PATH } from "../lib/repoM
 import { canOutlinePath, codeOutlineFile, describeCodeOutline, renderCodeOutline, type CodeOutline } from "../lib/codeOutline";
 import { buildCodeMap, describeCodeMap, renderCodeMap, CODE_MAP_CONTEXT_PATH } from "../lib/codeMap";
 import { buildCodeGraph, describeCodeGraph, renderCodeGraph, CODE_GRAPH_CONTEXT_PATH } from "../lib/codeGraph";
-import { buildArchitectureSnapshot, describeArchitecture, renderArchitecture, ARCHITECTURE_CONTEXT_PATH } from "../lib/architecture";
+import { buildArchitectureSnapshot, describeArchitecture, renderArchitecture, renderMermaid, ARCHITECTURE_CONTEXT_PATH, type ArchitectureSnapshot } from "../lib/architecture";
+import { describeLayout, layoutArchitecture } from "../lib/diagramLayout";
+import { ArchitectureDiagram } from "../components/ArchitectureDiagram";
 import { buildDependencyInventory, describeInventory, renderInventory, DEPENDENCY_INVENTORY_CONTEXT_PATH } from "../lib/dependencyInventory";
 import { listDirectory, onWorkspaceChange, readWorkspaceFile, type WorkspaceDocument, type WorkspaceEntry } from "../lib/workspace";
 import {
@@ -115,6 +117,12 @@ export function AgentPanel({
   const [codeMapBusy, setCodeMapBusy] = useState(false);
   const [codeGraphBusy, setCodeGraphBusy] = useState(false);
   const [architectureBusy, setArchitectureBusy] = useState(false);
+  // Phase 9O: the snapshot behind the attached architecture context, kept in memory only so the
+  // diagram can be drawn in the UI; cleared when that context is removed.
+  const [architectureSnapshot, setArchitectureSnapshot] = useState<ArchitectureSnapshot | null>(null);
+  const [architectureSelected, setArchitectureSelected] = useState<string | null>(null);
+  const [architectureScale, setArchitectureScale] = useState(1);
+  const [architectureCopyNotice, setArchitectureCopyNotice] = useState("");
   const [inventoryBusy, setInventoryBusy] = useState(false);
   const [codeMapExportedOnly, setCodeMapExportedOnly] = useState(true);
   const [contextError, setContextError] = useState("");
@@ -158,6 +166,14 @@ export function AgentPanel({
   const SpeechAPI = getSpeechRecognition();
   const attachedRepoMap = contextFiles.find(isRepoMapContext) ?? null;
   const repoMapPreview = attachedRepoMap ? buildRepoMapContextPreview(attachedRepoMap, repoMapQuery) : null;
+  const attachedArchitecture = contextFiles.find(isArchitectureContext) ?? null;
+  const architectureGraph = attachedArchitecture && architectureSnapshot && architectureRevision(architectureSnapshot) === attachedArchitecture.revision
+    ? architectureSnapshot.graph
+    : null;
+  const architectureLayout = useMemo(() => (architectureGraph ? layoutArchitecture(architectureGraph) : null), [architectureGraph]);
+  const architectureSelectedModule = architectureGraph && architectureSelected
+    ? architectureGraph.modules.find((module) => module.module === architectureSelected) ?? null
+    : null;
 
   function toggleVoice() {
     if (!SpeechAPI) return;
@@ -531,9 +547,12 @@ export function AgentPanel({
     setContextError("");
     setContextNotice("");
     try {
-      const { file: contextFile, summary } = await buildArchitectureContextFile(Math.min(MAX_AGENT_CONTEXT_CHARS, remaining));
+      const { file: contextFile, summary, snapshot } = await buildArchitectureContextFile(Math.min(MAX_AGENT_CONTEXT_CHARS, remaining));
+      setArchitectureSnapshot(snapshot);
+      setArchitectureSelected(null);
+      setArchitectureCopyNotice("");
       setContextFiles([...withoutExisting, contextFile].slice(-MAX_AGENT_CONTEXT_FILES));
-      setContextNotice(`Attached a metadata-only architecture summary (${summary}); the Mermaid diagram is text only, and nothing was written to the workspace.`);
+      setContextNotice(`Attached a metadata-only architecture summary (${summary}); the diagram below is drawn in memory, and nothing was written to the workspace.`);
     } catch (error) {
       setContextError(`Could not build architecture summary: ${formatContextError(error)}`);
     } finally {
@@ -671,7 +690,7 @@ export function AgentPanel({
           : isCodeGraphContext(file)
             ? (await buildCodeGraphContext(Math.min(MAX_AGENT_CONTEXT_CHARS, remaining))).file
           : isArchitectureContext(file)
-            ? (await buildArchitectureContextFile(Math.min(MAX_AGENT_CONTEXT_CHARS, remaining))).file
+            ? await refreshArchitectureContext(Math.min(MAX_AGENT_CONTEXT_CHARS, remaining))
           : isInventoryContext(file)
             ? (await buildInventoryContextFile(Math.min(MAX_AGENT_CONTEXT_CHARS, remaining))).file
           : isOutlineContext(file)
@@ -706,11 +725,43 @@ export function AgentPanel({
     }
   }
 
+  async function refreshArchitectureContext(maxBytes: number): Promise<AgentContextFile> {
+    const built = await buildArchitectureContextFile(maxBytes);
+    setArchitectureSnapshot(built.snapshot);
+    setArchitectureCopyNotice("");
+    return built.file;
+  }
+
+  function clearArchitecturePreview() {
+    setArchitectureSnapshot(null);
+    setArchitectureSelected(null);
+    setArchitectureScale(1);
+    setArchitectureCopyNotice("");
+  }
+
+  async function copyArchitectureMermaid() {
+    if (!architectureGraph) return;
+    const mermaid = renderMermaid(architectureGraph);
+    if (!mermaid) {
+      setArchitectureCopyNotice("There is no diagram to copy: the graph has no cross-module import edges.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(mermaid);
+      setArchitectureCopyNotice(`Copied the Mermaid source (${mermaid.split("\n").length} lines) to the clipboard.`);
+    } catch {
+      setArchitectureCopyNotice("Clipboard access was blocked; the Mermaid source is also inside the attached architecture summary.");
+    }
+  }
+
   function removeContextFile(path: string) {
     setContextFiles((current) => current.filter((file) => file.path !== path));
     if (path === REPO_MAP_CONTEXT_PATH) {
       setRepoMapQuery("");
       setRepoMapCopyNotice("");
+    }
+    if (path === ARCHITECTURE_CONTEXT_PATH) {
+      clearArchitecturePreview();
     }
     setContextNotice("");
     setContextError("");
@@ -720,6 +771,7 @@ export function AgentPanel({
     setContextFiles([]);
     setRepoMapQuery("");
     setRepoMapCopyNotice("");
+    clearArchitecturePreview();
     setContextNotice("");
     setContextError("");
   }
@@ -1111,6 +1163,53 @@ export function AgentPanel({
                   This inspector filters the already-attached metadata-only map in memory. It does not read file contents, build an index, persist state, execute commands or write workspace files.
                 </p>
                 {repoMapCopyNotice && <div className="mt-1 text-[10.5px] text-emerald-300">{repoMapCopyNotice}</div>}
+              </details>
+            )}
+            {architectureGraph && architectureLayout && architectureSnapshot && (
+              <details className="mt-2 rounded-lg border border-cyan-500/15 bg-cyan-500/[0.04] p-2" open>
+                <summary className="cursor-pointer select-none text-[11px] font-semibold text-cyan-100">
+                  Architecture diagram · {describeLayout(architectureLayout, architectureGraph)}
+                </summary>
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                  <span className="text-cyan-100/60">{describeArchitecture(architectureSnapshot)}</span>
+                  <span className="ml-auto inline-flex items-center gap-1">
+                    <button onClick={() => setArchitectureScale((scale) => Math.max(0.5, Math.round((scale - 0.25) * 100) / 100))} disabled={architectureScale <= 0.5} className="rounded-lg border border-white/10 px-2 py-1 text-zinc-400 hover:bg-white/5 hover:text-zinc-200 disabled:opacity-40" aria-label="Zoom out">−</button>
+                    <span className="w-10 text-center text-zinc-400">{Math.round(architectureScale * 100)}%</span>
+                    <button onClick={() => setArchitectureScale((scale) => Math.min(2, Math.round((scale + 0.25) * 100) / 100))} disabled={architectureScale >= 2} className="rounded-lg border border-white/10 px-2 py-1 text-zinc-400 hover:bg-white/5 hover:text-zinc-200 disabled:opacity-40" aria-label="Zoom in">+</button>
+                    <button onClick={() => setArchitectureScale(1)} className="rounded-lg border border-white/10 px-2 py-1 text-zinc-400 hover:bg-white/5 hover:text-zinc-200">Reset</button>
+                  </span>
+                  <button onClick={() => { void copyArchitectureMermaid(); }} className="rounded-lg border border-cyan-500/20 px-2 py-1.5 text-cyan-200 hover:bg-cyan-500/10">
+                    Copy Mermaid source
+                  </button>
+                </div>
+                <div className="mt-2 max-h-80 overflow-auto rounded-md bg-black/20 p-2">
+                  {architectureLayout.nodes.length === 0 ? (
+                    <div className="text-[11px] text-zinc-500">No cross-module import edges to draw. The attached summary still lists modules, files and external packages.</div>
+                  ) : (
+                    <ArchitectureDiagram layout={architectureLayout} selected={architectureSelected} scale={architectureScale} onSelect={setArchitectureSelected} />
+                  )}
+                </div>
+                {architectureSelectedModule && (
+                  <div className="mt-2 rounded-md border border-white/10 bg-black/20 p-2 text-[11px] leading-relaxed text-cyan-50/80">
+                    <div className="font-semibold text-cyan-100">{architectureSelectedModule.module}</div>
+                    <div>
+                      {architectureSelectedModule.files} file{architectureSelectedModule.files === 1 ? "" : "s"} · importance {architectureSelectedModule.importance.toFixed(2)}× · {architectureSelectedModule.internalEdges} in-repo import edge{architectureSelectedModule.internalEdges === 1 ? "" : "s"} · {architectureSelectedModule.externalDeps} external reference{architectureSelectedModule.externalDeps === 1 ? "" : "s"}
+                    </div>
+                    <div>
+                      Depends on: {architectureSelectedModule.dependsOn.length > 0 ? architectureSelectedModule.dependsOn.map((edge) => `${edge.module} (${edge.weight})`).join(", ") : "no other module"}
+                    </div>
+                    <div>
+                      Used by: {architectureSelectedModule.dependedOnBy.length > 0 ? architectureSelectedModule.dependedOnBy.map((edge) => `${edge.module} (${edge.weight})`).join(", ") : "no other module"}
+                    </div>
+                    {architectureSelectedModule.externalSamples.length > 0 && (
+                      <div>External packages: {architectureSelectedModule.externalSamples.join(", ")}</div>
+                    )}
+                  </div>
+                )}
+                <p className="mt-2 text-[10.5px] leading-relaxed text-cyan-100/55">
+                  Drawn in memory from the attached metadata-only dependency graph: arrows point from the importing module to the module it imports, labels count file-level imports, dashed amber edges close a cycle, and clicking a box highlights its neighbours. Nothing is read, cached, executed or written.
+                </p>
+                {architectureCopyNotice && <div className="mt-1 text-[10.5px] text-emerald-300">{architectureCopyNotice}</div>}
               </details>
             )}
             {contextNotice && <div className="mt-1 text-emerald-300">{contextNotice}</div>}
@@ -1603,7 +1702,11 @@ async function buildInventoryContextFile(maxBytes: number): Promise<{ file: Agen
   };
 }
 
-async function buildArchitectureContextFile(maxBytes: number): Promise<{ file: AgentContextFile; summary: string }> {
+function architectureRevision(snapshot: ArchitectureSnapshot): string {
+  return `architecture:${snapshot.graph.generatedAtMs}:${snapshot.graph.fileCount}:${snapshot.graph.internalEdges}`;
+}
+
+async function buildArchitectureContextFile(maxBytes: number): Promise<{ file: AgentContextFile; summary: string; snapshot: ArchitectureSnapshot }> {
   const snapshot = await buildArchitectureSnapshot();
   const rendered = renderArchitecture(snapshot, maxBytes);
   const content = boundTextByBytes(rendered.markdown, maxBytes);
@@ -1613,12 +1716,13 @@ async function buildArchitectureContextFile(maxBytes: number): Promise<{ file: A
       path: ARCHITECTURE_CONTEXT_PATH,
       content,
       language: "markdown",
-      revision: `architecture:${snapshot.graph.generatedAtMs}:${snapshot.graph.fileCount}:${snapshot.graph.internalEdges}`,
+      revision: architectureRevision(snapshot),
       size: textBytes(rendered.markdown),
       truncated: textBytes(content) < textBytes(rendered.markdown) || rendered.clipped,
       source: "architecture",
     },
     summary,
+    snapshot,
   };
 }
 
