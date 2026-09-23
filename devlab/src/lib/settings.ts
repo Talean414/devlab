@@ -197,25 +197,16 @@ export function saveGit(g: GitConfig) {
   localStorage.setItem(GKEY, JSON.stringify({ commitStyle: g.commitStyle }));
 }
 
-// ── Retired deployment preferences ──
-// Native deployment is disabled. Legacy browser tokens are intentionally
-// discarded until a protected native credential path is implemented.
+// ── Deployment preferences ──
+// Native deployment is disabled and the Deploy panel is authoring-only. The
+// non-secret default provider id is the only value persisted; legacy browser
+// tokens found under this key are discarded on load and never read back,
+// until a protected native credential path exists for deployment credentials.
 export interface DeployConfig {
-  vercelToken: string;
-  netlifyToken: string;
-  renderKey: string;
-  railwayToken: string;
-  flyToken: string;
-  cloudflareToken: string;
-  supabaseKey: string;
   defaultProvider: string;
 }
 
-export const DEFAULT_DEPLOY: DeployConfig = {
-  vercelToken: "", netlifyToken: "", renderKey: "",
-  railwayToken: "", flyToken: "", cloudflareToken: "",
-  supabaseKey: "", defaultProvider: "vercel",
-};
+export const DEFAULT_DEPLOY: DeployConfig = { defaultProvider: "vercel" };
 
 const DKEY = "devlab.deploy.v1";
 export function loadDeploy(): DeployConfig {

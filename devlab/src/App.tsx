@@ -28,6 +28,8 @@ import { AgentPanel } from "./panels/AgentPanel";
 import { CanvasPanel } from "./panels/CanvasPanel";
 import { EditorPanel } from "./panels/EditorPanel";
 import { MigratePanel } from "./panels/MigratePanel";
+import { CicdPanel } from "./panels/CicdPanel";
+import { DeployPanel } from "./panels/DeployPanel";
 import { VisionPanel } from "./panels/VisionPanel";
 import { LiveSharePanel } from "./panels/LiveSharePanel";
 import { ExplorerPanel } from "./panels/ExplorerPanel";
@@ -475,12 +477,10 @@ export default function App() {
         : nativeFeature(
           "Source Control", "git", "Phase 4 · real repository operations and OS-protected credentials",
         );
-      case "cicd":     return nativeFeature(
-        "CI / CD Pipelines", "ci", "Phase 6 · real workflow provider and run status integration",
-      );
-      case "deploy":   return nativeFeature(
-        "Deployment", "deploy", "Phase 6 · approved native deployment commands",
-      );
+      // Authoring-only surfaces: workflow templates and provider recipes staged through the
+      // reviewed-draft gate. Neither runs commands, stores tokens or reads CI status.
+      case "cicd":     return <CicdPanel key={keyVersion} onOpenFiles={openGeneratedSource} />;
+      case "deploy":   return <DeployPanel key={keyVersion} onOpenFiles={openGeneratedSource} />;
       case "database": return hasNativeCapability(runtime, "database")
         ? <Suspense fallback={<NativePanelLoading label="Loading native database integration…" />}>
           <DatabasePanel onOpenWorkspace={() => navigate("editor")} />
@@ -615,7 +615,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 9P local model health check</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 9S broader verification profiles</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}

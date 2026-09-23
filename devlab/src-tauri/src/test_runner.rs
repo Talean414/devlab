@@ -18,7 +18,14 @@ use crate::{
 const TEST_RUN_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_TEST_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 512 * 1024;
-const MAX_TEST_PROFILES: usize = 16;
+const MAX_TEST_PROFILES: usize = 24;
+
+/// Profile kinds exposed to the renderer. "test" profiles run a test suite;
+/// "check" profiles run a non-mutating verification (type check, lint, static
+/// analysis). Both are backend-owned fixed commands; neither accepts renderer
+/// supplied arguments.
+const KIND_TEST: &str = "test";
+const KIND_CHECK: &str = "check";
 const MAX_PROFILE_ID_BYTES: usize = 96;
 
 #[derive(Clone, Debug)]
@@ -29,6 +36,7 @@ struct TestProfileSpec {
     args: Vec<String>,
     command: String,
     reason: String,
+    kind: &'static str,
 }
 
 #[derive(Clone, Serialize)]
@@ -38,6 +46,7 @@ pub struct TestProfile {
     label: String,
     command: String,
     reason: String,
+    kind: &'static str,
 }
 
 #[derive(Serialize)]
@@ -86,6 +95,7 @@ impl TestProfileSpec {
             label: self.label.clone(),
             command: self.command.clone(),
             reason: self.reason.clone(),
+            kind: self.kind,
         }
     }
 }
@@ -134,13 +144,26 @@ fn discover_profiles(root: &Path) -> Result<(Vec<TestProfileSpec>, Vec<String>),
     discover_go_profile(root, &mut profiles, &mut ids);
     discover_python_profile(root, &mut profiles, &mut ids);
 
-    profiles.sort_by(|left, right| left.label.to_lowercase().cmp(&right.label.to_lowercase()));
+    // Tests first, then checks; alphabetical within each kind.
+    profiles.sort_by(|left, right| {
+        kind_rank(left.kind)
+            .cmp(&kind_rank(right.kind))
+            .then_with(|| left.label.to_lowercase().cmp(&right.label.to_lowercase()))
+    });
     if profiles.is_empty() && warnings.is_empty() {
         warnings.push(
-            "No supported test profile was detected. DevLab currently discovers package.json test scripts, Cargo, Go and pytest workspaces.".to_string(),
+            "No supported verification profile was detected. DevLab currently discovers package.json test/typecheck/lint/check scripts, an installed TypeScript compiler, Cargo (test, check, clippy), Go (test, vet), pytest, ruff and mypy workspaces.".to_string(),
         );
     }
     Ok((profiles, warnings))
+}
+
+fn kind_rank(kind: &str) -> u8 {
+    if kind == KIND_TEST {
+        0
+    } else {
+        1
+    }
 }
 
 fn discover_node_profiles(
@@ -165,20 +188,28 @@ fn discover_node_profiles(
     let mut names = parsed
         .scripts
         .keys()
-        .filter(|name| is_test_script((*name).as_str()))
+        .filter(|name| {
+            (is_test_script((*name).as_str()) || is_check_script((*name).as_str()))
+                && !is_lifecycle_hook((*name).as_str(), &parsed.scripts)
+        })
         .cloned()
         .collect::<Vec<_>>();
     names.sort();
+    let mut has_typecheck_script = false;
     for name in names {
         if profiles.len() >= MAX_TEST_PROFILES {
             warnings.push(format!(
-                "Only the first {MAX_TEST_PROFILES} test profiles are exposed."
+                "Only the first {MAX_TEST_PROFILES} verification profiles are exposed."
             ));
             break;
         }
         if !safe_script_name(&name) {
             warnings.push(format!("Skipped package script {name:?}; script names exposed to DevLab must be simple ASCII tokens."));
             continue;
+        }
+        let is_test = is_test_script(&name);
+        if !is_test && is_typecheck_script(&name) {
+            has_typecheck_script = true;
         }
         let id = format!("package:{name}");
         let mut args = runner_args.clone();
@@ -192,11 +223,63 @@ fn discover_node_profiles(
                 command: display_command(&program, &args),
                 program: program.clone(),
                 args,
-                reason: "Discovered from package.json scripts. Runs without a shell, from the selected workspace.".to_string(),
+                reason: if is_test {
+                    "Discovered from package.json scripts. Runs without a shell, from the selected workspace.".to_string()
+                } else {
+                    "Discovered from package.json scripts as a non-mutating check (typecheck, lint or check). Runs without a shell, from the selected workspace.".to_string()
+                },
+                kind: if is_test { KIND_TEST } else { KIND_CHECK },
             },
         );
     }
+    discover_tsc_profile(root, profiles, ids, warnings, has_typecheck_script);
     Ok(())
+}
+
+/// Offers `tsc --noEmit` when a tsconfig.json exists and the TypeScript compiler is
+/// already installed in the workspace's node_modules. The compiler is started through
+/// `node` with the package's own entry script, so nothing is downloaded and no shell
+/// or PATH lookup of a package-manager shim is involved.
+fn discover_tsc_profile(
+    root: &Path,
+    profiles: &mut Vec<TestProfileSpec>,
+    ids: &mut HashSet<String>,
+    warnings: &mut Vec<String>,
+    has_typecheck_script: bool,
+) {
+    if has_typecheck_script || !root.join("tsconfig.json").is_file() {
+        return;
+    }
+    let entry = root
+        .join("node_modules")
+        .join("typescript")
+        .join("bin")
+        .join("tsc");
+    if !entry.is_file() {
+        warnings.push(
+            "tsconfig.json exists but node_modules/typescript is not installed, so no tsc --noEmit profile is offered. Install dependencies first.".to_string(),
+        );
+        return;
+    }
+    let args = vec![
+        "node_modules/typescript/bin/tsc".to_string(),
+        "--noEmit".to_string(),
+        "--pretty".to_string(),
+        "false".to_string(),
+    ];
+    push_profile(
+        profiles,
+        ids,
+        TestProfileSpec {
+            id: "node:tsc".to_string(),
+            label: "TypeScript · tsc --noEmit".to_string(),
+            command: display_command("node", &args),
+            program: "node".to_string(),
+            args,
+            reason: "tsconfig.json exists and the TypeScript compiler is installed in node_modules. Type checks only; emits nothing.".to_string(),
+            kind: KIND_CHECK,
+        },
+    );
 }
 
 fn discover_cargo_profile(
@@ -216,6 +299,40 @@ fn discover_cargo_profile(
                 program: "cargo".to_string(),
                 args,
                 reason: "Cargo.toml exists in the selected workspace.".to_string(),
+                kind: KIND_TEST,
+            },
+        );
+        let check_args = vec!["check".to_string(), "--color".to_string(), "never".to_string()];
+        push_profile(
+            profiles,
+            ids,
+            TestProfileSpec {
+                id: "cargo:check".to_string(),
+                label: "Cargo check".to_string(),
+                command: display_command("cargo", &check_args),
+                program: "cargo".to_string(),
+                args: check_args,
+                reason: "Cargo.toml exists in the selected workspace. Compiles without producing binaries; a cold build can exceed the 60-second bound and is then reported as a timeout.".to_string(),
+                kind: KIND_CHECK,
+            },
+        );
+        let clippy_args = vec![
+            "clippy".to_string(),
+            "--color".to_string(),
+            "never".to_string(),
+            "--no-deps".to_string(),
+        ];
+        push_profile(
+            profiles,
+            ids,
+            TestProfileSpec {
+                id: "cargo:clippy".to_string(),
+                label: "Cargo clippy".to_string(),
+                command: display_command("cargo", &clippy_args),
+                program: "cargo".to_string(),
+                args: clippy_args,
+                reason: "Cargo.toml exists in the selected workspace. Requires the clippy component (rustup component add clippy); a missing component is reported as a failed run.".to_string(),
+                kind: KIND_CHECK,
             },
         );
     }
@@ -238,6 +355,21 @@ fn discover_go_profile(
                 program: "go".to_string(),
                 args,
                 reason: "go.mod exists in the selected workspace.".to_string(),
+                kind: KIND_TEST,
+            },
+        );
+        let vet_args = vec!["vet".to_string(), "./...".to_string()];
+        push_profile(
+            profiles,
+            ids,
+            TestProfileSpec {
+                id: "go:vet".to_string(),
+                label: "Go vet".to_string(),
+                command: display_command("go", &vet_args),
+                program: "go".to_string(),
+                args: vet_args,
+                reason: "go.mod exists in the selected workspace. Static analysis only; modifies nothing.".to_string(),
+                kind: KIND_CHECK,
             },
         );
     }
@@ -251,8 +383,8 @@ fn discover_python_profile(
     let has_pytest_config = ["pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml"]
         .iter()
         .any(|name| root.join(name).is_file());
+    let program = if cfg!(windows) { "python" } else { "python3" };
     if has_pytest_config || root.join("tests").is_dir() {
-        let program = if cfg!(windows) { "python" } else { "python3" };
         let args = vec!["-m".to_string(), "pytest".to_string()];
         push_profile(
             profiles,
@@ -264,6 +396,56 @@ fn discover_python_profile(
                 program: program.to_string(),
                 args,
                 reason: "A Python test marker or tests/ directory exists in the selected workspace.".to_string(),
+                kind: KIND_TEST,
+            },
+        );
+    }
+
+    // Static checks are offered only when the workspace declares their configuration,
+    // so a workspace that never adopted ruff or mypy is not sent failing runs.
+    let pyproject = root.join("pyproject.toml");
+    let pyproject_text = if pyproject.is_file() {
+        read_manifest(&pyproject, "pyproject.toml").ok()
+    } else {
+        None
+    };
+    let declares_tool = |table: &str| {
+        pyproject_text
+            .as_deref()
+            .is_some_and(|text| text.lines().any(|line| {
+                let trimmed = line.trim();
+                trimmed.starts_with(&format!("[tool.{table}]")) || trimmed.starts_with(&format!("[tool.{table}."))
+            }))
+    };
+    if root.join("ruff.toml").is_file() || root.join(".ruff.toml").is_file() || declares_tool("ruff") {
+        let args = vec!["-m".to_string(), "ruff".to_string(), "check".to_string(), ".".to_string()];
+        push_profile(
+            profiles,
+            ids,
+            TestProfileSpec {
+                id: "python:ruff".to_string(),
+                label: "ruff check".to_string(),
+                command: display_command(program, &args),
+                program: program.to_string(),
+                args,
+                reason: "A ruff configuration exists in the selected workspace. Lints only; never rewrites files (no --fix).".to_string(),
+                kind: KIND_CHECK,
+            },
+        );
+    }
+    if root.join("mypy.ini").is_file() || root.join(".mypy.ini").is_file() || declares_tool("mypy") {
+        let args = vec!["-m".to_string(), "mypy".to_string(), ".".to_string()];
+        push_profile(
+            profiles,
+            ids,
+            TestProfileSpec {
+                id: "python:mypy".to_string(),
+                label: "mypy".to_string(),
+                command: display_command(program, &args),
+                program: program.to_string(),
+                args,
+                reason: "A mypy configuration exists in the selected workspace. Type checks only.".to_string(),
+                kind: KIND_CHECK,
             },
         );
     }
@@ -324,6 +506,50 @@ fn is_test_script(name: &str) -> bool {
         || lower.contains(":test:")
         || lower.contains("-test")
         || lower.ends_with("tests")
+}
+
+/// Package scripts that DevLab treats as non-mutating checks. Names that suggest a
+/// rewrite (fix, write, format without :check) are excluded on purpose: a reviewed
+/// draft must never be changed behind the Editor's back by a verification run.
+fn is_check_script(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if is_test_script(&lower) || lower.contains("fix") || lower.contains("write") {
+        return false;
+    }
+    if lower == "format:check" || lower == "fmt:check" || lower == "prettier:check" {
+        return true;
+    }
+    if lower.starts_with("format") || lower.starts_with("fmt") || lower.starts_with("prettier") {
+        return false;
+    }
+    is_typecheck_script(&lower)
+        || lower == "lint"
+        || lower == "check"
+        || lower.starts_with("lint:")
+        || lower.starts_with("check:")
+        || lower.ends_with(":lint")
+        || lower.ends_with(":check")
+}
+
+/// npm runs `pre<name>`/`post<name>` automatically around `<name>`; they are never
+/// offered on their own when the base script exists.
+fn is_lifecycle_hook(name: &str, scripts: &HashMap<String, String>) -> bool {
+    ["pre", "post"].iter().any(|prefix| {
+        name.strip_prefix(*prefix)
+            .is_some_and(|base| !base.is_empty() && scripts.contains_key(base))
+    })
+}
+
+fn is_typecheck_script(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "typecheck"
+        || lower == "type-check"
+        || lower == "types"
+        || lower == "tsc"
+        || lower.starts_with("typecheck:")
+        || lower.starts_with("type-check:")
+        || lower.ends_with(":typecheck")
+        || lower.ends_with(":type-check")
 }
 
 fn safe_script_name(name: &str) -> bool {
@@ -681,6 +907,69 @@ mod tests {
         assert!(commands.contains(&"cargo test --color never"));
         assert!(commands.contains(&"go test ./..."));
         assert!(commands.iter().any(|command| command.ends_with("-m pytest")));
+    }
+
+    #[test]
+    fn discovers_non_mutating_check_profiles() {
+        let workspace = TestWorkspace::new();
+        fs::write(
+            workspace.0.join("package.json"),
+            r#"{"scripts":{"test":"vitest run","typecheck":"tsc --noEmit","lint":"eslint .","lint:fix":"eslint . --fix","format":"prettier --write .","format:check":"prettier --check .","prelint":"echo x"}}"#,
+        )
+        .expect("package.json should be written");
+        fs::write(workspace.0.join("tsconfig.json"), "{}").expect("tsconfig should be written");
+        fs::write(workspace.0.join("Cargo.toml"), "[package]\nname='demo'\nversion='0.1.0'")
+            .expect("Cargo.toml should be written");
+        fs::write(workspace.0.join("go.mod"), "module example.com/demo\n")
+            .expect("go.mod should be written");
+        fs::write(workspace.0.join("pyproject.toml"), "[tool.ruff]\nline-length = 100\n")
+            .expect("pyproject should be written");
+        fs::write(workspace.0.join("mypy.ini"), "[mypy]\n").expect("mypy.ini should be written");
+
+        let (profiles, warnings) = discover_profiles(&workspace.0).expect("profiles should load");
+        let kinds = profiles
+            .iter()
+            .map(|profile| (profile.id.as_str(), profile.kind))
+            .collect::<Vec<_>>();
+        assert!(kinds.contains(&("package:test", KIND_TEST)));
+        assert!(kinds.contains(&("package:typecheck", KIND_CHECK)));
+        assert!(kinds.contains(&("package:lint", KIND_CHECK)));
+        assert!(kinds.contains(&("package:format:check", KIND_CHECK)));
+        assert!(!kinds.iter().any(|(id, _)| *id == "package:lint:fix"));
+        assert!(!kinds.iter().any(|(id, _)| *id == "package:format"));
+        assert!(!kinds.iter().any(|(id, _)| *id == "package:prelint"));
+        // A typecheck script exists, so the direct tsc fallback is not duplicated.
+        assert!(!kinds.iter().any(|(id, _)| *id == "node:tsc"));
+        assert!(kinds.contains(&("cargo:check", KIND_CHECK)));
+        assert!(kinds.contains(&("cargo:clippy", KIND_CHECK)));
+        assert!(kinds.contains(&("go:vet", KIND_CHECK)));
+        assert!(kinds.contains(&("python:ruff", KIND_CHECK)));
+        assert!(kinds.contains(&("python:mypy", KIND_CHECK)));
+        // Tests sort before checks.
+        let first_check = profiles.iter().position(|profile| profile.kind == KIND_CHECK).expect("a check profile exists");
+        assert!(profiles[..first_check].iter().all(|profile| profile.kind == KIND_TEST));
+        assert!(profiles[first_check..].iter().all(|profile| profile.kind == KIND_CHECK));
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn offers_direct_tsc_only_when_installed() {
+        let workspace = TestWorkspace::new();
+        fs::write(workspace.0.join("package.json"), r#"{"scripts":{"build":"vite build"}}"#)
+            .expect("package.json should be written");
+        fs::write(workspace.0.join("tsconfig.json"), "{}").expect("tsconfig should be written");
+        let (profiles, warnings) = discover_profiles(&workspace.0).expect("profiles should load");
+        assert!(profiles.iter().all(|profile| profile.id != "node:tsc"));
+        assert!(warnings.iter().any(|warning| warning.contains("node_modules/typescript is not installed")));
+
+        let bin = workspace.0.join("node_modules").join("typescript").join("bin");
+        fs::create_dir_all(&bin).expect("typescript bin dir should be created");
+        fs::write(bin.join("tsc"), "#!/usr/bin/env node\n").expect("tsc entry should be written");
+        let (profiles, warnings) = discover_profiles(&workspace.0).expect("profiles should load");
+        let tsc = profiles.iter().find(|profile| profile.id == "node:tsc").expect("tsc profile should exist");
+        assert_eq!(tsc.command, "node node_modules/typescript/bin/tsc --noEmit --pretty false");
+        assert_eq!(tsc.kind, KIND_CHECK);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
     }
 
     #[test]

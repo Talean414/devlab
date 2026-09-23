@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { PanelHeader } from "./AgentPanel";
 import { CodeBlock } from "../components/CodeBlock";
+import { MigrationSafetyCard } from "../components/MigrationSafetyCard";
 import { getCurrentAiRoute, hasGenerationAccess, streamChat } from "../lib/gemini";
 import type { OpenGeneratedDrafts, VFile } from "../types";
 import { Database, Wand2, Loader2, ArrowRight, FileDiff, ScrollText, Plug, ListChecks } from "lucide-react";
@@ -166,7 +167,14 @@ Keep to the existing schema's conventions. Use snake_case columns in SQL. Escape
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto p-5 pb-8">
                 {tab === "orm" && <CodeBlock code={result.prisma} lang="prisma" />}
-                {tab === "sql" && <CodeBlock code={result.sql} lang="sql" />}
+                {tab === "sql" && (
+                  <>
+                    <div className="mb-4">
+                      <MigrationSafetyCard sources={[{ label: "migration.sql", sql: result.sql, dialectHint: "postgresql" }]} />
+                    </div>
+                    <CodeBlock code={result.sql} lang="sql" />
+                  </>
+                )}
                 {tab === "routes" && <CodeBlock code={result.routes} lang="typescript" />}
                 {result.checklist?.length > 0 && (
                   <div className="mt-5 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.05] p-4">

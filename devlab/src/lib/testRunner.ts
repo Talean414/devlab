@@ -5,6 +5,8 @@ export interface TestProfile {
   label: string;
   command: string;
   reason: string;
+  /** "test" runs a suite; "check" is a non-mutating verification (typecheck, lint, static analysis). Older backends omit it. */
+  kind?: "test" | "check";
 }
 
 export interface TestRunnerSnapshot {

@@ -561,7 +561,7 @@ ${document.content}
             {!loading && snapshot && snapshot.profiles.length === 0 && (
               <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.05] p-4 text-[12.5px] leading-relaxed text-amber-100/80">
                 <AlertTriangle className="mb-2 h-5 w-5 text-amber-300" />
-                No supported test profile was detected. Select a workspace with package.json test scripts, Cargo.toml, go.mod, pytest config or a tests/ directory.
+                No supported verification profile was detected. Select a workspace with package.json test/typecheck/lint/check scripts, an installed TypeScript compiler with tsconfig.json, Cargo.toml, go.mod, pytest config, a tests/ directory, or a ruff/mypy configuration.
               </div>
             )}
 
@@ -582,6 +582,9 @@ ${document.content}
                   <div className="flex items-center gap-2">
                     {isRunning ? <Loader2 className="h-4 w-4 animate-spin text-cyan-400" /> : <ResultIcon status={profileResult} />}
                     <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-zinc-100">{profile.label}</span>
+                    {profile.kind === "check" && (
+                      <span className="shrink-0 rounded-md border border-violet-400/25 bg-violet-500/10 px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-wider text-violet-200" title="Non-mutating verification: type check, lint or static analysis. Never rewrites files.">check</span>
+                    )}
                   </div>
                   <div className="mt-2 rounded-md bg-black/25 px-2 py-1 font-mono text-[10.5px] text-zinc-500">
                     {profile.command}
