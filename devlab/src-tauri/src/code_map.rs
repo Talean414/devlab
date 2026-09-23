@@ -5,7 +5,10 @@
 // bounded, metadata-only symbol map: per file, its top-level (depth 0 and 1) symbols with kind,
 // name, one-line signature and line range. File contents never leave Rust; nothing is cached or
 // written; the whole build runs under wall-clock, file-count, byte and symbol budgets and reports
-// exactly what was skipped or truncated so the renderer can present the map honestly.
+// exactly what was skipped or truncated so the renderer can present the map honestly. Phase 9K
+// ranks the result with code_rank: imports are extracted during the same walk and turned into a
+// dependency graph whose PageRank decides the output order, so the most depended-on modules are
+// emitted first and a tight budget costs leaf files instead of core ones.
 
 use std::collections::HashSet;
 use std::fs;
@@ -16,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::code_outline::{grammar_id_for, outline_source, CodeOutlineSymbol};
+use crate::code_rank;
 use crate::search_index::{is_binary_extension, is_secret_file, is_skipped_directory};
 use crate::workspace::{CommandError, WorkspaceService};
 
@@ -29,6 +33,7 @@ const MAX_WALK_DEPTH: usize = 32;
 const BUILD_DEADLINE_MS: u64 = 8_000;
 const MAX_SKIPPED_SAMPLES: usize = 24;
 const MAX_PREFIX_BYTES: usize = 512;
+const MAX_TOP_ENTRIES: usize = 10;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,6 +56,14 @@ pub struct CodeMapFile {
     symbol_count: usize,
     truncated: bool,
     has_syntax_errors: bool,
+    /// Phase 9K: PageRank scaled by the file count, so 1.0 means "an average file".
+    importance: f64,
+    /// Number of mapped files that import this file.
+    in_degree: usize,
+    /// Number of mapped files this file imports.
+    out_degree: usize,
+    /// Specifiers that did not resolve inside the workspace (packages, stdlib, path aliases).
+    external_deps: usize,
     symbols: Vec<CodeOutlineSymbol>,
 }
 
@@ -95,11 +108,40 @@ pub struct CodeMap {
     skipped: CodeMapSkipped,
     skipped_samples: Vec<String>,
     languages: Vec<CodeMapLanguageCount>,
+    rank: CodeRank,
     truncated: bool,
     truncation_reason: Option<&'static str>,
     generated_at_ms: u64,
     build_ms: u64,
     limits: CodeMapLimits,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeRankEntry {
+    path: String,
+    importance: f64,
+    in_degree: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeRank {
+    /// Files scored, i.e. the whole map.
+    nodes: usize,
+    /// Resolved import edges between mapped files.
+    internal_edges: usize,
+    /// Specifiers that pointed outside the workspace.
+    external_references: usize,
+    /// Files with no resolved in-repo import (leaves, entry points, scripts).
+    dangling_nodes: usize,
+    iterations: usize,
+    damping: f64,
+    /// True when the walk stopped early, so the graph and the scores may be incomplete.
+    truncated: bool,
+    rank_ms: u64,
+    /// The most central files, most important first.
+    top: Vec<CodeRankEntry>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -172,6 +214,8 @@ struct Walker {
     truncated: bool,
     truncation_reason: Option<&'static str>,
     seen_dirs: HashSet<PathBuf>,
+    /// Phase 9K: raw import specifiers per mapped file, parallel to `files`.
+    imports: Vec<Vec<String>>,
 }
 
 impl Walker {
@@ -344,6 +388,7 @@ impl Walker {
                 symbols.truncate(cap);
             }
             let file_truncated = parsed.truncated || symbols.len() < kept_before_cap;
+            let imports = code_rank::extract_imports(grammar_id, &source);
             self.symbol_count += symbols.len();
             self.files.push(CodeMapFile {
                 path: relative,
@@ -353,8 +398,13 @@ impl Walker {
                 symbol_count: symbols.len(),
                 truncated: file_truncated,
                 has_syntax_errors: parsed.has_syntax_errors,
+                importance: 0.0,
+                in_degree: 0,
+                out_degree: 0,
+                external_deps: 0,
                 symbols,
             });
+            self.imports.push(imports);
         }
     }
 }
@@ -407,8 +457,52 @@ pub(crate) fn build_code_map(root: &Path, prefix: &str, exported_only: bool) -> 
         truncated: false,
         truncation_reason: None,
         seen_dirs: HashSet::new(),
+        imports: Vec::new(),
     };
     walker.walk(&start_dir, 0);
+
+    // Phase 9K: score the mapped files by dependency centrality and emit the most depended-on
+    // modules first. Ties fall back to path order so the output stays deterministic.
+    let rank_started = Instant::now();
+    let paths = walker
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    let ranking = code_rank::rank_paths(&paths, &walker.imports);
+    for (index, file) in walker.files.iter_mut().enumerate() {
+        file.importance = ranking.importance[index];
+        file.in_degree = ranking.in_degree[index];
+        file.out_degree = ranking.out_degree[index];
+        file.external_deps = ranking.external_deps[index];
+    }
+    walker.files.sort_by(|left, right| {
+        right
+            .importance
+            .total_cmp(&left.importance)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    let top = walker
+        .files
+        .iter()
+        .take(MAX_TOP_ENTRIES)
+        .map(|file| CodeRankEntry {
+            path: file.path.clone(),
+            importance: file.importance,
+            in_degree: file.in_degree,
+        })
+        .collect::<Vec<_>>();
+    let rank = CodeRank {
+        nodes: walker.files.len(),
+        internal_edges: ranking.internal_edges,
+        external_references: ranking.external_references,
+        dangling_nodes: ranking.dangling_nodes,
+        iterations: ranking.iterations,
+        damping: code_rank::RANK_DAMPING,
+        truncated: walker.truncated,
+        rank_ms: rank_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        top,
+    };
 
     let mut languages: Vec<CodeMapLanguageCount> = Vec::new();
     for file in &walker.files {
@@ -437,6 +531,7 @@ pub(crate) fn build_code_map(root: &Path, prefix: &str, exported_only: bool) -> 
         skipped: walker.skipped,
         skipped_samples: walker.skipped_samples,
         languages,
+        rank,
         truncated: walker.truncated,
         truncation_reason: walker.truncation_reason,
         generated_at_ms: now_ms(),
@@ -526,6 +621,30 @@ mod tests {
         assert_eq!(exported_names, vec!["alpha", "Box", "size"]);
         assert!(exported.exported_only);
         assert_eq!(exported.prefix, "src");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ranks_mapped_files_by_importance() {
+        let root = temp_root("rank");
+        write(&root, "src/main.rs", "use crate::shared;\nfn main() { println!(\"{}\", shared::value()); }\n");
+        write(&root, "src/lib.rs", "pub mod shared;\nmod util;\n");
+        write(&root, "src/shared.rs", "pub fn value() -> u8 { 1 }\n");
+        write(&root, "src/util.rs", "use crate::shared;\npub fn helper() -> u8 { shared::value() }\n");
+        write(&root, "src/leaf.rs", "pub fn unused() -> u8 { 0 }\n");
+
+        let map = build_code_map(&root, "", false).unwrap();
+        let paths = map.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>();
+        assert_eq!(paths[0], "src/shared.rs", "the most imported module is emitted first");
+        let shared = &map.files[0];
+        assert_eq!(shared.in_degree, 3);
+        assert_eq!(shared.out_degree, 0);
+        assert!(shared.importance > 1.0, "importance is scaled so 1.0 is average");
+        assert_eq!(map.rank.nodes, 5);
+        assert_eq!(map.rank.internal_edges, 4);
+        assert_eq!(map.rank.dangling_nodes, 2);
+        assert_eq!(map.rank.top[0].path, "src/shared.rs");
+        assert!(map.rank.top.len() <= MAX_TOP_ENTRIES);
         let _ = fs::remove_dir_all(&root);
     }
 

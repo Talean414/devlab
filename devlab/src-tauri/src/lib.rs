@@ -4,6 +4,7 @@ mod ai_stream;
 mod audit;
 mod code_map;
 mod code_outline;
+mod code_rank;
 mod credentials;
 mod custom_endpoint;
 mod database;

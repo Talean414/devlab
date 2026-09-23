@@ -3,6 +3,10 @@
 // compiled-in grammars and returns symbol metadata only (per file: kind, name, one-line signature,
 // line range). No file contents cross this boundary; nothing is cached or written. The renderer
 // turns the map into a compact, token-bounded markdown summary for Agent context.
+//
+// Phase 9K: Rust also extracts each file's imports during the same walk and scores the files with
+// PageRank over the resulting dependency graph, so the map arrives ordered most-central-first. The
+// renderer surfaces that ordering in the header, in a "most depended-on" list and per file.
 
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { CodeOutlineSymbol } from "./codeOutline";
@@ -22,6 +26,14 @@ export interface CodeMapFile {
   symbolCount: number;
   truncated: boolean;
   hasSyntaxErrors: boolean;
+  /** PageRank scaled by the file count: 1.0 means "an average file". */
+  importance: number;
+  /** Mapped files that import this file. */
+  inDegree: number;
+  /** Mapped files this file imports. */
+  outDegree: number;
+  /** Specifiers that resolved to nothing inside the workspace (packages, stdlib, aliases). */
+  externalDeps: number;
   symbols: CodeOutlineSymbol[];
 }
 
@@ -54,6 +66,24 @@ export interface CodeMapLanguageCount {
   symbols: number;
 }
 
+export interface CodeRankEntry {
+  path: string;
+  importance: number;
+  inDegree: number;
+}
+
+export interface CodeRank {
+  nodes: number;
+  internalEdges: number;
+  externalReferences: number;
+  danglingNodes: number;
+  iterations: number;
+  damping: number;
+  truncated: boolean;
+  rankMs: number;
+  top: CodeRankEntry[];
+}
+
 export interface CodeMap {
   prefix: string;
   exportedOnly: boolean;
@@ -66,6 +96,7 @@ export interface CodeMap {
   skipped: CodeMapSkipped;
   skippedSamples: string[];
   languages: CodeMapLanguageCount[];
+  rank: CodeRank;
   truncated: boolean;
   truncationReason: string | null;
   generatedAtMs: number;
@@ -91,6 +122,7 @@ export function describeCodeMap(map: CodeMap): string {
     `${map.buildMs} ms`,
   ];
   if (map.exportedOnly) parts.push("exported only");
+  if (map.rank && map.rank.nodes > 1 && map.rank.top.length > 0) parts.push(`top ${map.rank.top[0].path}`);
   if (map.prefix) parts.push(`under ${map.prefix}/`);
   if (map.truncated) parts.push(`truncated (${map.truncationReason ?? "budget"})`);
   return parts.join(" · ");
@@ -126,6 +158,18 @@ export function renderCodeMap(map: CodeMap, maxChars: number): RenderedCodeMap {
     `${map.fileCount} files · ${map.symbolCount} symbols · ${map.languages.map((entry) => `${entry.language} ${entry.files}f/${entry.symbols}s`).join(", ") || "no supported files"}${map.exportedOnly ? " · exported/public symbols only" : ""}`,
   ];
   if (map.truncated) header.push(`Note: the native build stopped early (${map.truncationReason ?? "budget"}); later files are missing.`);
+  const showImportance = (map.rank?.nodes ?? 0) > 1;
+  if (showImportance) {
+    header.push(
+      `Ordered by dependency importance (PageRank over ${map.rank.internalEdges} in-repo import${map.rank.internalEdges === 1 ? "" : "s"}, damping ${map.rank.damping}); 1.0× is an average file.`,
+    );
+    if (map.rank.top.length > 0) {
+      header.push(
+        `Most depended-on: ${map.rank.top.map((entry) => `${entry.path} (${formatImportance(entry.importance)}×, imported by ${entry.inDegree})`).join(", ")}.`,
+      );
+    }
+    if (map.rank.truncated) header.push("Note: the walk stopped early, so these scores may be based on an incomplete dependency graph.");
+  }
   if (map.skippedFiles > 0) {
     header.push(`Skipped ${map.skippedFiles} files (${describeSkipped(map.skipped)}).`);
   }
@@ -138,7 +182,7 @@ export function renderCodeMap(map: CodeMap, maxChars: number): RenderedCodeMap {
   let renderedFiles = 0;
   let renderedSymbols = 0;
   for (const file of map.files) {
-    const block = renderFile(file);
+    const block = renderFile(file, showImportance);
     const size = block.join("\n").length + 1;
     if (used + size > budget) break;
     used += size;
@@ -156,14 +200,26 @@ export function renderCodeMap(map: CodeMap, maxChars: number): RenderedCodeMap {
 }
 
 function omissionFooter(omittedFiles: number): string {
-  return `… ${omittedFiles} more file${omittedFiles === 1 ? "" : "s"} omitted to stay within the context budget. Attach a per-file outline or narrow the prefix for detail.`;
+  return `… ${omittedFiles} more file${omittedFiles === 1 ? "" : "s"} omitted (least central first) to stay within the context budget. Attach a per-file outline or narrow the prefix for detail.`;
 }
 
-function renderFile(file: CodeMapFile): string[] {
+function formatImportance(importance: number): string {
+  return importance.toFixed(importance >= 10 ? 1 : 2);
+}
+
+function describeImportance(file: CodeMapFile): string {
+  const parts: string[] = [`${formatImportance(file.importance)}×`];
+  if (file.inDegree > 0) parts.push(`imported by ${file.inDegree}`);
+  if (file.outDegree > 0) parts.push(`imports ${file.outDegree}`);
+  return parts.join(" · ");
+}
+
+function renderFile(file: CodeMapFile, showImportance = false): string[] {
   const flags: string[] = [];
   if (file.hasSyntaxErrors) flags.push("syntax errors");
   if (file.truncated) flags.push("more symbols not shown");
-  const lines = [`## ${file.path} (${file.language}, ${file.lineCount} lines${flags.length ? `; ${flags.join(", ")}` : ""})`];
+  const importance = showImportance ? `, ${describeImportance(file)}` : "";
+  const lines = [`## ${file.path} (${file.language}, ${file.lineCount} lines${importance}${flags.length ? `; ${flags.join(", ")}` : ""})`];
   if (file.symbols.length === 0) {
     lines.push("- (no top-level symbols)");
     return lines;
