@@ -33,7 +33,7 @@ impl CommandError {
         }
     }
 
-    fn io(action: &str, error: std::io::Error) -> Self {
+    pub(crate) fn io(action: &str, error: std::io::Error) -> Self {
         Self::new("io_error", format!("Could not {action}: {error}"))
     }
 }
