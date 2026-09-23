@@ -44,6 +44,8 @@ export function verificationProfileScore(profile: TestProfile, affectedPaths: st
   }
   const command = profile.command.toLowerCase();
   if (/\b(test|check|typecheck|pytest|cargo|go test|vitest|jest)\b/.test(command)) score += 1;
+  // Non-mutating checks (typecheck, lint, clippy, vet, ruff, mypy) are cheap first gates for code drafts.
+  if (profile.kind === "check" && affectedPaths.some((path) => /\.(ts|tsx|js|jsx|mjs|cjs|rs|go|py)$/i.test(path))) score += 1;
   return score;
 }
 
