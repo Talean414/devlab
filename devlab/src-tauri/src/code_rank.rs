@@ -34,6 +34,15 @@ const RESOLVED_EXTENSIONS: &[&str] = &[
 const BARE_ROOTS: &[&str] = &["", "src", "app", "lib", "packages", "src/app", "src/lib"];
 const GO_SUFFIX_LIMIT: usize = 3;
 
+/// Resolved dependency graph over a set of files. All vectors are parallel to the file list.
+#[derive(Clone, Debug, Default)]
+pub struct Edges {
+    /// Per file: distinct mapped files it imports, sorted for determinism.
+    pub out_edges: Vec<Vec<usize>>,
+    /// Per file: distinct specifiers that did not resolve inside the workspace, sorted.
+    pub external: Vec<Vec<String>>,
+}
+
 /// Result of ranking one code map. All vectors are parallel to the map's file list.
 #[derive(Clone, Debug, Default)]
 pub struct Ranking {
@@ -262,33 +271,23 @@ fn first_quoted(line: &str) -> Option<String> {
     quoted_strings(line).into_iter().next()
 }
 
-/// Builds the dependency graph over `paths` from the raw specifiers collected during the walk and
-/// returns per-file importance and degrees. Unresolved specifiers are counted as external.
-pub fn rank_paths(paths: &[String], raw_imports: &[Vec<String>]) -> Ranking {
+/// Resolves every raw specifier of every file into in-repo edges and external references.
+pub fn build_edges(paths: &[String], raw_imports: &[Vec<String>]) -> Edges {
     let count = paths.len();
-    let mut ranking = Ranking {
-        importance: vec![0.0; count],
-        in_degree: vec![0; count],
-        out_degree: vec![0; count],
-        external_deps: vec![0; count],
-        internal_edges: 0,
-        external_references: 0,
-        dangling_nodes: 0,
-        iterations: 0,
+    let mut edges = Edges {
+        out_edges: Vec::with_capacity(count),
+        external: Vec::with_capacity(count),
     };
     if count == 0 {
-        return ranking;
+        return edges;
     }
     let mut files: HashMap<String, usize> = HashMap::new();
     for (index, path) in paths.iter().enumerate() {
         files.insert(path.clone(), index);
     }
     let dirs = directory_index(paths);
-
-    let mut out_edges: Vec<Vec<usize>> = Vec::with_capacity(count);
-    let mut in_edges: Vec<Vec<usize>> = vec![Vec::new(); count];
     for (index, path) in paths.iter().enumerate() {
-        let language = language_of(path);
+        let language = language_id_for(path);
         let specs = raw_imports.get(index).map(|specs| specs.as_slice()).unwrap_or(&[]);
         let mut targets: HashSet<usize> = HashSet::new();
         let mut external: HashSet<String> = HashSet::new();
@@ -306,14 +305,42 @@ pub fn rank_paths(paths: &[String], raw_imports: &[Vec<String>]) -> Ranking {
         }
         let mut resolved = targets.into_iter().collect::<Vec<usize>>();
         resolved.sort();
-        for target in &resolved {
+        let mut unresolved = external.into_iter().collect::<Vec<String>>();
+        unresolved.sort();
+        edges.out_edges.push(resolved);
+        edges.external.push(unresolved);
+    }
+    edges
+}
+
+/// Builds the dependency graph over `paths` from the raw specifiers collected during the walk and
+/// returns per-file importance and degrees. Unresolved specifiers are counted as external.
+pub fn rank_paths(paths: &[String], raw_imports: &[Vec<String>]) -> Ranking {
+    let count = paths.len();
+    let mut ranking = Ranking {
+        importance: vec![0.0; count],
+        in_degree: vec![0; count],
+        out_degree: vec![0; count],
+        external_deps: vec![0; count],
+        internal_edges: 0,
+        external_references: 0,
+        dangling_nodes: 0,
+        iterations: 0,
+    };
+    if count == 0 {
+        return ranking;
+    }
+    let edges = build_edges(paths, raw_imports);
+    let out_edges = edges.out_edges;
+    let mut in_edges: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for (index, targets) in out_edges.iter().enumerate() {
+        for target in targets {
             in_edges[*target].push(index);
         }
-        ranking.out_degree[index] = resolved.len();
-        ranking.external_deps[index] = external.len();
-        ranking.external_references += external.len();
-        ranking.internal_edges += resolved.len();
-        out_edges.push(resolved);
+        ranking.out_degree[index] = targets.len();
+        ranking.external_deps[index] = edges.external[index].len();
+        ranking.external_references += edges.external[index].len();
+        ranking.internal_edges += targets.len();
     }
     for (index, importers) in in_edges.iter().enumerate() {
         ranking.in_degree[index] = importers.len();
@@ -633,7 +660,7 @@ fn file_preference(name: &str, dir: &str) -> u8 {
     1
 }
 
-fn language_of(path: &str) -> &'static str {
+pub fn language_id_for(path: &str) -> &'static str {
     let (_dir, name) = split_path(path);
     match name.rsplit_once('.') {
         Some((_stem, extension)) => match extension {

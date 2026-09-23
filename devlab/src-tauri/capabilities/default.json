@@ -88,6 +88,7 @@
     "allow-code-outline-languages",
     "allow-code-outline-file",
     "allow-code-map-build",
+    "allow-code-graph-build",
     "allow-test-runner-snapshot",
     "allow-test-runner-run",
     "allow-toolchain-snapshot"

@@ -3,6 +3,7 @@ mod ai_providers;
 mod ai_stream;
 mod audit;
 mod code_map;
+mod code_graph;
 mod code_outline;
 mod code_rank;
 mod credentials;
@@ -24,6 +25,7 @@ use ai_providers::{
     ai_credential_delete, ai_credential_status, ai_credential_store, ai_provider_chat, ai_provider_chat_stream,
 };
 use audit::{agent_audit_list, AgentAuditService};
+use code_graph::code_graph_build;
 use code_map::code_map_build;
 use code_outline::{code_outline_file, code_outline_languages};
 use credentials::{git_credential_delete, git_credential_status, git_credential_store};
@@ -109,6 +111,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
             "ai-streaming",
             "code-outline",
             "code-map",
+            "code-graph",
         ],
     }
 }
@@ -217,6 +220,7 @@ pub fn run() {
             code_outline_languages,
             code_outline_file,
             code_map_build,
+            code_graph_build,
             test_runner_snapshot,
             test_runner_run,
             toolchain_snapshot,
