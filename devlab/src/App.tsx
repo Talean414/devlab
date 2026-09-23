@@ -375,6 +375,7 @@ export default function App() {
         canOutline={hasNativeCapability(runtime, "filesystem") && hasNativeCapability(runtime, "code-outline")}
         canCodeMap={hasNativeCapability(runtime, "filesystem") && hasNativeCapability(runtime, "code-map")}
         canCodeGraph={hasNativeCapability(runtime, "filesystem") && hasNativeCapability(runtime, "code-graph")}
+        canArchitecture={hasNativeCapability(runtime, "filesystem") && hasNativeCapability(runtime, "code-graph") && hasNativeCapability(runtime, "code-map")}
         canShowAudit={hasNativeCapability(runtime, "agent-audit")}
         contextFiles={agentContextFiles}
         setContextFiles={setAgentContextFiles}
@@ -613,7 +614,7 @@ export default function App() {
           style={{ background: `linear-gradient(90deg, ${theme.accent}cc, ${theme.accent2}cc)` }}
         >
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 9L module dependency graph</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="h-3 w-3" /> Phase 9M architecture diagram + summary</span>
             <span className="hidden items-center gap-1.5 md:flex">
               <Zap className="h-3 w-3" />
               {runtime.runtime === "tauri" ? "Native core connected" : "Native tools off"}
