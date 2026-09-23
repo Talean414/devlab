@@ -89,6 +89,7 @@
     "allow-code-outline-file",
     "allow-code-map-build",
     "allow-code-graph-build",
+    "allow-dependency-inventory",
     "allow-test-runner-snapshot",
     "allow-test-runner-run",
     "allow-toolchain-snapshot"

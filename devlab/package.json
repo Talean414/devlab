@@ -1,7 +1,7 @@
 {
   "name": "devlab",
   "private": true,
-  "version": "1.74.0",
+  "version": "1.75.0",
   "description": "A native, AI-assisted developer control plane built with Tauri and React.",
   "type": "module",
   "engines": {

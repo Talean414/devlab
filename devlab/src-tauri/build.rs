@@ -82,6 +82,7 @@ const APP_COMMANDS: &[&str] = &[
     "code_outline_file",
     "code_map_build",
     "code_graph_build",
+    "dependency_inventory",
     "test_runner_snapshot",
     "test_runner_run",
     "toolchain_snapshot",

@@ -9,6 +9,7 @@ mod code_rank;
 mod credentials;
 mod custom_endpoint;
 mod database;
+mod dependencies;
 mod docker;
 mod git;
 mod http;
@@ -33,6 +34,7 @@ use database::{
     database_connections, database_disconnect, database_query, database_schema,
     database_set_write_access, database_sqlite_select, DatabaseService,
 };
+use dependencies::dependency_inventory;
 use docker::{
     docker_create, docker_logs, docker_pull, docker_remove, docker_restart, docker_snapshot,
     docker_start, docker_stop,
@@ -112,6 +114,7 @@ fn get_runtime_info(app: tauri::AppHandle) -> NativeRuntimeInfo {
             "code-outline",
             "code-map",
             "code-graph",
+            "dependency-inventory",
         ],
     }
 }
@@ -221,6 +224,7 @@ pub fn run() {
             code_outline_file,
             code_map_build,
             code_graph_build,
+            dependency_inventory,
             test_runner_snapshot,
             test_runner_run,
             toolchain_snapshot,
