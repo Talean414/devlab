@@ -95,13 +95,20 @@ export class GeminiApiError extends Error {
 
 interface Cooldown {
   until: number;
-  kind: "temporary" | "daily" | "unavailable";
+  kind: "temporary" | "daily" | "unavailable" | "overloaded";
 }
 
 let cachedList: { key: string; ts: number; models: ModelInfo[] } | null = null;
 const CACHE_MS = 60_000;
 const MAX_AUTO_RETRY_WAIT_MS = 8_000;
 const MAX_QUOTA_FALLBACKS = 3;
+// Phase 9J: a 5xx from Google means that model is overloaded or degraded right now, not that the
+// request was wrong. After the single same-model retry, the model is cooled briefly and the next
+// candidate is tried, bounded so DevLab never sweeps the whole catalog.
+const MAX_SERVER_FALLBACKS = 3;
+const SERVER_COOLDOWN_DEFAULT_MS = 60_000;
+const SERVER_COOLDOWN_MIN_MS = 15_000;
+const SERVER_COOLDOWN_MAX_MS = 5 * 60_000;
 const MAX_CONTEXT_CHARS = 80_000;
 
 export function getApiKey(): string {
@@ -193,16 +200,33 @@ function putOnCooldown(model: string, error: GeminiApiError) {
     ? millisecondsUntilPacificMidnight()
     : error.kind === "quota_unavailable"
       ? 60 * 60_000
-      : Math.max(error.retryAfterMs || 30_000, 5_000);
+      : error.kind === "server"
+        ? serverCooldownMs(error.retryAfterMs)
+        : Math.max(error.retryAfterMs || 30_000, 5_000);
   cooldowns[model] = {
     until: Date.now() + wait,
     kind: error.kind === "daily_quota"
       ? "daily"
       : error.kind === "quota_unavailable"
         ? "unavailable"
-        : "temporary",
+        : error.kind === "server"
+          ? "overloaded"
+          : "temporary",
   };
   localStorage.setItem(COOLDOWN_STORAGE, JSON.stringify(cooldowns));
+}
+
+/** Cooldown applied to a model after it answered 5xx twice in a row (bounded, honours retry-after). */
+export function serverCooldownMs(retryAfterMs?: number): number {
+  const requested = typeof retryAfterMs === "number" && retryAfterMs > 0 ? retryAfterMs : SERVER_COOLDOWN_DEFAULT_MS;
+  return Math.min(Math.max(requested, SERVER_COOLDOWN_MIN_MS), SERVER_COOLDOWN_MAX_MS);
+}
+
+/** Final message when every attempted model answered 5xx. Names what was tried so the user can act. */
+export function describeServerFailure(attempted: string[], status: number, retryAfterMs?: number): string {
+  const tried = attempted.length > 0 ? attempted.join(", ") : "the selected model";
+  const wait = retryAfterMs ? ` Google suggests waiting about ${humanWait(retryAfterMs)}.` : "";
+  return `Gemini is temporarily unavailable on Google's side (API ${status}) for ${tried}; DevLab retried each once and then moved on.${wait} Try again shortly, select a different Gemini model in Settings, or route this task to another provider in Settings → Providers → task router.`;
 }
 
 // Google documents daily quota resets at midnight America/Los_Angeles. This
@@ -437,7 +461,9 @@ async function* streamAcrossModels(body: object, route: AiRoute): AsyncGenerator
           ? `Gemini's free daily quota is exhausted. It resets at midnight Pacific time. DevLab will try this model again after the reset.`
           : soonest.cooldown.kind === "unavailable"
             ? "Google reports no free quota for the available models on this project. Choose a Flash-Lite model and check the project's limits in Google AI Studio."
-            : `Gemini is temporarily rate-limiting requests. Try again in about ${wait}.`,
+            : soonest.cooldown.kind === "overloaded"
+              ? `Gemini returned server errors for every available model in the last few minutes; they are cooling down. Try again in about ${wait}, or route this task to another provider in Settings → Providers.`
+              : `Gemini is temporarily rate-limiting requests. Try again in about ${wait}.`,
       );
     }
     throw new Error("No Gemini text-generation model is available for this API key. Choose a supported model in Settings.");
@@ -445,6 +471,7 @@ async function* streamAcrossModels(body: object, route: AiRoute): AsyncGenerator
 
   const attempted: string[] = [];
   const quotaErrors: GeminiApiError[] = [];
+  const serverErrors: GeminiApiError[] = [];
   let lastError: unknown = null;
   let unavailableCount = 0;
 
@@ -462,6 +489,15 @@ async function* streamAcrossModels(body: object, route: AiRoute): AsyncGenerator
         quotaErrors.push(error);
         putOnCooldown(model, error);
         if (quotaErrors.length >= MAX_QUOTA_FALLBACKS) break;
+        continue;
+      }
+
+      // Phase 9J: 5xx after the same-model retry means this model is overloaded right now.
+      // Cool it briefly and try the next candidate instead of surfacing the error immediately.
+      if (error.kind === "server") {
+        serverErrors.push(error);
+        putOnCooldown(model, error);
+        if (serverErrors.length >= MAX_SERVER_FALLBACKS) break;
         continue;
       }
 
@@ -494,6 +530,22 @@ async function* streamAcrossModels(body: object, route: AiRoute): AsyncGenerator
         : daily
           ? `Gemini's free daily quota is exhausted. DevLab automatically tried ${tried}. Daily quotas reset at midnight Pacific time. You can wait for the reset or select another available Flash-Lite model in Settings. API keys from the same Google Cloud project share one quota.`
           : `Gemini is temporarily rate-limiting this project after DevLab tried ${tried}. Try again${retryAfterMs ? ` in about ${humanWait(retryAfterMs)}` : " in a minute"}. If this keeps happening, select a Flash-Lite model in Settings.`,
+    });
+  }
+
+  if (serverErrors.length > 0) {
+    const last = serverErrors[serverErrors.length - 1];
+    const retryValues = serverErrors
+      .map((error) => error.retryAfterMs)
+      .filter((value): value is number => typeof value === "number" && value > 0);
+    const serverAttempts = serverErrors.map((error) => error.model);
+    throw new GeminiApiError({
+      status: last.status,
+      model: last.model,
+      kind: "server",
+      retryAfterMs: retryValues.length ? Math.min(...retryValues) : undefined,
+      rawMessage: last.rawMessage,
+      message: describeServerFailure(serverAttempts, last.status, retryValues.length ? Math.min(...retryValues) : undefined),
     });
   }
 
@@ -698,7 +750,7 @@ function friendlyApiMessage(status: number, kind: ErrorKind, model: string, retr
   if (kind === "authentication") return "Google rejected this API key. Replace it in Settings → Providers.";
   if (kind === "permission") return `${model} is not enabled for this Google project or region.`;
   if (kind === "not_found") return `${model} is no longer available. DevLab is trying a supported model.`;
-  if (kind === "server") return `Gemini is temporarily unavailable (API ${status}). DevLab retried the request; please try again shortly.`;
+  if (kind === "server") return `Google returned API ${status} for ${model} (overloaded or degraded). DevLab retried once and is trying another model.`;
   return `Gemini rejected the request (API ${status}) for ${model}. Check the selected model and generation settings.`;
 }
 
