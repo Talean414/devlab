@@ -8,6 +8,7 @@ import type { ModelInfo } from "../lib/gemini";
 import {
   loadSettings, saveSettings, DEFAULT_SETTINGS, THEMES, ALL_PANELS,
   type DevLabSettings, type ThemeId, type Autonomy, type Density, type AiProviderId, type ModelRoutingMode,
+  type SessionRecoveryPreference,
 } from "../lib/settings";
 import { starterBlueprintInstruction } from "../lib/generationBlueprints";
 import { componentScaffoldInstruction, designSystemInstruction, qualityChecklistInstruction, summarizeGenerationGuidance } from "../lib/generationGuidance";
@@ -474,8 +475,32 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                   on={s.showStatusBar} onChange={(v) => update({ showStatusBar: v })} />
                 <Row label="Show sidebar tooltips" desc="Hover labels and keyboard shortcuts."
                   on={s.showTooltips} onChange={(v) => update({ showTooltips: v })} />
-                <Row label="Open Home on start" desc="Otherwise DevLab restores the AI Agent."
+                <Row label="Open Home on start" desc="Otherwise DevLab goes straight to the AI Agent."
                   on={s.showWelcomeOnStart} onChange={(v) => update({ showWelcomeOnStart: v })} />
+                <div className="mt-4 border-t border-white/5 pt-3">
+                  <p className="text-[13px] font-medium text-zinc-200">When saved session data is found</p>
+                  <p className="mt-0.5 text-[11.5px] leading-relaxed text-zinc-500">
+                    Set automatically when you tick Remember my choice on the recovery prompt; change it here any time.
+                  </p>
+                  <div className="mt-2.5 space-y-2">
+                    {([
+                      { id: "ask",      t: "Always ask",                d: "Show the recovery prompt and choose each time." },
+                      { id: "continue", t: "Resume automatically",      d: "Restore the previous panel, conversation and builder progress without asking." },
+                      { id: "discard",  t: "Start fresh automatically", d: "Clear saved progress without asking." },
+                    ] as { id: SessionRecoveryPreference; t: string; d: string }[]).map((o) => (
+                      <button key={o.id} onClick={() => update({ recoveryPreference: o.id })}
+                        className={`flex w-full items-start gap-3 rounded-xl border p-3 text-left transition ${
+                          s.recoveryPreference === o.id ? "border-cyan-500/50 bg-cyan-500/10" : "border-white/10 hover:bg-white/5"
+                        }`}>
+                        <span className={`mt-1 h-3 w-3 shrink-0 rounded-full border-2 ${s.recoveryPreference === o.id ? "border-cyan-400 bg-cyan-400" : "border-zinc-600"}`} />
+                        <span>
+                          <span className="block text-[13px] font-medium text-zinc-100">{o.t}</span>
+                          <span className="block text-[12px] text-zinc-500">{o.d}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </Card>
             </>
           )}

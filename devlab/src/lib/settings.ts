@@ -40,6 +40,9 @@ export type TaskProviderOverrides = Partial<Record<
   TaskProviderOverride
 >>;
 
+/** What DevLab does when saved session-recovery data is found at launch. */
+export type SessionRecoveryPreference = "ask" | "continue" | "discard";
+
 export interface DevLabSettings {
   theme: ThemeId;
   density: Density;
@@ -53,6 +56,8 @@ export interface DevLabSettings {
   allowGitPush: boolean;
   allowDeploy: boolean;
   showWelcomeOnStart: boolean;
+  /** Launch behavior when previous-session recovery data exists. */
+  recoveryPreference: SessionRecoveryPreference;
   showStatusBar: boolean;
   showTooltips: boolean;
   fontSize: number;
@@ -109,7 +114,8 @@ export const DEFAULT_SETTINGS: DevLabSettings = {
   allowGitCommit: true,
   allowGitPush: false,
   allowDeploy: false,
-  showWelcomeOnStart: true,
+  showWelcomeOnStart: false,
+  recoveryPreference: "ask",
   showStatusBar: true,
   showTooltips: true,
   fontSize: 14,
@@ -130,12 +136,25 @@ export const DEFAULT_SETTINGS: DevLabSettings = {
 };
 
 const KEY = "devlab.settings.v1";
+// Written into the stored blob once one-time settings migrations have run, so each fires exactly once.
+const MIGRATION_KEY = "settingsMigration";
+const CURRENT_MIGRATION = 2;
+
+/** Pure, storage-free migration of a previously persisted settings blob toward current defaults. */
+export function migrateSettings(parsed: Record<string, unknown>): Record<string, unknown> {
+  const done = parsed[MIGRATION_KEY];
+  if (typeof done === "number" && done >= CURRENT_MIGRATION) return parsed;
+  // v1 -> v2: DevLab no longer forces the Home page on every launch for existing installs.
+  // Anyone who wants it re-enables it in Settings > Interface ("Open Home on start").
+  return { ...parsed, showWelcomeOnStart: false, [MIGRATION_KEY]: CURRENT_MIGRATION };
+}
 
 export function loadSettings(): DevLabSettings {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    const migrated = migrateSettings(JSON.parse(raw) as Record<string, unknown>);
+    return { ...DEFAULT_SETTINGS, ...migrated } as DevLabSettings;
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
