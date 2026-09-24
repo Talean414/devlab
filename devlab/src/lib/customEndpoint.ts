@@ -37,6 +37,27 @@ export interface CustomChatResponse {
   elapsedMs: number;
 }
 
+export interface CustomEndpointModel {
+  id: string;
+  ownedBy: string;
+  created: number;
+}
+
+// Phase 9V — read-only health check result for a custom OpenAI-compatible server.
+export interface CustomEndpointHealth {
+  profile: EndpointProfile;
+  /** HTTP status the server returned for GET {id}/models. */
+  httpStatus: number;
+  /** False when the server is reachable but does not expose GET /models (HTTP 404/405). */
+  modelsListed: boolean;
+  models: CustomEndpointModel[];
+  /** True when the server lists more models than the cap kept. */
+  modelsTruncated: boolean;
+  /** True when the profile-scoped bearer token was attached. */
+  authenticated: boolean;
+  elapsedMs: number;
+}
+
 export function customAdapterAvailable(): boolean {
   return isTauri();
 }
@@ -56,6 +77,38 @@ export function customCredentialStore(endpoint: string, key: string): Promise<Cu
 
 export function customCredentialDelete(endpoint: string): Promise<CustomCredentialStatus> {
   return invoke<CustomCredentialStatus>("custom_credential_delete", { endpoint });
+}
+
+/**
+ * Phase 9V — Rust calls GET <base>/models through the bounded client with the same host
+ * policy and stored token as the chat path. Read-only: no model is loaded, pulled or
+ * prompted, and nothing is written.
+ */
+export function customEndpointHealth(endpoint: string): Promise<CustomEndpointHealth> {
+  return invoke<CustomEndpointHealth>("custom_endpoint_health", { endpoint });
+}
+
+/** Pure notice text for a health result, so the Settings UI stays declarative and testable. */
+export function describeCustomHealth(
+  health: CustomEndpointHealth,
+  configuredModel: string,
+): { kind: "ok" | "warn"; text: string } {
+  const id = health.profile.id;
+  if (!health.modelsListed) {
+    return {
+      kind: "warn",
+      text: `Reached ${id}, but it did not expose GET ${id}/models (HTTP ${health.httpStatus}). The chat completions path may still work — only the model list is unavailable.`,
+    };
+  }
+  const base =
+    health.models.length === 0
+      ? `Reached ${id} in ${health.elapsedMs} ms (HTTP ${health.httpStatus}), but it listed no models; enter the model id manually.`
+      : `Listed ${health.models.length}${health.modelsTruncated ? "+" : ""} model${health.models.length === 1 ? "" : "s"} at ${id} in ${health.elapsedMs} ms (HTTP ${health.httpStatus}).`;
+  const wanted = configuredModel.trim();
+  if (wanted !== "" && !health.models.some((model) => model.id === wanted)) {
+    return { kind: "ok", text: `${base} Your configured model id “${wanted}” is not in this list (some gateways only list a subset).` };
+  }
+  return { kind: "ok", text: base };
 }
 
 export function customEndpointChat(input: {

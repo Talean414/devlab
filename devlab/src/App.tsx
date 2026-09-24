@@ -4,7 +4,10 @@ import { MAX_HANDOFF_HISTORY } from "./lib/taskTimeline";
 import { refreshCredentialCache } from "./lib/aiProviders";
 import type { AgentContextFile, BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, ChatMessage, DraftPolicyGateSummary, OpenGeneratedDrafts, ReviewedDraftApplyOutcome, VerificationHandoffRequest, VerificationRunOutcome, VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
-import { loadDeploy, loadGit, loadSettings, applyTheme, getTheme, type DevLabSettings } from "./lib/settings";
+import {
+  loadDeploy, loadGit, loadSettings, saveSettings, applyTheme, getTheme, resumeViewFor, effectiveVisiblePanels,
+  type DevLabSettings, type SessionRecoveryPreference,
+} from "./lib/settings";
 import { resolveAiRoute } from "./lib/modelRouting";
 import {
   buildSessionRecovery, clearSessionRecovery, loadSessionRecovery, saveSessionRecovery,
@@ -138,7 +141,9 @@ export default function App() {
   const [verificationHandoffHistory, setVerificationHandoffHistory] = useState<VerificationHandoffRequest[]>([]);
   // Session-only, path-only record of the most recent draft policy evaluation at the staging gate.
   const [lastDraftPolicyEvaluation, setLastDraftPolicyEvaluation] = useState<DraftPolicyGateSummary | null>(null);
-  const [pendingRecovery, setPendingRecovery] = useState<SessionRecoverySnapshot | null>(() => loadSessionRecovery());
+  const [pendingRecovery, setPendingRecovery] = useState<SessionRecoverySnapshot | null>(() =>
+    loadSettings().recoveryPreference === "ask" ? loadSessionRecovery() : null,
+  );
   const [recoveryReady, setRecoveryReady] = useState(() => !loadSessionRecovery());
 
   const aiRoute = resolveAiRoute("chat", {
@@ -147,6 +152,7 @@ export default function App() {
   }, settings);
   const hasKey = aiRoute.status === "active" && (aiRoute.provider === "ollama" || aiRoute.provider === "custom" || !!getApiKey());
   const theme = getTheme(settings.theme);
+  const visiblePanels = effectiveVisiblePanels(settings);
 
   function navigate(next: ViewId) {
     if (
@@ -229,7 +235,8 @@ export default function App() {
         "5": "git", "6": "deploy", ",": "settings",
       };
       const t = map[e.key];
-      if (t) { e.preventDefault(); navigate(t); }
+      // Shortcuts never open a panel the current interface mode hides; settings stays one keystroke away.
+      if (t && (t === "settings" || effectiveVisiblePanels(loadSettings()).includes(t))) { e.preventDefault(); navigate(t); }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -301,7 +308,7 @@ export default function App() {
     setBuilderBuiltFiles(snapshot.builder?.builtFiles ?? []);
     setBuilderStaging(false);
     setBuilderStageNotice(snapshot.builder?.stageNotice ?? "");
-    setView(settings.visiblePanels.includes(snapshot.view) ? snapshot.view : "agent");
+    setView(resumeViewFor(snapshot.view, visiblePanels));
     finishRecoveryPrompt();
   }
 
@@ -312,7 +319,26 @@ export default function App() {
     if (next !== "current") setView(next);
   }
 
-  const nav = NAV.filter((n) => settings.visiblePanels.includes(n.id));
+  function rememberRecoveryPreference(pref: SessionRecoveryPreference) {
+    const next = { ...loadSettings(), recoveryPreference: pref };
+    saveSettings(next);
+    setSettings(next);
+  }
+
+  // Applies a remembered recovery choice once at launch without prompting ("Remember my choice"
+  // on the recovery prompt, changeable in Settings → Interface). recoveryReady stays false until
+  // the stored snapshot is applied or cleared so the fresh-snapshot effect cannot clobber it first.
+  useEffect(() => {
+    const pref = loadSettings().recoveryPreference;
+    if (pref === "ask") return;
+    const snapshot = loadSessionRecovery();
+    if (!snapshot) return;
+    if (pref === "continue") continueRecoveredSession(snapshot);
+    else startFresh("current");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const nav = NAV.filter((n) => visiblePanels.includes(n.id));
 
   const openGeneratedSource: OpenGeneratedDrafts = async (files, summary = "Generated reviewed drafts") => {
     if (files.length === 0) return false;
@@ -631,10 +657,22 @@ export default function App() {
       {pendingRecovery && (
         <SessionRecoveryPrompt
           snapshot={pendingRecovery}
-          onContinue={() => continueRecoveredSession(pendingRecovery)}
-          onNewProject={() => startFresh("builder")}
-          onOpenWorkspace={() => startFresh("editor")}
-          onDismiss={() => startFresh("current")}
+          onContinue={(remember) => {
+            if (remember) rememberRecoveryPreference("continue");
+            continueRecoveredSession(pendingRecovery);
+          }}
+          onNewProject={(remember) => {
+            if (remember) rememberRecoveryPreference("discard");
+            startFresh("builder");
+          }}
+          onOpenWorkspace={(remember) => {
+            if (remember) rememberRecoveryPreference("discard");
+            startFresh("editor");
+          }}
+          onDismiss={(remember) => {
+            if (remember) rememberRecoveryPreference("discard");
+            startFresh("current");
+          }}
         />
       )}
 
@@ -672,11 +710,12 @@ function SessionRecoveryPrompt({
   onDismiss,
 }: {
   snapshot: SessionRecoverySnapshot;
-  onContinue: () => void;
-  onNewProject: () => void;
-  onOpenWorkspace: () => void;
-  onDismiss: () => void;
+  onContinue: (remember: boolean) => void;
+  onNewProject: (remember: boolean) => void;
+  onOpenWorkspace: (remember: boolean) => void;
+  onDismiss: (remember: boolean) => void;
 }) {
+  const [remember, setRemember] = useState(false);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm">
       <div className="w-full max-w-lg rounded-2xl border border-white/10 bg-[#0d1017] p-6 shadow-2xl shadow-black/40 ring-soft">
@@ -698,27 +737,37 @@ function SessionRecoveryPrompt({
           model replies and generated draft file contents. Choose Start fresh if that data should be cleared.
         </div>
 
+        <label className="mt-4 flex cursor-pointer items-center gap-2.5 text-[12px] text-zinc-400">
+          <input
+            type="checkbox"
+            checked={remember}
+            onChange={(event) => setRemember(event.target.checked)}
+            className="h-3.5 w-3.5 shrink-0 accent-cyan-500"
+          />
+          <span>Remember my choice — apply it automatically next time. You can change it in Settings → Interface.</span>
+        </label>
+
         <div className="mt-5 grid gap-2 sm:grid-cols-2">
           <button
-            onClick={onContinue}
+            onClick={() => onContinue(remember)}
             className="rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 px-4 py-2.5 text-[13px] font-semibold text-white shadow-lg shadow-cyan-950/30 hover:from-cyan-400 hover:to-blue-500"
           >
             Continue where I left off
           </button>
           <button
-            onClick={onNewProject}
+            onClick={() => onNewProject(remember)}
             className="rounded-xl border border-violet-500/30 bg-violet-500/10 px-4 py-2.5 text-[13px] font-semibold text-violet-100 hover:bg-violet-500/20"
           >
             Start a new project
           </button>
           <button
-            onClick={onOpenWorkspace}
+            onClick={() => onOpenWorkspace(remember)}
             className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-2.5 text-[13px] font-semibold text-zinc-200 hover:bg-white/[0.06]"
           >
             Open a workspace
           </button>
           <button
-            onClick={onDismiss}
+            onClick={() => onDismiss(remember)}
             className="rounded-xl border border-rose-500/25 bg-rose-500/10 px-4 py-2.5 text-[13px] font-semibold text-rose-100 hover:bg-rose-500/20"
           >
             Clear saved progress

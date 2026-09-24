@@ -8,6 +8,7 @@ import type { ModelInfo } from "../lib/gemini";
 import {
   loadSettings, saveSettings, DEFAULT_SETTINGS, THEMES, ALL_PANELS,
   type DevLabSettings, type ThemeId, type Autonomy, type Density, type AiProviderId, type ModelRoutingMode,
+  type SessionRecoveryPreference, type UiMode,
 } from "../lib/settings";
 import { starterBlueprintInstruction } from "../lib/generationBlueprints";
 import { componentScaffoldInstruction, designSystemInstruction, qualityChecklistInstruction, summarizeGenerationGuidance } from "../lib/generationGuidance";
@@ -25,8 +26,8 @@ import {
   sameOllamaModel, type OllamaHealthResponse, type OllamaModelInfo,
 } from "../lib/ollama";
 import {
-  customAdapterAvailable, customCredentialDelete, customCredentialStatus, customCredentialStore, describeCustomEndpoint,
-  type CustomCredentialStatus,
+  customAdapterAvailable, customCredentialDelete, customCredentialStatus, customCredentialStore, customEndpointHealth,
+  describeCustomEndpoint, describeCustomHealth, type CustomCredentialStatus, type CustomEndpointHealth,
 } from "../lib/customEndpoint";
 import {
   AI_PROVIDER_PROFILES,
@@ -38,16 +39,21 @@ import {
   type AiTaskKind,
 } from "../lib/modelRouting";
 import {
+  recommendTaskClasses,
+  summarizeTaskRecommendations,
+  type TaskClassRecommendation,
+} from "../lib/taskRecommendations";
+import {
   Eye, EyeOff, Save, RefreshCw, Trash2, Shield, KeyRound, CheckCircle2,
   Sparkles, Palette, LayoutGrid, Bot, SlidersHorizontal, RotateCcw, Cpu, ExternalLink, HeartPulse,
 } from "lucide-react";
 
 const TABS = [
-  { id: "appearance", label: "Appearance", Icon: Palette },
-  { id: "layout",     label: "Layout",     Icon: LayoutGrid },
-  { id: "agent",      label: "Agent",      Icon: Bot },
-  { id: "provider",   label: "Providers",  Icon: Cpu },
-  { id: "advanced",   label: "Advanced",   Icon: SlidersHorizontal },
+  { id: "appearance", label: "Appearance", Icon: Palette, basic: true },
+  { id: "layout",     label: "Layout",     Icon: LayoutGrid, basic: true },
+  { id: "agent",      label: "Agent",      Icon: Bot, basic: false },
+  { id: "provider",   label: "Providers",  Icon: Cpu, basic: true },
+  { id: "advanced",   label: "Advanced",   Icon: SlidersHorizontal, basic: false },
 ] as const;
 
 export function SettingsPanel({ onKeyChange, onSettingsChange }: {
@@ -56,6 +62,9 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
 }) {
   const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("appearance");
   const [s, setS] = useState<DevLabSettings>(loadSettings);
+  const advancedMode = s.uiMode === "advanced";
+  const visibleTabs = TABS.filter((t) => advancedMode || t.basic);
+  const activeTab = visibleTabs.some((t) => t.id === tab) ? tab : "appearance";
   const [key, setKey] = useState(getApiKey());
   const [model, setModelState] = useState(getModel());
   const [show, setShow] = useState(false);
@@ -138,10 +147,16 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
   const [customStatus, setCustomStatus] = useState<CustomCredentialStatus | null>(null);
   const [customBusy, setCustomBusy] = useState(false);
   const [customNotice, setCustomNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  // Phase 9V: read-only health check for the custom server (model list); memory only.
+  const [customHealth, setCustomHealth] = useState<CustomEndpointHealth | null>(null);
+  const [customHealthBusy, setCustomHealthBusy] = useState(false);
+  const [customHealthNotice, setCustomHealthNotice] = useState<{ kind: "ok" | "warn" | "error"; text: string } | null>(null);
 
   useEffect(() => {
     setCustomStatus(null);
     setCustomNotice(null);
+    setCustomHealth(null);
+    setCustomHealthNotice(null);
     if (s.aiProvider !== "custom" || !customAdapterAvailable() || !customEndpointCheck.ok) return;
     let cancelled = false;
     const handle = window.setTimeout(() => {
@@ -182,6 +197,31 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
       setCustomNotice({ kind: "error", text: nativeErrorText(error) });
     } finally {
       setCustomBusy(false);
+    }
+  }
+
+  // Phase 9V: read-only GET <base>/models through the native adapter; metadata only,
+  // nothing is loaded, pulled, prompted or written.
+  async function checkCustomHealth() {
+    setCustomHealthNotice(null);
+    setCustomHealth(null);
+    if (!customAdapterAvailable()) {
+      setCustomHealthNotice({ kind: "error", text: "The native custom-endpoint adapter is only available inside the DevLab desktop app, not the web preview." });
+      return;
+    }
+    if (!customEndpointCheck.ok) {
+      setCustomHealthNotice({ kind: "error", text: `Endpoint refused before any request: ${customEndpointCheck.reason}` });
+      return;
+    }
+    setCustomHealthBusy(true);
+    try {
+      const result = await customEndpointHealth(s.customEndpoint);
+      setCustomHealth(result);
+      setCustomHealthNotice(describeCustomHealth(result, s.customModel));
+    } catch (error) {
+      setCustomHealthNotice({ kind: "error", text: nativeErrorText(error) });
+    } finally {
+      setCustomHealthBusy(false);
     }
   }
 
@@ -292,6 +332,16 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
     selectedModel: model,
     pickedModel: autoPicked,
   }, s));
+  // Phase 9U — metadata-only suggestions per task class, derived from the Phase 9P
+  // Ollama health response plus the current routing. Display only: nothing here
+  // switches a provider or model; applying is always the explicit per-task control above.
+  const currentOllamaModelByTask = routePreview.reduce<Partial<Record<AiTaskKind, string>>>((current, route) => {
+    if (route.provider === "ollama") current[route.task] = route.model;
+    return current;
+  }, {});
+  const taskRecommendations: TaskClassRecommendation[] | null = ollamaHealth
+    ? recommendTaskClasses(ollamaHealth, AI_TASK_PROFILES, currentOllamaModelByTask)
+    : null;
   const guidancePreview = routePreview.map((route) => ({
     route,
     guardrail: generationGuardrailInstruction(route.task),
@@ -337,7 +387,7 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
       <PanelHeader title="Settings" subtitle="Make DevLab exactly as big or as small as you need" />
 
       <div className="flex gap-5 border-b border-white/5 bg-[#0d1017]/40 px-6 text-xs">
-        {TABS.map((t) => (
+        {visibleTabs.map((t) => (
           <button key={t.id} onClick={() => setTab(t.id)}
             className={`-mb-px inline-flex items-center gap-1.5 border-b-2 px-1 py-3 font-medium ${
               tab === t.id ? "border-cyan-400 text-white" : "border-transparent text-zinc-500 hover:text-zinc-300"
@@ -351,7 +401,7 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
         <div className="mx-auto max-w-2xl space-y-6">
 
           {/* ── Appearance ── */}
-          {tab === "appearance" && (
+          {activeTab === "appearance" && (
             <>
               <Card title="Theme" desc="Re-skins the entire lab, including the code editor.">
                 <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
@@ -393,11 +443,31 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
           )}
 
           {/* ── Layout ── */}
-          {tab === "layout" && (
+          {activeTab === "layout" && (
             <>
+              <Card title="Interface mode" desc="How much of DevLab is on screen. Switch any time — nothing is uninstalled or lost.">
+                <div className="space-y-2">
+                  {([
+                    { id: "basic",    t: "Basic",    d: "The essentials: agent, editor, builder, git, terminal, preview and project setup. Advanced panels and metadata views stay hidden until you switch." },
+                    { id: "advanced", t: "Advanced", d: "The full DevLab surface: every panel, the task router, draft policies and builder/audit metadata." },
+                  ] as { id: UiMode; t: string; d: string }[]).map((o) => (
+                    <button key={o.id} onClick={() => update({ uiMode: o.id })}
+                      className={`flex w-full items-start gap-3 rounded-xl border p-3 text-left transition ${
+                        s.uiMode === o.id ? "border-cyan-500/50 bg-cyan-500/10" : "border-white/10 hover:bg-white/5"
+                      }`}>
+                      <span className={`mt-1 h-3 w-3 shrink-0 rounded-full border-2 ${s.uiMode === o.id ? "border-cyan-400 bg-cyan-400" : "border-zinc-600"}`} />
+                      <span>
+                        <span className="block text-[13px] font-medium text-zinc-100">{o.t}</span>
+                        <span className="block text-[12px] text-zinc-500">{o.d}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </Card>
+
               <Card title="Visible panels" desc="Hide anything you don't use — the sidebar shrinks to match.">
                 <div className="space-y-1">
-                  {ALL_PANELS.map((p) => {
+                  {ALL_PANELS.filter((p) => advancedMode || p.basic).map((p) => {
                     const on = s.visiblePanels.includes(p.id);
                     return (
                       <div key={p.id} className="flex items-center justify-between rounded-lg px-2 py-2 hover:bg-white/[0.03]">
@@ -415,9 +485,14 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                     );
                   })}
                 </div>
+                {!advancedMode && (
+                  <p className="mt-3 rounded-lg border border-cyan-500/20 bg-cyan-500/[0.06] px-3 py-2 text-[11.5px] leading-relaxed text-cyan-100/70">
+                    Basic mode shows the essentials only. Switch to Advanced above for Canvas, Reverse Engineer, Live Share, CI / CD, Deploy, Database, API Client, Containers and Toolchain.
+                  </p>
+                )}
                 <div className="mt-3 flex gap-2">
-                  <button onClick={() => update({ visiblePanels: ALL_PANELS.map((p) => p.id) })}
-                    className="rounded-lg border border-white/10 px-3 py-1.5 text-[12px] text-zinc-300 hover:bg-white/5">Show all</button>
+                  <button onClick={() => update({ visiblePanels: ALL_PANELS.filter((p) => advancedMode || p.basic).map((p) => p.id) })}
+                    className="rounded-lg border border-white/10 px-3 py-1.5 text-[12px] text-zinc-300 hover:bg-white/5">{advancedMode ? "Show all" : "Show all basic panels"}</button>
                   <button onClick={() => update({ visiblePanels: ALL_PANELS.filter((p) => p.core).map((p) => p.id) })}
                     className="rounded-lg border border-white/10 px-3 py-1.5 text-[12px] text-zinc-300 hover:bg-white/5">Minimal</button>
                 </div>
@@ -428,14 +503,38 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                   on={s.showStatusBar} onChange={(v) => update({ showStatusBar: v })} />
                 <Row label="Show sidebar tooltips" desc="Hover labels and keyboard shortcuts."
                   on={s.showTooltips} onChange={(v) => update({ showTooltips: v })} />
-                <Row label="Open Home on start" desc="Otherwise DevLab restores the AI Agent."
+                <Row label="Open Home on start" desc="Otherwise DevLab goes straight to the AI Agent."
                   on={s.showWelcomeOnStart} onChange={(v) => update({ showWelcomeOnStart: v })} />
+                <div className="mt-4 border-t border-white/5 pt-3">
+                  <p className="text-[13px] font-medium text-zinc-200">When saved session data is found</p>
+                  <p className="mt-0.5 text-[11.5px] leading-relaxed text-zinc-500">
+                    Set automatically when you tick Remember my choice on the recovery prompt; change it here any time.
+                  </p>
+                  <div className="mt-2.5 space-y-2">
+                    {([
+                      { id: "ask",      t: "Always ask",                d: "Show the recovery prompt and choose each time." },
+                      { id: "continue", t: "Resume automatically",      d: "Restore the previous panel, conversation and builder progress without asking." },
+                      { id: "discard",  t: "Start fresh automatically", d: "Clear saved progress without asking." },
+                    ] as { id: SessionRecoveryPreference; t: string; d: string }[]).map((o) => (
+                      <button key={o.id} onClick={() => update({ recoveryPreference: o.id })}
+                        className={`flex w-full items-start gap-3 rounded-xl border p-3 text-left transition ${
+                          s.recoveryPreference === o.id ? "border-cyan-500/50 bg-cyan-500/10" : "border-white/10 hover:bg-white/5"
+                        }`}>
+                        <span className={`mt-1 h-3 w-3 shrink-0 rounded-full border-2 ${s.recoveryPreference === o.id ? "border-cyan-400 bg-cyan-400" : "border-zinc-600"}`} />
+                        <span>
+                          <span className="block text-[13px] font-medium text-zinc-100">{o.t}</span>
+                          <span className="block text-[12px] text-zinc-500">{o.d}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </Card>
             </>
           )}
 
           {/* ── Agent ── */}
-          {tab === "agent" && (
+          {activeTab === "agent" && (
             <>
               <Card title="Autonomy level" desc="How much the agent may do without asking you first.">
                 <div className="space-y-2">
@@ -522,7 +621,7 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
           )}
 
           {/* ── Providers ── */}
-          {tab === "provider" && (
+          {activeTab === "provider" && (
             <>
               <div className="flex gap-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] p-4 text-[13px] text-amber-200/90">
                 <Shield className="mt-0.5 h-4 w-4 shrink-0" />
@@ -799,6 +898,42 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                     {customEndpointCheck.ok && !customEndpointCheck.tls && (
                       <p className="text-[11px] text-zinc-500">Loopback http:// servers run without a token: Rust refuses to attach bearer tokens in clear text.</p>
                     )}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => { void checkCustomHealth(); }}
+                        disabled={customHealthBusy}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-400/20 disabled:opacity-40"
+                      >
+                        <HeartPulse className={`h-3.5 w-3.5 ${customHealthBusy ? "animate-pulse" : ""}`} /> Check server health
+                      </button>
+                      <span className="text-[11px] text-zinc-500">Rust calls GET {"<base>/models"} through the same host policy and stored token; the WebView never opens the connection. Nothing is loaded, pulled or prompted.</span>
+                    </div>
+                    {customHealthNotice && (
+                      <div className={`text-[11.5px] ${customHealthNotice.kind === "ok" ? "text-emerald-300" : customHealthNotice.kind === "warn" ? "text-amber-300" : "text-rose-300"}`}>{customHealthNotice.text}</div>
+                    )}
+                    {customHealth?.modelsListed && customHealth.models.length > 0 && (
+                      <ul className="grid gap-1 sm:grid-cols-2">
+                        {customHealth.models.map((m) => (
+                          <li key={m.id}>
+                            <button
+                              type="button"
+                              onClick={() => update({ customModel: m.id })}
+                              title={s.customModel === m.id ? "Current custom endpoint model id" : `Set ${m.id} as the custom endpoint model id`}
+                              className={`w-full rounded-lg border px-2.5 py-1.5 text-left text-[11.5px] ${s.customModel === m.id ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-100" : "border-white/10 bg-white/[0.02] text-zinc-300 hover:bg-white/5"}`}
+                            >
+                              <span className="font-mono font-semibold">{m.id}</span>
+                              <span className="ml-2 text-[10.5px] text-zinc-500">
+                                {[m.ownedBy, m.created > 0 ? `since ${new Date(m.created * 1000).toLocaleDateString()}` : ""].filter(Boolean).join(" · ")}
+                              </span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {customHealth?.modelsListed && customHealth.modelsTruncated && (
+                      <div className="text-[10.5px] text-amber-300">Only the first {customHealth.models.length} models are shown; the server lists more.</div>
+                    )}
                     {customNotice && <div className={`text-[11px] ${customNotice.kind === "ok" ? "text-emerald-300/80" : "text-rose-300"}`}>{customNotice.text}</div>}
                     <p className="text-[11px] text-zinc-500">
                       Chat, planning, coding, architecture, migration and repair go through Rust to <code>{"<base>"}/chat/completions</code> with a 120 s non-streamed bound and the OpenAI response shape. Self-signed certificates are not trusted; vision stays on Gemini; there is no fallback to Gemini.
@@ -876,6 +1011,47 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                       </div>
                     );
                   })}
+                </div>
+                <div className="mt-3 rounded-xl border border-violet-500/20 bg-violet-500/[0.04] p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-violet-200">
+                      <Sparkles className="h-3.5 w-3.5 text-violet-300" /> Local model suggestions
+                    </span>
+                    <span className="font-mono text-[10.5px] text-zinc-600">
+                      {taskRecommendations ? summarizeTaskRecommendations(taskRecommendations) : "needs a model health check"}
+                    </span>
+                  </div>
+                  {taskRecommendations ? (
+                    <>
+                      <div className="mt-2 space-y-1">
+                        {taskRecommendations.map((rec) => (
+                          <div key={rec.task} className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 rounded-lg bg-black/20 px-2.5 py-1.5 text-[11px]">
+                            <span className="w-40 shrink-0 font-semibold text-zinc-300">{rec.taskLabel}</span>
+                            <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9.5px] font-semibold ${rec.provider === "ollama" ? "bg-violet-400/15 text-violet-200" : "bg-cyan-400/15 text-cyan-200"}`}>
+                              {rec.provider === "ollama" ? "Ollama (local)" : "Gemini"}
+                            </span>
+                            <span
+                              className="min-w-0 flex-1 text-zinc-400"
+                              title={rec.models.map((m, index) => `${index + 1}. ${m.model} · ${m.reasons.join(" · ")}${m.matchesCurrent ? " · current" : ""}`).join("\n") || rec.headline}
+                            >
+                              {rec.headline}
+                              {rec.models.length > 1 && <span className="text-zinc-600"> +{rec.models.length - 1} more (hover)</span>}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                      {taskRecommendations.some((rec) => rec.note) && (
+                        <div className="mt-1.5 text-[10.5px] text-amber-300/80">{taskRecommendations.find((rec) => rec.note)?.note}</div>
+                      )}
+                    </>
+                  ) : (
+                    <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+                      Run <span className="font-semibold text-zinc-300">Check model health</span> in the Ollama section above and the best-fit local model for each task class appears here, derived from reported capabilities, context windows and loaded state.
+                    </p>
+                  )}
+                  <p className="mt-2 text-[10.5px] leading-relaxed text-zinc-600">
+                    Suggestions are metadata only, derived from the last health check and your current routing. Nothing is switched automatically — to apply one, set the provider and model in the per-task controls above.
+                  </p>
                 </div>
                 <p className="mt-3 text-[11px] leading-relaxed text-zinc-500">
                   Overrides are non-secret metadata stored with your preferences. Each provider keeps its own credential rules (Gemini key in the WebView, cloud/custom tokens in the OS credential store, Ollama none), host policy and bounds; a task routed to a native adapter is desktop-only and never falls back to Gemini. Vision can only be routed to Gemini because image input is wired there alone.
@@ -1007,7 +1183,7 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
           )}
 
           {/* ── Advanced ── */}
-          {tab === "advanced" && (
+          {activeTab === "advanced" && (
             <>
               <Card title="Export / import configuration" desc="Move your setup between machines.">
                 <div className="flex flex-wrap gap-2">

@@ -12,6 +12,13 @@ import {
   restoreReviewViewAnnotations, MAX_REVIEW_VIEW_NAME_CHARS, MAX_SAVED_REVIEW_VIEWS, type SavedReviewView,
 } from "../lib/reviewViews";
 import {
+  composeDraftWithHunkDecisions,
+  hunkRangeLabel,
+  reviewHunksFromLineChanges,
+  summarizeHunkDecisions,
+  type ReviewHunk,
+} from "../lib/hunkReview";
+import {
   applyReviewedDraftToWorkspace,
   closeWorkspace,
   createWorkspaceDirectory,
@@ -162,10 +169,23 @@ export function EditorPanel({
   const [diffChangeCount, setDiffChangeCount] = useState<number | null>(null);
   const [diffNavigationNotice, setDiffNavigationNotice] = useState("");
   const [draftReviewShortcutNotice, setDraftReviewShortcutNotice] = useState("");
+  // Phase 9T — per-draft change-block (hunk) accept/reject decisions and the
+  // hunk lists captured from the Monaco diff for each reviewed draft. Session-only
+  // in-memory state: the composed file is only ever written through the existing
+  // explicit "Apply reviewed draft" button.
+  const [reviewedDiffHunksByDraft, setReviewedDiffHunksByDraft] = useState<Record<string, ReviewHunk[]>>({});
+  const [droppedDraftHunks, setDroppedDraftHunks] = useState<Record<string, string[]>>({});
+  const [hunkCursor, setHunkCursor] = useState(0);
+  const [hunkDecisionNotice, setHunkDecisionNotice] = useState("");
   const ignoredEvents = useRef(new Map<string, number>());
   const eventTimer = useRef<number | null>(null);
   const reviewedDiffEditorRef = useRef<MonacoDiffEditor | null>(null);
   const reviewedDiffUpdateRef = useRef<{ dispose: () => void } | null>(null);
+  // Mirror of the per-draft hunk lists for stable keyboard-shortcut handlers.
+  const hunkListsRef = useRef<Record<string, ReviewHunk[]>>({});
+  useEffect(() => {
+    hunkListsRef.current = reviewedDiffHunksByDraft;
+  }, [reviewedDiffHunksByDraft]);
   const settings = loadSettings();
   const theme = getTheme(settings.theme);
 
@@ -181,8 +201,8 @@ export function EditorPanel({
   const selectedDraftKey = selectedDraft ? draftKey(selectedDraft, draftIndex) : "";
   const selectedDraftApplied = selectedDraftKey ? appliedDraftKeys.includes(selectedDraftKey) : false;
   const draftReviewSummary = useMemo(
-    () => summarizeReviewedDrafts(incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations),
-    [incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations],
+    () => summarizeReviewedDrafts(incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations, droppedDraftHunks),
+    [incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations, droppedDraftHunks],
   );
   const draftReviewFilterOptions = useMemo(
     () => buildReviewedDraftFilterOptions(draftReviewSummary),
@@ -198,20 +218,32 @@ export function EditorPanel({
   const selectedDraftAnnotation = selectedDraftKey ? draftReviewAnnotations[selectedDraftKey] : undefined;
   const selectedDraftAnnotationStatus = selectedDraftAnnotation?.status ?? "unreviewed";
   const selectedDraftAnnotationNote = selectedDraftAnnotation?.note ?? "";
-  const selectedDraftApplyBlockReason = selectedDraft
-    ? reviewedDraftApplyBlockReason({
-      working,
-      hasWorkspace: Boolean(workspace),
-      applied: selectedDraftApplied,
-      inspection: draftInspection?.key === selectedDraftKey ? draftInspection : null,
-    })
-    : "No reviewed draft is selected.";
   const selectedDraftDiffReady = Boolean(
     selectedDraft
     && draftInspection?.key === selectedDraftKey
     && draftInspection.status !== "loading"
     && draftInspection.status !== "error",
   );
+  // Phase 9T — hunk decisions for the currently selected reviewed draft.
+  const selectedDraftHunks = selectedDraftKey ? reviewedDiffHunksByDraft[selectedDraftKey] ?? [] : [];
+  const selectedDroppedHunks = selectedDraftKey ? droppedDraftHunks[selectedDraftKey] ?? [] : [];
+  const selectedHunkSummary = summarizeHunkDecisions(selectedDraftHunks, selectedDroppedHunks);
+  const selectedDraftHunkDecisionReady = Boolean(
+    selectedDraftDiffReady
+    && (draftInspection?.status === "new" || draftInspection?.status === "update"),
+  );
+  const selectedDraftApplyBlockReason = selectedDraft
+    ? reviewedDraftApplyBlockReason({
+      working,
+      hasWorkspace: Boolean(workspace),
+      applied: selectedDraftApplied,
+      inspection: draftInspection?.key === selectedDraftKey ? draftInspection : null,
+      newFileAllHunksDropped: selectedDraftHunkDecisionReady
+        && draftInspection?.status === "new"
+        && selectedHunkSummary.total > 0
+        && selectedHunkSummary.dropped === selectedHunkSummary.total,
+    })
+    : "No reviewed draft is selected.";
   const canNavigateReviewedDiff = Boolean(
     selectedDraftDiffReady
     && (diffChangeCount === null
@@ -245,6 +277,10 @@ export function EditorPanel({
       setDiffChangeCount(null);
       setDiffNavigationNotice("");
       setDraftReviewShortcutNotice("");
+      setReviewedDiffHunksByDraft({});
+      setDroppedDraftHunks({});
+      setHunkCursor(0);
+      setHunkDecisionNotice("");
       return;
     }
     setDraftReviewFilter("all");
@@ -261,6 +297,10 @@ export function EditorPanel({
     setDiffChangeCount(null);
     setDiffNavigationNotice("");
     setDraftReviewShortcutNotice("");
+    setReviewedDiffHunksByDraft({});
+    setDroppedDraftHunks({});
+    setHunkCursor(0);
+    setHunkDecisionNotice("");
     setDraftReviewOpen(true);
   }, [incomingDrafts]);
 
@@ -277,7 +317,13 @@ export function EditorPanel({
     }
     const lineChanges = editor.getLineChanges();
     setDiffChangeCount(lineChanges ? lineChanges.length : null);
-  }, []);
+    if (lineChanges && selectedDraftKey) {
+      // Keep a stable per-draft hunk list keyed by range so accept/reject
+      // decisions survive draft switching and diff re-computation.
+      const hunks = reviewHunksFromLineChanges(lineChanges);
+      setReviewedDiffHunksByDraft((current) => ({ ...current, [selectedDraftKey]: hunks }));
+    }
+  }, [selectedDraftKey]);
 
   const handleReviewedDiffMount = useCallback<DiffOnMount>((editor) => {
     reviewedDiffEditorRef.current = editor;
@@ -285,6 +331,32 @@ export function EditorPanel({
     reviewedDiffUpdateRef.current = editor.onDidUpdateDiff(() => refreshReviewedDiffChangeCount(editor));
     refreshReviewedDiffChangeCount(editor);
   }, [refreshReviewedDiffChangeCount]);
+
+  const syncHunkCursorFromViewport = useCallback((editor: MonacoDiffEditor) => {
+    const hunks = hunkListsRef.current[selectedDraftKey] ?? [];
+    if (hunks.length === 0) return;
+    try {
+      const visible = editor.getModifiedEditor().getVisibleRanges();
+      if (!visible || visible.length === 0) return;
+      const top = visible[0].startLineNumber;
+      const bottom = visible[visible.length - 1].endLineNumber;
+      let best = -1;
+      let bestDistance = Number.POSITIVE_INFINITY;
+      for (const hunk of hunks) {
+        const hunkTop = Math.max(1, hunk.modifiedStartLineNumber);
+        const hunkBottom = Math.max(hunkTop, hunk.modifiedEndLineNumber);
+        if (hunkTop > bottom || hunkBottom < top) continue;
+        const distance = Math.abs(hunkTop - top);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = hunk.index;
+        }
+      }
+      if (best >= 0) setHunkCursor(best);
+    } catch {
+      // View-only helper; the hunk cursor keeps its previous value.
+    }
+  }, [selectedDraftKey]);
 
   const navigateReviewedDiffChange = useCallback((target: DiffNavigationTarget): boolean => {
     const editor = reviewedDiffEditorRef.current;
@@ -299,9 +371,10 @@ export function EditorPanel({
       return false;
     }
     editor.goToDiff(target);
+    syncHunkCursorFromViewport(editor);
     setDiffNavigationNotice(`${target === "next" ? "Next" : "Previous"} change selected in the read-only diff. Apply still requires the explicit reviewed-draft button.`);
     return true;
-  }, []);
+  }, [syncHunkCursorFromViewport]);
 
   const moveSelectedDraftInFilteredQueue = useCallback((direction: DiffNavigationTarget) => {
     if (filteredDraftEntries.length === 0) {
@@ -317,6 +390,54 @@ export function EditorPanel({
     setDraftIndex(nextDraft.index);
     setDraftReviewShortcutNotice(`${direction === "next" ? "Next" : "Previous"} reviewed draft selected in the ${activeDraftReviewFilter?.label ?? "current"} filter. Apply still requires the explicit reviewed-draft button.`);
   }, [activeDraftReviewFilter?.label, draftIndex, filteredDraftEntries]);
+
+  // Phase 9T — per-change-block accept/reject. Decisions are session-only UI
+  // state; they only change the content the explicit Apply button would write.
+  const setSelectedDraftHunkDecision = useCallback((hunk: ReviewHunk, decision: "keep" | "drop") => {
+    if (!selectedDraftKey || !selectedDraft) return;
+    setDroppedDraftHunks((current) => {
+      const dropped = new Set(current[selectedDraftKey] ?? []);
+      if (decision === "drop") dropped.add(hunk.key);
+      else dropped.delete(hunk.key);
+      return { ...current, [selectedDraftKey]: [...dropped] };
+    });
+    setHunkDecisionNotice(decision === "drop"
+      ? `Change block ${hunk.index + 1} dropped: the original lines are kept and the generated lines are discarded in the composed file. Nothing was written.`
+      : `Change block ${hunk.index + 1} kept: the generated draft lines are used in the composed file. Nothing was written.`);
+  }, [selectedDraft, selectedDraftKey]);
+
+  const applyCursorHunkDecision = useCallback((decision: "keep" | "drop"): boolean => {
+    const hunks = hunkListsRef.current[selectedDraftKey] ?? [];
+    if (hunks.length === 0) {
+      setHunkDecisionNotice("No change blocks are available yet for this reviewed draft; the read-only diff is still computing.");
+      return false;
+    }
+    const hunk = hunks[Math.min(Math.max(0, hunkCursor), hunks.length - 1)];
+    setSelectedDraftHunkDecision(hunk, decision);
+    return true;
+  }, [hunkCursor, selectedDraftKey, setSelectedDraftHunkDecision]);
+
+  const resetSelectedDraftHunkDecisions = useCallback(() => {
+    if (!selectedDraftKey || !selectedDraft) return;
+    setDroppedDraftHunks((current) => {
+      if (!current[selectedDraftKey]) return current;
+      const next = { ...current };
+      delete next[selectedDraftKey];
+      return next;
+    });
+    setHunkDecisionNotice(`Change-block decisions were reset for ${selectedDraft.path}: the generated draft is used in full again. Nothing was written.`);
+  }, [selectedDraft, selectedDraftKey]);
+
+  const jumpToDraftHunk = useCallback((hunk: ReviewHunk) => {
+    setHunkCursor(hunk.index);
+    const editor = reviewedDiffEditorRef.current;
+    if (!editor) return;
+    try {
+      void editor.getModifiedEditor().revealLineInCenterIfOutsideViewport(Math.max(1, hunk.modifiedStartLineNumber));
+    } catch {
+      // View-only helper; the hunk row still records the cursor position.
+    }
+  }, []);
 
   useEffect(() => {
     if (!draftReviewOpen) return;
@@ -341,16 +462,30 @@ export function EditorPanel({
       } else if (key === "k") {
         event.preventDefault();
         moveSelectedDraftInFilteredQueue("previous");
+      } else if (key === "a") {
+        event.preventDefault();
+        const decided = applyCursorHunkDecision("keep");
+        setDraftReviewShortcutNotice(decided
+          ? "Keyboard shortcut Alt+A kept the change block at the cursor. Apply still requires the explicit reviewed-draft button."
+          : "Keyboard shortcut Alt+A requested keeping the cursor change block, but no change blocks are available yet.");
+      } else if (key === "r") {
+        event.preventDefault();
+        const decided = applyCursorHunkDecision("drop");
+        setDraftReviewShortcutNotice(decided
+          ? "Keyboard shortcut Alt+R dropped the change block at the cursor. Apply still requires the explicit reviewed-draft button."
+          : "Keyboard shortcut Alt+R requested dropping the cursor change block, but no change blocks are available yet.");
       }
     }
     window.addEventListener("keydown", handleReviewedDraftShortcuts);
     return () => window.removeEventListener("keydown", handleReviewedDraftShortcuts);
-  }, [draftReviewOpen, moveSelectedDraftInFilteredQueue, navigateReviewedDiffChange]);
+  }, [applyCursorHunkDecision, draftReviewOpen, moveSelectedDraftInFilteredQueue, navigateReviewedDiffChange]);
 
   useEffect(() => {
     setDiffChangeCount(null);
     setDiffNavigationNotice("");
     setDraftReviewShortcutNotice("");
+    setHunkCursor(0);
+    setHunkDecisionNotice("");
   }, [selectedDraftKey]);
 
   useEffect(() => () => {
@@ -698,7 +833,23 @@ export function EditorPanel({
       setError("The reviewed draft does not have a valid workspace-relative path.");
       return;
     }
-    if (!confirm(`Apply the reviewed draft to ${path}? This writes to the selected workspace.`)) return;
+    // Phase 9T — compose the file the reviewer approved. With no dropped change
+    // blocks this is byte-identical to the generated draft, so the existing
+    // explicit write path (same native command, same revision check) is reused.
+    const appliedDraftKey = draftKey(draft, draftIndex);
+    const hunkDecisions = droppedDraftHunks[appliedDraftKey] ?? [];
+    const hunkList = reviewedDiffHunksByDraft[appliedDraftKey] ?? [];
+    const hunkDecisionSummary = summarizeHunkDecisions(hunkList, hunkDecisions);
+    const composed = composeDraftWithHunkDecisions({
+      originalContent: draftInspection?.key === appliedDraftKey ? draftInspection.originalContent : "",
+      modifiedContent: draft.content,
+      hunks: hunkList,
+      droppedKeys: hunkDecisions,
+    });
+    const hunkSummaryPhrase = hunkDecisionSummary.dropped > 0
+      ? ` ${hunkDecisionSummary.dropped} of ${hunkDecisionSummary.total} change block${hunkDecisionSummary.total === 1 ? "" : "s"} is${hunkDecisionSummary.dropped === 1 ? "" : " are"} dropped, so the composed file (kept blocks plus original lines) is written instead of the generated draft.`
+      : "";
+    if (!confirm(`Apply the reviewed draft to ${path}?${hunkSummaryPhrase} This writes to the selected workspace.`)) return;
 
     setWorking(true);
     setError("");
@@ -708,18 +859,18 @@ export function EditorPanel({
       let saved: WorkspaceDocument;
       let action: "Created" | "Updated" = "Created";
       try {
-        saved = await applyReviewedDraftToWorkspace(path, draft.content, null);
+        saved = await applyReviewedDraftToWorkspace(path, composed.content, null);
       } catch (commandError) {
         if (!(commandError instanceof WorkspaceCommandError) || commandError.code !== "revision_required") {
           throw commandError;
         }
         const existing = await readWorkspaceFile(path);
-        if (!confirm(`${path} already exists. Replace it with this reviewed draft using a native revision check?`)) {
+        if (!confirm(`${path} already exists. Replace it with ${hunkDecisionSummary.dropped > 0 ? "the composed file" : "this reviewed draft"} using a native revision check?`)) {
           ignoredEvents.current.delete(path);
           return;
         }
         ignoredEvents.current.set(path, Date.now() + 2_000);
-        saved = await applyReviewedDraftToWorkspace(path, draft.content, existing.revision);
+        saved = await applyReviewedDraftToWorkspace(path, composed.content, existing.revision);
         action = "Updated";
       }
 
@@ -731,13 +882,12 @@ export function EditorPanel({
       setActivePath(path);
       setCurrentDirectory(parentPath(path));
       setRefreshVersion((version) => version + 1);
-      const appliedKey = draftKey(draft, draftIndex);
-      const appliedRecord = buildReviewedDraftApplicationRecord(draft, draftIndex, appliedKey, action, saved);
-      const nextAppliedKeys = appliedDraftKeys.includes(appliedKey)
+      const appliedRecord = buildReviewedDraftApplicationRecord(draft, draftIndex, appliedDraftKey, action, saved, composed.content);
+      const nextAppliedKeys = appliedDraftKeys.includes(appliedDraftKey)
         ? appliedDraftKeys
-        : [...appliedDraftKeys, appliedKey];
+        : [...appliedDraftKeys, appliedDraftKey];
       setAppliedDraftKeys(nextAppliedKeys);
-      setAppliedDraftRecords((current) => ({ ...current, [appliedKey]: appliedRecord }));
+      setAppliedDraftRecords((current) => ({ ...current, [appliedDraftKey]: appliedRecord }));
       // Metadata-only outcome for the session apply ledger shared with Project Builder; no contents are passed.
       onDraftApplied?.({
         path: appliedRecord.path,
@@ -750,10 +900,22 @@ export function EditorPanel({
       });
       setVerificationPlan(null);
       setVerificationNotice(null);
+      // The applied draft's hunk decisions have been consumed by the write;
+      // keep decisions for other drafts in the queue.
+      setDroppedDraftHunks((current) => {
+        if (!current[appliedDraftKey]) return current;
+        const next = { ...current };
+        delete next[appliedDraftKey];
+        return next;
+      });
+      setHunkCursor(0);
+      setHunkDecisionNotice("");
       const nextDraftIndex = nextUnappliedDraftIndex(incomingDrafts, nextAppliedKeys, draftIndex);
       if (nextDraftIndex >= 0) setDraftIndex(nextDraftIndex);
       else setDraftReviewOpen(false);
-      setNotice(`${action} ${path} from a reviewed draft. This action was recorded in the native agent audit log.`);
+      setNotice(hunkDecisionSummary.dropped > 0
+        ? `${action} ${path} from a composed reviewed draft (${hunkDecisionSummary.dropped} of ${hunkDecisionSummary.total} change blocks dropped). This action was recorded in the native agent audit log.`
+        : `${action} ${path} from a reviewed draft. This action was recorded in the native agent audit log.`);
     } catch (commandError) {
       ignoredEvents.current.delete(path);
       setError(errorMessage(commandError));
@@ -773,7 +935,7 @@ export function EditorPanel({
       return;
     }
     try {
-      await navigator.clipboard.writeText(buildReviewedDraftSummaryExport(incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations));
+      await navigator.clipboard.writeText(buildReviewedDraftSummaryExport(incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations, droppedDraftHunks));
       const copyMessage = `Copied metadata for ${incomingDrafts.length} reviewed draft${incomingDrafts.length === 1 ? "" : "s"}.`;
       setDraftReviewCopyNotice({ kind: "ok", text: copyMessage });
       setNotice(copyMessage);
@@ -790,14 +952,14 @@ export function EditorPanel({
     setError("");
     try {
       const snapshot = await testRunnerSnapshot();
-      const plan = buildReviewedDraftVerificationPlan(incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations, snapshot);
+      const plan = buildReviewedDraftVerificationPlan(incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations, snapshot, undefined, droppedDraftHunks);
       setVerificationPlan(plan);
       setVerificationNotice({
         kind: "ok",
         text: `Discovered ${snapshot.profiles.length} backend-owned verification profile${snapshot.profiles.length === 1 ? "" : "s"}. Nothing was executed.`,
       });
     } catch (commandError) {
-      const plan = buildReviewedDraftVerificationPlan(incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations, null, errorMessage(commandError));
+      const plan = buildReviewedDraftVerificationPlan(incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations, null, errorMessage(commandError), droppedDraftHunks);
       setVerificationPlan(plan);
       setVerificationNotice({
         kind: "error",
@@ -809,7 +971,7 @@ export function EditorPanel({
   }
 
   async function copyVerificationPlan() {
-    const plan = verificationPlan ?? buildReviewedDraftVerificationPlan(incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations, null);
+    const plan = verificationPlan ?? buildReviewedDraftVerificationPlan(incomingDrafts, appliedDraftKeys, appliedDraftRecords, draftReviewAnnotations, null, undefined, droppedDraftHunks);
     setVerificationNotice(null);
     if (!navigator.clipboard?.writeText) {
       setVerificationNotice({ kind: "error", text: "Clipboard access is unavailable in this environment. Nothing was copied." });
@@ -1385,7 +1547,7 @@ export function EditorPanel({
                     Filters are session-only UI state. They hide or show draft rows for review but do not change generated content, write files, run commands or alter apply requirements.
                   </p>
                   <div className="mt-2 rounded-lg border border-white/10 bg-white/[0.025] px-2 py-1.5 text-[10px] leading-relaxed text-zinc-500">
-                    Keyboard shortcuts: <span className="font-mono text-zinc-300">Alt+N/P</span> move between read-only diff changes; <span className="font-mono text-zinc-300">Alt+J/K</span> move through visible drafts in this filter. Shortcuts are ignored while typing notes and never apply files.
+                    Keyboard shortcuts: <span className="font-mono text-zinc-300">Alt+N/P</span> move between read-only diff changes; <span className="font-mono text-zinc-300">Alt+A/R</span> keep or drop the change block at the cursor; <span className="font-mono text-zinc-300">Alt+J/K</span> move through visible drafts in this filter. Shortcuts are ignored while typing notes and never apply files.
                   </div>
                   {draftReviewShortcutNotice && (
                     <div className="mt-2 text-[10px] leading-relaxed text-violet-200/75">
@@ -1642,6 +1804,70 @@ export function EditorPanel({
                         {diffNavigationNotice}
                       </div>
                     )}
+                    {selectedDraftHunks.length > 0 && (
+                      <div className="border-b border-white/10 bg-black/20 px-3 py-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="min-w-0 text-[10.5px] font-semibold text-zinc-300">
+                            Change blocks · {selectedHunkSummary.kept} kept / {selectedHunkSummary.dropped} dropped of {selectedHunkSummary.total}
+                            {selectedHunkSummary.dropped > 0 ? " · Apply writes the composed file, not the generated draft" : ""}
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            <span className="font-mono text-[10px] text-zinc-600">
+                              cursor {Math.min(Math.max(1, hunkCursor + 1), selectedHunkSummary.total)}/{selectedHunkSummary.total}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={resetSelectedDraftHunkDecisions}
+                              disabled={selectedHunkSummary.dropped === 0}
+                              title="Restore every change block to kept for this draft"
+                              className="rounded-lg border border-white/10 px-2 py-1 text-[10px] font-semibold text-zinc-400 hover:bg-white/5 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              Reset decisions
+                            </button>
+                          </div>
+                        </div>
+                        <div className="mt-2 flex max-h-32 flex-col gap-1 overflow-y-auto pr-1">
+                          {selectedDraftHunks.map((hunk) => {
+                            const isDropped = selectedDroppedHunks.includes(hunk.key);
+                            const isCurrent = hunk.index === hunkCursor;
+                            return (
+                              <div
+                                key={hunk.key}
+                                className={`flex items-center gap-2 rounded-md border px-2 py-1 ${isDropped ? "border-rose-500/25 bg-rose-500/[0.06]" : "border-white/10 bg-white/[0.02]"} ${isCurrent ? "ring-1 ring-cyan-400/50" : ""}`}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => jumpToDraftHunk(hunk)}
+                                  title={`Jump to change block ${hunk.index + 1}`}
+                                  className="min-w-0 flex-1 truncate text-left font-mono text-[10px] text-zinc-300 hover:text-cyan-200"
+                                >
+                                  #{hunk.index + 1} · {hunkRangeLabel(hunk)} · +{hunk.addedLines} -{hunk.removedLines}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedDraftHunkDecision(hunk, "keep")}
+                                  disabled={!isDropped}
+                                  className="rounded border border-emerald-400/25 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-200 hover:bg-emerald-400/10 disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                  {isDropped ? "Keep" : "Kept"}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedDraftHunkDecision(hunk, "drop")}
+                                  disabled={isDropped}
+                                  className="rounded border border-rose-400/25 px-1.5 py-0.5 text-[9.5px] font-semibold text-rose-200 hover:bg-rose-400/10 disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                  {isDropped ? "Dropped" : "Drop"}
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        {hunkDecisionNotice && (
+                          <div className="mt-2 text-[10.5px] leading-relaxed text-violet-200/75">{hunkDecisionNotice}</div>
+                        )}
+                      </div>
+                    )}
                     <div className="h-72 min-h-0">
                       <DiffEditor
                         original={draftInspection.originalContent}
@@ -1743,6 +1969,14 @@ export function EditorPanel({
                   <div className="mt-1 font-mono text-[10.5px] text-amber-100/50">
                     Review progress: {draftReviewSummary.appliedCount}/{draftReviewSummary.fileCount} applied · {draftReviewSummary.pendingCount} pending · metadata only in copied summaries.
                   </div>
+                  {selectedDraftHunks.length > 0 && !selectedDraftApplied && (
+                    <div className={`mt-1 font-mono text-[10.5px] ${selectedHunkSummary.dropped > 0 ? "text-violet-200/80" : "text-amber-100/50"}`}>
+                      Change blocks: {selectedHunkSummary.kept} kept / {selectedHunkSummary.dropped} dropped of {selectedHunkSummary.total}
+                      {selectedHunkSummary.dropped > 0
+                        ? " · the explicit Apply button writes the in-memory composed file"
+                        : " · the explicit Apply button writes the generated draft"}
+                    </div>
+                  )}
                   {selectedDraftApplication && (
                     <div className="mt-1 font-mono text-[10.5px] text-emerald-200/70">
                       Applied ledger: {selectedDraftApplication.action} · {formatReviewTime(selectedDraftApplication.appliedAtMs)} · revision {selectedDraftApplication.revision.slice(0, 12)} · {formatBytes(selectedDraftApplication.size)}.
@@ -1813,6 +2047,9 @@ interface ReviewedDraftSummaryItem {
   reviewNote?: string;
   reviewNoteChars: number;
   reviewUpdatedAtMs?: number;
+  // Phase 9T — number of change-block (hunk) drop decisions recorded in this
+  // review session for the draft; 0 means the generated draft applies in full.
+  droppedHunkCount: number;
   application?: ReviewedDraftApplicationRecord;
 }
 
@@ -1844,6 +2081,7 @@ function summarizeReviewedDrafts(
   appliedKeys: string[],
   appliedRecords: Record<string, ReviewedDraftApplicationRecord>,
   annotations: Record<string, ReviewedDraftAnnotation> = {},
+  hunkDecisions: Record<string, string[]> = {},
 ): ReviewedDraftSummary {
   const files = drafts.map((draft, index) => {
     const key = draftKey(draft, index);
@@ -1860,6 +2098,7 @@ function summarizeReviewedDrafts(
       reviewNote,
       reviewNoteChars: reviewNote?.length ?? 0,
       reviewUpdatedAtMs: annotation?.updatedAtMs,
+      droppedHunkCount: (hunkDecisions[key] ?? []).length,
       application: appliedRecords[key],
     };
   });
@@ -1915,12 +2154,13 @@ function buildReviewedDraftSummaryExport(
   appliedKeys: string[],
   appliedRecords: Record<string, ReviewedDraftApplicationRecord>,
   annotations: Record<string, ReviewedDraftAnnotation> = {},
+  hunkDecisions: Record<string, string[]> = {},
 ): string {
-  const summary = summarizeReviewedDrafts(drafts, appliedKeys, appliedRecords, annotations);
+  const summary = summarizeReviewedDrafts(drafts, appliedKeys, appliedRecords, annotations, hunkDecisions);
   return JSON.stringify({
     label: "DevLab reviewed-draft Editor summary",
     generatedAt: new Date().toISOString(),
-    note: "Metadata only. Draft contents are omitted; workspace writes require explicit per-file Editor apply. Session review annotation notes are included only because this copy action was explicit.",
+    note: "Metadata only. Draft contents are omitted; workspace writes require explicit per-file Editor apply. Session review annotation notes and per-draft droppedHunkCount change-block decisions are included only because this copy action was explicit; droppedHunkCount 0 means the generated draft applies in full.",
     fileCount: summary.fileCount,
     appliedCount: summary.appliedCount,
     pendingCount: summary.pendingCount,
@@ -1938,8 +2178,9 @@ function buildReviewedDraftVerificationPlan(
   annotations: Record<string, ReviewedDraftAnnotation> = {},
   snapshot: TestRunnerSnapshot | null,
   unavailableReason?: string,
+  hunkDecisions: Record<string, string[]> = {},
 ): ReviewedDraftVerificationPlan {
-  const draftSummary = summarizeReviewedDrafts(drafts, appliedKeys, appliedRecords, annotations);
+  const draftSummary = summarizeReviewedDrafts(drafts, appliedKeys, appliedRecords, annotations, hunkDecisions);
   const affectedPaths = draftSummary.files.map((file) => file.path);
   const recommendedProfiles = snapshot
     ? recommendVerificationProfiles(snapshot.profiles, affectedPaths)
@@ -1975,14 +2216,17 @@ function buildReviewedDraftApplicationRecord(
   key: string,
   action: "Created" | "Updated",
   saved: WorkspaceDocument,
+  contentWritten: string,
 ): ReviewedDraftApplicationRecord {
   return {
     key,
     index,
     path: normalizeDraftPath(draft.path) || draft.path,
     language: draft.language || languageForDraftPath(draft.path),
-    bytes: textBytes(draft.content),
-    lines: countLines(draft.content),
+    // Bytes/lines describe the content actually written, which is the
+    // generated draft or the in-memory composed file after hunk decisions.
+    bytes: textBytes(contentWritten),
+    lines: countLines(contentWritten),
     action,
     appliedAtMs: Date.now(),
     revision: saved.revision,
@@ -2009,17 +2253,20 @@ function reviewedDraftApplyBlockReason({
   hasWorkspace,
   applied,
   inspection,
+  newFileAllHunksDropped,
 }: {
   working: boolean;
   hasWorkspace: boolean;
   applied: boolean;
   inspection: DraftInspection | null;
+  newFileAllHunksDropped?: boolean;
 }): string {
   if (working) return "Another workspace operation is still running.";
   if (!hasWorkspace) return "Select a workspace before applying reviewed drafts.";
   if (applied) return "This reviewed draft has already been applied in this review session.";
   if (!inspection || inspection.status === "loading") return "Wait for the workspace comparison to finish before applying.";
   if (inspection.status === "error") return "Resolve or recompare the draft before applying.";
+  if (newFileAllHunksDropped) return "Every change block is dropped, so applying this new-file draft would create an empty file. Keep at least one block or reset the decisions.";
   return "";
 }
 

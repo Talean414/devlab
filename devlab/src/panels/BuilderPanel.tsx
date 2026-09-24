@@ -146,6 +146,9 @@ export function BuilderPanel({
   const [verificationLoading, setVerificationLoading] = useState(false);
   const [verificationNotice, setVerificationNotice] = useState("");
   const settings = loadSettings();
+  // Basic mode hides expert metadata (spec pack, DAG metadata, ledgers, verification handoff, run
+  // timeline) while the plan -> generate -> stage -> apply flow stays identical. Settings > Layout.
+  const advancedMode = settings.uiMode === "advanced";
   const specPreview = plan ? buildSpecMetadataPreview(plan, brief) : null;
   const taskPlanPreview = plan ? buildTaskPlanPreview(plan, builtFiles) : null;
   const taskApplyProgress = taskPlanPreview ? buildTaskApplyProgress(taskPlanPreview, builtFiles, applyOutcomes) : null;
@@ -694,6 +697,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
               </button>
             </div>
 
+            {advancedMode && (
             <div className="mt-7 rounded-xl border border-violet-500/20 bg-violet-500/[0.06] p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">
@@ -781,6 +785,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
               )}
               {specNotice && <div className="mt-3 text-[12px] text-emerald-300">{specNotice}</div>}
             </div>
+            )}
 
             {taskPlanPreview && (
               <div className="mt-4 rounded-xl border border-cyan-500/20 bg-cyan-500/[0.05] p-4">
@@ -794,6 +799,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                       Turn the approved plan into discrete sequential batches. Each batch only generates missing in-memory drafts for its assigned file targets; commands remain references, and workspace writes still require Editor reviewed apply.
                     </p>
                   </div>
+                  {advancedMode && (
                   <div className="flex flex-wrap gap-2">
                     <button
                       onClick={() => { void copyTaskPlanPreview(); }}
@@ -808,6 +814,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                       <Copy className="h-3.5 w-3.5" /> Copy handoff ledger
                     </button>
                   </div>
+                  )}
                 </div>
                 <div className="mt-3 grid gap-2 text-[11.5px] sm:grid-cols-4">
                   <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-cyan-100/65">
@@ -898,12 +905,14 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                             </div>
                           </div>
                           <div className="flex shrink-0 flex-wrap gap-2">
+                            {advancedMode && (
                             <button
                               onClick={() => { void copyTaskHandoffPreview(task.id); }}
                               className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-400/20"
                             >
                               <Copy className="h-3.5 w-3.5" /> Copy handoff
                             </button>
+                            )}
                             <button
                               onClick={() => { void generateTaskFiles(task.id); }}
                               disabled={!canGenerateTask}
@@ -923,6 +932,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                             </button>
                           </div>
                         </div>
+                        {advancedMode && (
                         <details className="mt-2 text-[11px] text-cyan-100/60">
                           <summary className="cursor-pointer select-none text-cyan-100/80">Acceptance and review gate</summary>
                           <div className="mt-2 grid gap-2 sm:grid-cols-2">
@@ -960,6 +970,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                             </div>
                           </div>
                         </details>
+                        )}
                       </div>
                     );
                   })}
@@ -968,6 +979,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                 {taskHandoffNotice && <div className="mt-2 text-[12px] text-emerald-300">{taskHandoffNotice}</div>}
                 {taskStagingNotice && <div className="mt-2 text-[12px] text-emerald-300">{taskStagingNotice}</div>}
 
+                {advancedMode && (
                 <details className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/[0.04] p-3 text-[11.5px] text-emerald-100/70">
                   <summary className="flex cursor-pointer select-none flex-wrap items-center justify-between gap-2 text-emerald-100">
                     <span className="inline-flex items-center gap-2 font-semibold">
@@ -1006,8 +1018,9 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                     <span className="text-[10.5px] text-emerald-100/50">Staging is not apply; Editor reviewed-draft apply remains the only write path.</span>
                   </div>
                 </details>
+                )}
 
-                {verificationHandoff && (
+                {advancedMode && verificationHandoff && (
                   <details className="mt-3 rounded-lg border border-violet-500/20 bg-violet-500/[0.04] p-3 text-[11.5px] text-violet-100/70" open={verificationHandoff.appliedTaskCount > 0}>
                     <summary className="flex cursor-pointer select-none flex-wrap items-center justify-between gap-2 text-violet-100">
                       <span className="inline-flex items-center gap-2 font-semibold">
@@ -1110,7 +1123,7 @@ Output ONLY the raw file contents. No markdown fences, no explanation, no commen
                   </details>
                 )}
 
-                {taskTimeline && (
+                {advancedMode && taskTimeline && (
                   <details className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/[0.04] p-3 text-[11.5px] text-sky-100/70">
                     <summary className="flex cursor-pointer select-none flex-wrap items-center justify-between gap-2 text-sky-100">
                       <span className="inline-flex items-center gap-2 font-semibold">

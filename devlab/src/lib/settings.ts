@@ -40,9 +40,17 @@ export type TaskProviderOverrides = Partial<Record<
   TaskProviderOverride
 >>;
 
+/** What DevLab does when saved session-recovery data is found at launch. */
+export type SessionRecoveryPreference = "ask" | "continue" | "discard";
+
+/** How much of the DevLab surface is shown: everyday essentials, or every panel and metadata view. */
+export type UiMode = "basic" | "advanced";
+
 export interface DevLabSettings {
   theme: ThemeId;
   density: Density;
+  /** interface mode: "basic" shows only panels flagged basic; "advanced" keeps the full surface */
+  uiMode: UiMode;
   /** panels the user wants visible in the activity bar */
   visiblePanels: ViewId[];
   autonomy: Autonomy;
@@ -53,6 +61,8 @@ export interface DevLabSettings {
   allowGitPush: boolean;
   allowDeploy: boolean;
   showWelcomeOnStart: boolean;
+  /** Launch behavior when previous-session recovery data exists. */
+  recoveryPreference: SessionRecoveryPreference;
   showStatusBar: boolean;
   showTooltips: boolean;
   fontSize: number;
@@ -76,32 +86,53 @@ export interface DevLabSettings {
   systemPrompt: string;
 }
 
-export const ALL_PANELS: { id: ViewId; label: string; core?: boolean }[] = [
-  { id: "welcome",  label: "Home", core: true },
-  { id: "agent",    label: "AI Agent", core: true },
-  { id: "builder",  label: "Project Builder" },
+export const ALL_PANELS: { id: ViewId; label: string; core?: boolean; basic?: boolean }[] = [
+  { id: "welcome",  label: "Home", core: true, basic: true },
+  { id: "agent",    label: "AI Agent", core: true, basic: true },
+  { id: "builder",  label: "Project Builder", basic: true },
   { id: "canvas",   label: "Architecture Canvas" },
-  { id: "editor",   label: "Code Editor" },
-  { id: "healer",   label: "Self-Healing Tests" },
-  { id: "migrate",  label: "DB Migrations" },
+  { id: "editor",   label: "Code Editor", basic: true },
+  { id: "healer",   label: "Self-Healing Tests", basic: true },
+  { id: "migrate",  label: "DB Migrations", basic: true },
   { id: "vision",   label: "Reverse Engineer" },
   { id: "live",     label: "Live Share" },
-  { id: "explorer", label: "Templates" },
-  { id: "terminal", label: "Terminal" },
-  { id: "git",      label: "Source Control" },
+  { id: "explorer", label: "Templates", basic: true },
+  { id: "terminal", label: "Terminal", basic: true },
+  { id: "git",      label: "Source Control", basic: true },
   { id: "cicd",     label: "CI / CD" },
   { id: "deploy",   label: "Deploy" },
   { id: "database", label: "Database" },
   { id: "api",      label: "API Client" },
   { id: "docker",   label: "Containers" },
-  { id: "preview",  label: "Live Preview" },
+  { id: "preview",  label: "Live Preview", basic: true },
   { id: "tools",    label: "Toolchain" },
-  { id: "setup",    label: "Local Setup" },
+  { id: "setup",    label: "Local Setup", basic: true },
 ];
+
+/** Onboarding and docs surfaces: resuming a session into one of these is not a work context. */
+const LANDING_VIEWS: ViewId[] = ["welcome", "setup"];
+
+/** Panel to restore when resuming a session: landing surfaces clamp to the AI Agent,
+ * and a resumed panel the sidebar currently hides falls back to the AI Agent as well. */
+export function resumeViewFor(view: ViewId, visiblePanels: ViewId[]): ViewId {
+  const candidate = LANDING_VIEWS.includes(view) ? "agent" : view;
+  return visiblePanels.includes(candidate) ? candidate : "agent";
+}
+
+/** Panels the sidebar shows for the current interface mode: advanced mode returns the user's
+ * visible-panels list; basic mode intersects it with panels flagged basic in ALL_PANELS. */
+export function effectiveVisiblePanels(settings: Pick<DevLabSettings, "uiMode" | "visiblePanels">): ViewId[] {
+  const known = new Set(ALL_PANELS.map((p) => p.id));
+  const requested = settings.visiblePanels.filter((id) => known.has(id));
+  if (settings.uiMode === "advanced") return requested;
+  const basic = new Set(ALL_PANELS.filter((p) => p.basic).map((p) => p.id));
+  return requested.filter((id) => basic.has(id));
+}
 
 export const DEFAULT_SETTINGS: DevLabSettings = {
   theme: "midnight",
   density: "comfortable",
+  uiMode: "basic",
   visiblePanels: ALL_PANELS.map((p) => p.id),
   autonomy: "suggest",
   allowWriteFiles: true,
@@ -109,7 +140,8 @@ export const DEFAULT_SETTINGS: DevLabSettings = {
   allowGitCommit: true,
   allowGitPush: false,
   allowDeploy: false,
-  showWelcomeOnStart: true,
+  showWelcomeOnStart: false,
+  recoveryPreference: "ask",
   showStatusBar: true,
   showTooltips: true,
   fontSize: 14,
@@ -130,12 +162,33 @@ export const DEFAULT_SETTINGS: DevLabSettings = {
 };
 
 const KEY = "devlab.settings.v1";
+// Written into the stored blob once one-time settings migrations have run, so each fires exactly once.
+const MIGRATION_KEY = "settingsMigration";
+const CURRENT_MIGRATION = 3;
+
+/** Pure, storage-free migration of a previously persisted settings blob toward current defaults. */
+export function migrateSettings(parsed: Record<string, unknown>): Record<string, unknown> {
+  const done = parsed[MIGRATION_KEY];
+  if (typeof done === "number" && done >= CURRENT_MIGRATION) return parsed;
+  let next = { ...parsed };
+  if (typeof done !== "number" || done < 2) {
+    // v1 -> v2: DevLab no longer forces the Home page on every launch for existing installs.
+    next = { ...next, showWelcomeOnStart: false };
+  }
+  if (typeof done !== "number" || done < 3) {
+    // v2 -> v3: interface modes arrive; existing installs keep the full surface they know.
+    // New installs start in basic mode via DEFAULT_SETTINGS and can switch any time.
+    next = { ...next, uiMode: "advanced" };
+  }
+  return { ...next, [MIGRATION_KEY]: CURRENT_MIGRATION };
+}
 
 export function loadSettings(): DevLabSettings {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    const migrated = migrateSettings(JSON.parse(raw) as Record<string, unknown>);
+    return { ...DEFAULT_SETTINGS, ...migrated } as DevLabSettings;
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
