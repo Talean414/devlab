@@ -8,7 +8,7 @@ import type { ModelInfo } from "../lib/gemini";
 import {
   loadSettings, saveSettings, DEFAULT_SETTINGS, THEMES, ALL_PANELS,
   type DevLabSettings, type ThemeId, type Autonomy, type Density, type AiProviderId, type ModelRoutingMode,
-  type SessionRecoveryPreference,
+  type SessionRecoveryPreference, type UiMode,
 } from "../lib/settings";
 import { starterBlueprintInstruction } from "../lib/generationBlueprints";
 import { componentScaffoldInstruction, designSystemInstruction, qualityChecklistInstruction, summarizeGenerationGuidance } from "../lib/generationGuidance";
@@ -49,11 +49,11 @@ import {
 } from "lucide-react";
 
 const TABS = [
-  { id: "appearance", label: "Appearance", Icon: Palette },
-  { id: "layout",     label: "Layout",     Icon: LayoutGrid },
-  { id: "agent",      label: "Agent",      Icon: Bot },
-  { id: "provider",   label: "Providers",  Icon: Cpu },
-  { id: "advanced",   label: "Advanced",   Icon: SlidersHorizontal },
+  { id: "appearance", label: "Appearance", Icon: Palette, basic: true },
+  { id: "layout",     label: "Layout",     Icon: LayoutGrid, basic: true },
+  { id: "agent",      label: "Agent",      Icon: Bot, basic: false },
+  { id: "provider",   label: "Providers",  Icon: Cpu, basic: true },
+  { id: "advanced",   label: "Advanced",   Icon: SlidersHorizontal, basic: false },
 ] as const;
 
 export function SettingsPanel({ onKeyChange, onSettingsChange }: {
@@ -62,6 +62,9 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
 }) {
   const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("appearance");
   const [s, setS] = useState<DevLabSettings>(loadSettings);
+  const advancedMode = s.uiMode === "advanced";
+  const visibleTabs = TABS.filter((t) => advancedMode || t.basic);
+  const activeTab = visibleTabs.some((t) => t.id === tab) ? tab : "appearance";
   const [key, setKey] = useState(getApiKey());
   const [model, setModelState] = useState(getModel());
   const [show, setShow] = useState(false);
@@ -384,7 +387,7 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
       <PanelHeader title="Settings" subtitle="Make DevLab exactly as big or as small as you need" />
 
       <div className="flex gap-5 border-b border-white/5 bg-[#0d1017]/40 px-6 text-xs">
-        {TABS.map((t) => (
+        {visibleTabs.map((t) => (
           <button key={t.id} onClick={() => setTab(t.id)}
             className={`-mb-px inline-flex items-center gap-1.5 border-b-2 px-1 py-3 font-medium ${
               tab === t.id ? "border-cyan-400 text-white" : "border-transparent text-zinc-500 hover:text-zinc-300"
@@ -398,7 +401,7 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
         <div className="mx-auto max-w-2xl space-y-6">
 
           {/* ── Appearance ── */}
-          {tab === "appearance" && (
+          {activeTab === "appearance" && (
             <>
               <Card title="Theme" desc="Re-skins the entire lab, including the code editor.">
                 <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
@@ -440,11 +443,31 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
           )}
 
           {/* ── Layout ── */}
-          {tab === "layout" && (
+          {activeTab === "layout" && (
             <>
+              <Card title="Interface mode" desc="How much of DevLab is on screen. Switch any time — nothing is uninstalled or lost.">
+                <div className="space-y-2">
+                  {([
+                    { id: "basic",    t: "Basic",    d: "The essentials: agent, editor, builder, git, terminal, preview and project setup. Advanced panels and metadata views stay hidden until you switch." },
+                    { id: "advanced", t: "Advanced", d: "The full DevLab surface: every panel, the task router, draft policies and builder/audit metadata." },
+                  ] as { id: UiMode; t: string; d: string }[]).map((o) => (
+                    <button key={o.id} onClick={() => update({ uiMode: o.id })}
+                      className={`flex w-full items-start gap-3 rounded-xl border p-3 text-left transition ${
+                        s.uiMode === o.id ? "border-cyan-500/50 bg-cyan-500/10" : "border-white/10 hover:bg-white/5"
+                      }`}>
+                      <span className={`mt-1 h-3 w-3 shrink-0 rounded-full border-2 ${s.uiMode === o.id ? "border-cyan-400 bg-cyan-400" : "border-zinc-600"}`} />
+                      <span>
+                        <span className="block text-[13px] font-medium text-zinc-100">{o.t}</span>
+                        <span className="block text-[12px] text-zinc-500">{o.d}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </Card>
+
               <Card title="Visible panels" desc="Hide anything you don't use — the sidebar shrinks to match.">
                 <div className="space-y-1">
-                  {ALL_PANELS.map((p) => {
+                  {ALL_PANELS.filter((p) => advancedMode || p.basic).map((p) => {
                     const on = s.visiblePanels.includes(p.id);
                     return (
                       <div key={p.id} className="flex items-center justify-between rounded-lg px-2 py-2 hover:bg-white/[0.03]">
@@ -462,9 +485,14 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
                     );
                   })}
                 </div>
+                {!advancedMode && (
+                  <p className="mt-3 rounded-lg border border-cyan-500/20 bg-cyan-500/[0.06] px-3 py-2 text-[11.5px] leading-relaxed text-cyan-100/70">
+                    Basic mode shows the essentials only. Switch to Advanced above for Canvas, Reverse Engineer, Live Share, CI / CD, Deploy, Database, API Client, Containers and Toolchain.
+                  </p>
+                )}
                 <div className="mt-3 flex gap-2">
-                  <button onClick={() => update({ visiblePanels: ALL_PANELS.map((p) => p.id) })}
-                    className="rounded-lg border border-white/10 px-3 py-1.5 text-[12px] text-zinc-300 hover:bg-white/5">Show all</button>
+                  <button onClick={() => update({ visiblePanels: ALL_PANELS.filter((p) => advancedMode || p.basic).map((p) => p.id) })}
+                    className="rounded-lg border border-white/10 px-3 py-1.5 text-[12px] text-zinc-300 hover:bg-white/5">{advancedMode ? "Show all" : "Show all basic panels"}</button>
                   <button onClick={() => update({ visiblePanels: ALL_PANELS.filter((p) => p.core).map((p) => p.id) })}
                     className="rounded-lg border border-white/10 px-3 py-1.5 text-[12px] text-zinc-300 hover:bg-white/5">Minimal</button>
                 </div>
@@ -506,7 +534,7 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
           )}
 
           {/* ── Agent ── */}
-          {tab === "agent" && (
+          {activeTab === "agent" && (
             <>
               <Card title="Autonomy level" desc="How much the agent may do without asking you first.">
                 <div className="space-y-2">
@@ -593,7 +621,7 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
           )}
 
           {/* ── Providers ── */}
-          {tab === "provider" && (
+          {activeTab === "provider" && (
             <>
               <div className="flex gap-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] p-4 text-[13px] text-amber-200/90">
                 <Shield className="mt-0.5 h-4 w-4 shrink-0" />
@@ -1155,7 +1183,7 @@ export function SettingsPanel({ onKeyChange, onSettingsChange }: {
           )}
 
           {/* ── Advanced ── */}
-          {tab === "advanced" && (
+          {activeTab === "advanced" && (
             <>
               <Card title="Export / import configuration" desc="Move your setup between machines.">
                 <div className="flex flex-wrap gap-2">

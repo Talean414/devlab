@@ -5,7 +5,7 @@ import { refreshCredentialCache } from "./lib/aiProviders";
 import type { AgentContextFile, BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, ChatMessage, DraftPolicyGateSummary, OpenGeneratedDrafts, ReviewedDraftApplyOutcome, VerificationHandoffRequest, VerificationRunOutcome, VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import {
-  loadDeploy, loadGit, loadSettings, saveSettings, applyTheme, getTheme, resumeViewFor,
+  loadDeploy, loadGit, loadSettings, saveSettings, applyTheme, getTheme, resumeViewFor, effectiveVisiblePanels,
   type DevLabSettings, type SessionRecoveryPreference,
 } from "./lib/settings";
 import { resolveAiRoute } from "./lib/modelRouting";
@@ -152,6 +152,7 @@ export default function App() {
   }, settings);
   const hasKey = aiRoute.status === "active" && (aiRoute.provider === "ollama" || aiRoute.provider === "custom" || !!getApiKey());
   const theme = getTheme(settings.theme);
+  const visiblePanels = effectiveVisiblePanels(settings);
 
   function navigate(next: ViewId) {
     if (
@@ -234,7 +235,8 @@ export default function App() {
         "5": "git", "6": "deploy", ",": "settings",
       };
       const t = map[e.key];
-      if (t) { e.preventDefault(); navigate(t); }
+      // Shortcuts never open a panel the current interface mode hides; settings stays one keystroke away.
+      if (t && (t === "settings" || effectiveVisiblePanels(loadSettings()).includes(t))) { e.preventDefault(); navigate(t); }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -306,7 +308,7 @@ export default function App() {
     setBuilderBuiltFiles(snapshot.builder?.builtFiles ?? []);
     setBuilderStaging(false);
     setBuilderStageNotice(snapshot.builder?.stageNotice ?? "");
-    setView(resumeViewFor(snapshot.view, settings.visiblePanels));
+    setView(resumeViewFor(snapshot.view, visiblePanels));
     finishRecoveryPrompt();
   }
 
@@ -336,7 +338,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const nav = NAV.filter((n) => settings.visiblePanels.includes(n.id));
+  const nav = NAV.filter((n) => visiblePanels.includes(n.id));
 
   const openGeneratedSource: OpenGeneratedDrafts = async (files, summary = "Generated reviewed drafts") => {
     if (files.length === 0) return false;
