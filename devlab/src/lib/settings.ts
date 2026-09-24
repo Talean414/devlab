@@ -104,6 +104,16 @@ export const ALL_PANELS: { id: ViewId; label: string; core?: boolean }[] = [
   { id: "setup",    label: "Local Setup" },
 ];
 
+/** Onboarding and docs surfaces: resuming a session into one of these is not a work context. */
+const LANDING_VIEWS: ViewId[] = ["welcome", "setup"];
+
+/** Panel to restore when resuming a session: landing surfaces clamp to the AI Agent,
+ * and a resumed panel the sidebar currently hides falls back to the AI Agent as well. */
+export function resumeViewFor(view: ViewId, visiblePanels: ViewId[]): ViewId {
+  const candidate = LANDING_VIEWS.includes(view) ? "agent" : view;
+  return visiblePanels.includes(candidate) ? candidate : "agent";
+}
+
 export const DEFAULT_SETTINGS: DevLabSettings = {
   theme: "midnight",
   density: "comfortable",

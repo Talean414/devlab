@@ -5,7 +5,7 @@ import { refreshCredentialCache } from "./lib/aiProviders";
 import type { AgentContextFile, BuilderPhase, BuilderPlan, BuilderTaskStagingRecord, ChatMessage, DraftPolicyGateSummary, OpenGeneratedDrafts, ReviewedDraftApplyOutcome, VerificationHandoffRequest, VerificationRunOutcome, VFile, ViewId } from "./types";
 import { getApiKey, getModel, getPicked, pickBestModel } from "./lib/gemini";
 import {
-  loadDeploy, loadGit, loadSettings, saveSettings, applyTheme, getTheme,
+  loadDeploy, loadGit, loadSettings, saveSettings, applyTheme, getTheme, resumeViewFor,
   type DevLabSettings, type SessionRecoveryPreference,
 } from "./lib/settings";
 import { resolveAiRoute } from "./lib/modelRouting";
@@ -306,7 +306,7 @@ export default function App() {
     setBuilderBuiltFiles(snapshot.builder?.builtFiles ?? []);
     setBuilderStaging(false);
     setBuilderStageNotice(snapshot.builder?.stageNotice ?? "");
-    setView(settings.visiblePanels.includes(snapshot.view) ? snapshot.view : "agent");
+    setView(resumeViewFor(snapshot.view, settings.visiblePanels));
     finishRecoveryPrompt();
   }
 
