@@ -580,7 +580,7 @@ fn health(endpoint: String) -> Result<CustomEndpointHealth, CommandError> {
     let http = HttpRequest {
         method: "GET".to_string(),
         url: format!("{}{MODELS_SUFFIX}", profile.id),
-        headers: health_headers(token.as_deref()),
+        headers: health_headers(token.as_ref().map(|t| t.as_str())),
         body: String::new(),
         timeout_secs: Some(HEALTH_TIMEOUT_SECS),
     };

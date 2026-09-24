@@ -56,7 +56,7 @@ use search_index::{
 };
 use custom_endpoint::{
     custom_credential_delete, custom_credential_status, custom_credential_store, custom_endpoint_chat,
-    custom_endpoint_chat_stream, custom_endpoint_validate,
+    custom_endpoint_chat_stream, custom_endpoint_health, custom_endpoint_validate,
 };
 use ai_stream::{ai_stream_cancel, StreamRegistry};
 use serde::Serialize;
